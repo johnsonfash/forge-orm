@@ -10,3 +10,6 @@ dist/
 .DS_Store
 *.log
 *.tsbuildinfo
+
+# Wave 5c — generated drift/reconciliation migrations (transient in this demo repo)
+migrations/
