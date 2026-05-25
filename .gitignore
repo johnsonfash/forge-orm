@@ -1,0 +1,12 @@
+node_modules/
+dist/
+
+# Local environment overrides — never commit credentials or local URLs.
+.env
+.env.local
+.env.*.local
+
+# OS / editor noise
+.DS_Store
+*.log
+*.tsbuildinfo

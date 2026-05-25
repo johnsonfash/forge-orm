@@ -1,0 +1,68 @@
+{
+  "name": "@guide/forge",
+  "version": "0.1.0-wave0",
+  "private": true,
+  "description": "Forge — multi-database wrapper with Prisma-shape API. Selects adapter from connection-string prefix; drivers are optional peer dependencies.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "forge:doctor": "ts-node src/scripts/doctor.ts",
+    "forge:push": "ts-node src/scripts/push.ts",
+    "forge:test": "jest",
+    "forge:integration:pg": "ts-node --transpile-only --project tsconfig.json integration-pg.ts",
+    "forge:integration:mongo": "ts-node --transpile-only --project tsconfig.json integration-mongo.ts",
+    "forge:integration:mysql": "ts-node --transpile-only --project tsconfig.json integration-mysql.ts",
+    "forge:integration:sqlite": "ts-node --transpile-only --project tsconfig.json integration-sqlite.ts",
+    "forge:integration:sqlite:file": "SMOKE_SQLITE_URL=sqlite:./forge_smoke.db ts-node --transpile-only --project tsconfig.json integration-sqlite.ts",
+    "forge:integration": "npm run forge:integration:sqlite && npm run forge:integration:pg && npm run forge:integration:mysql && npm run forge:integration:mongo",
+    "forge:bench": "ts-node --transpile-only --project tsconfig.json bench/db-bench.ts",
+    "forge:bench:sqlite": "SKIP_PG=1 SKIP_MYSQL=1 SKIP_MONGO=1 ts-node --transpile-only --project tsconfig.json bench/db-bench.ts",
+    "forge:bench:pg": "SKIP_SQLITE=1 SKIP_MYSQL=1 SKIP_MONGO=1 ts-node --transpile-only --project tsconfig.json bench/db-bench.ts",
+    "forge:bench:mysql": "SKIP_SQLITE=1 SKIP_PG=1 SKIP_MONGO=1 ts-node --transpile-only --project tsconfig.json bench/db-bench.ts",
+    "forge:bench:mongo": "SKIP_SQLITE=1 SKIP_PG=1 SKIP_MYSQL=1 ts-node --transpile-only --project tsconfig.json bench/db-bench.ts",
+    "forge:typesafety": "tsc --noEmit --strict --target ES2022 --module commonjs --moduleResolution node --esModuleInterop --skipLibCheck typesafety-demo.ts",
+    "forge:autocomplete": "ts-node --transpile-only --project tsconfig.json autocomplete-probe.ts",
+    "forge:check": "npm run forge:test && npm run forge:typesafety && npm run forge:autocomplete",
+    "forge:all": "npm run forge:check && npm run forge:integration && npm run forge:bench"
+  },
+  "peerDependencies": {
+    "better-sqlite3": "^11.0.0",
+    "mongodb": "^6.0.0",
+    "mysql2": "^3.0.0",
+    "pg": "^8.0.0"
+  },
+  "peerDependenciesMeta": {
+    "mongodb": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    },
+    "mysql2": {
+      "optional": true
+    },
+    "better-sqlite3": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@nestjs/common": "^11.1.23",
+    "@prisma/client": "^7.8.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^25.9.1",
+    "@types/pg": "^8.20.0",
+    "better-sqlite3": "^12.10.0",
+    "dotenv": "^17.4.2",
+    "drizzle-kit": "^0.31.10",
+    "drizzle-orm": "^0.45.2",
+    "jest": "^30.4.2",
+    "mongodb": "^7.2.0",
+    "mysql2": "^3.22.3",
+    "pg": "^8.21.0",
+    "prisma": "^7.8.0",
+    "ts-jest": "^29.4.11",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}

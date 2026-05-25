@@ -1,0 +1,332 @@
+import type { FieldDef, IndexDef, ModelDef, RelationDef } from '../../schema/types';
+import type { SchemaMap } from '../../schema';
+import { PostgresDialect, type Dialect } from './dialect';
+
+// DDL generator — turns a Forge schema into the SQL statements that build the
+// physical Postgres tables, constraints, and indexes.
+//
+// Output is a list of statements you can run in order. The migration runner
+// (migrate.ts) wraps them in a transaction with an advisory lock so two
+// concurrent `forge:push` runs serialise instead of racing.
+//
+// What we emit per model:
+//   • CREATE TABLE IF NOT EXISTS "<collection>" (
+//       "<col>" <type> [NULL|NOT NULL] [DEFAULT ...],
+//       ...,
+//       PRIMARY KEY ("id")
+//     )
+//   • ALTER TABLE … ADD CONSTRAINT "<name>" UNIQUE ("col")      per field-unique
+//   • ALTER TABLE … ADD CONSTRAINT "<name>" UNIQUE (cols)       per composite
+//   • ALTER TABLE … ADD CONSTRAINT "<name>" FOREIGN KEY ("fk")  per relation
+//                   REFERENCES "<target>" ("refs")
+//                   ON DELETE CASCADE|SET NULL|NO ACTION|RESTRICT
+//   • ALTER TABLE … ADD CONSTRAINT "<name>" CHECK (col IN ('a', 'b', ...))   for enums
+//   • CREATE INDEX IF NOT EXISTS "<name>" ON …                  per @@index
+//
+// Design rules:
+//   • Constraint + index names are deterministic and prefixed (`<table>_*`) so
+//     diff-based migrations can find and reconcile them.
+//   • `IF NOT EXISTS` on every CREATE so first-time and incremental pushes use
+//     the same statement list. Constraints use a name lookup against
+//     pg_constraint to skip when already present (see migrate.ts).
+
+export interface DDLStatement {
+  // Logical kind helps the migration runner decide whether to skip on
+  // already-exists or to ALTER rather than emit fresh.
+  kind: 'table' | 'unique' | 'foreignKey' | 'check' | 'index';
+  sql: string;
+  // Deterministic name for the object this statement creates. Used by the
+  // migrator to look up "is this already applied?" in pg_class/pg_constraint.
+  name: string;
+  table: string;
+  // Drop SQL for full down-migration support. Wave 2c emits CREATE only; this
+  // is set up so Wave 2d's `forge:reset` can iterate in reverse.
+  dropSql?: string;
+}
+
+const RESERVED_INDEX_PREFIX = 'forge_';
+
+function tableConstraintName(table: string, kind: string, parts: string[]): string {
+  // Constraint names are 63-byte limited in PG; collapse long ones.
+  const raw = `${RESERVED_INDEX_PREFIX}${table}_${kind}_${parts.join('_')}`;
+  if (raw.length <= 60) return raw;
+  // Hash-collapse the tail when too long (deterministic per input).
+  let hash = 0;
+  for (let i = 0; i < raw.length; i++) hash = (hash * 31 + raw.charCodeAt(i)) | 0;
+  return `${RESERVED_INDEX_PREFIX}${table}_${kind}_${(hash >>> 0).toString(36)}`;
+}
+
+// ─── Per-model emission ─────────────────────────────────────────────────────
+
+export interface BuildDDLOptions {
+  dialect?: Dialect;
+}
+
+export function buildSchemaDDL(
+  schema: SchemaMap,
+  opts: BuildDDLOptions = {},
+): DDLStatement[] {
+  const d = opts.dialect ?? PostgresDialect;
+  const out: DDLStatement[] = [];
+
+  // Pass 1: tables (so FKs in pass 2 can reference them). Views go through
+  // a separate pass after tables so they can reference base tables.
+  for (const key of Object.keys(schema)) {
+    const m = (schema as any)[key] as ModelDef<any>;
+    if (!m) continue;
+    if (m.view) continue;       // views handled in pass 3
+    out.push(buildCreateTable(d, m));
+  }
+
+  // Pass 2: constraints (unique, FK, check) + indexes — tables only.
+  for (const key of Object.keys(schema)) {
+    const m = (schema as any)[key] as ModelDef<any>;
+    if (!m || m.view) continue;
+    out.push(...buildPerFieldUniques(d, m));
+    out.push(...buildCompositeUniques(d, m));
+    out.push(...buildForeignKeys(d, m, schema));
+    out.push(...buildEnumChecks(d, m));
+    out.push(...buildIndexes(d, m));
+    out.push(...buildSearchableIndexes(d, m));
+  }
+
+  // Pass 3: Wave 4c — CREATE VIEW for view-marked models.
+  for (const key of Object.keys(schema)) {
+    const m = (schema as any)[key] as ModelDef<any>;
+    if (!m?.view?.sql) continue;
+    out.push({
+      kind: 'table',          // close enough — DDL applier treats this as a CREATE-DROP unit
+      name: m.collection,
+      table: m.collection,
+      sql: `CREATE OR REPLACE VIEW ${d.quoteIdent(m.collection)} AS ${m.view.sql}`,
+      dropSql: `DROP VIEW IF EXISTS ${d.quoteIdent(m.collection)}`,
+    });
+  }
+
+  return out;
+}
+
+// Wave 4b — auto-emit GIN indexes on to_tsvector(col) for fields marked
+// `.searchable()`. Matches PG's recommended FTS index pattern; the
+// `where: { col: { search: q } }` operator compiles to the same expression
+// so this index serves the query.
+function buildSearchableIndexes(d: Dialect, m: ModelDef<any>): DDLStatement[] {
+  const out: DDLStatement[] = [];
+  for (const [fieldName, fdef] of Object.entries(m.fields)) {
+    const field = fdef as FieldDef;
+    if (!field.searchable) continue;
+    const name = `forge_${m.collection}_fts_${fieldName}`;
+    out.push({
+      kind: 'index', name, table: m.collection,
+      sql: `CREATE INDEX IF NOT EXISTS ${d.quoteIdent(name)} ON ${d.quoteIdent(m.collection)} USING gin(to_tsvector('simple', ${d.quoteIdent(fieldName)}))`,
+      dropSql: `DROP INDEX IF EXISTS ${d.quoteIdent(name)}`,
+    });
+  }
+  return out;
+}
+
+function buildCreateTable(d: Dialect, m: ModelDef<any>): DDLStatement {
+  const table = m.collection;
+  const cols: string[] = [];
+  let pkField: string | undefined;
+  for (const [fieldName, field] of Object.entries(m.fields)) {
+    const col = renderColumn(d, fieldName, field as FieldDef);
+    cols.push(col);
+    if ((field as FieldDef).kind === 'id') pkField = fieldName;
+  }
+  if (pkField) cols.push(`PRIMARY KEY (${d.quoteIdent(pkField)})`);
+  const sql = `CREATE TABLE IF NOT EXISTS ${d.quoteIdent(table)} (\n  ${cols.join(',\n  ')}\n)`;
+  return {
+    kind: 'table',
+    sql,
+    name: table,
+    table,
+    dropSql: `DROP TABLE IF EXISTS ${d.quoteIdent(table)} CASCADE`,
+  };
+}
+
+function renderColumn(d: Dialect, name: string, field: FieldDef): string {
+  const colName = d.quoteIdent(name);
+  const type = d.columnType(field);
+  const nullable = field.optional ? '' : ' NOT NULL';
+  const def = renderDefault(field);
+  return `${colName} ${type}${nullable}${def}`;
+}
+
+function renderDefault(field: FieldDef): string {
+  if (!field.default) {
+    // embedMany without an explicit default still defaults to empty array in
+    // the DB so callers don't have to pass `[]` for every create. Optional
+    // embedManys remain free to be NULL.
+    if (field.kind === 'embedMany' && !field.optional) {
+      return ` DEFAULT '[]'::jsonb`;
+    }
+    return '';
+  }
+  switch (field.default.kind) {
+    case 'now':    return ' DEFAULT now()';
+    case 'autoId': return ''; // ObjectId-flavour ids are caller-generated; pure-SQL ids land in Wave 2d
+    case 'literal': {
+      const v = field.default.value;
+      if (v === null) return ' DEFAULT NULL';
+      if (typeof v === 'boolean') return ` DEFAULT ${v ? 'TRUE' : 'FALSE'}`;
+      if (typeof v === 'number') return ` DEFAULT ${v}`;
+      if (typeof v === 'string') return ` DEFAULT ${escapeSqlString(v)}`;
+      // Embed/json defaults: serialize to JSON literal.
+      return ` DEFAULT ${escapeSqlString(JSON.stringify(v))}::jsonb`;
+    }
+  }
+}
+
+function escapeSqlString(v: string): string {
+  return `'${String(v).replace(/'/g, "''")}'`;
+}
+
+// ─── Constraints ────────────────────────────────────────────────────────────
+
+function buildPerFieldUniques(d: Dialect, m: ModelDef<any>): DDLStatement[] {
+  const table = m.collection;
+  const out: DDLStatement[] = [];
+  for (const [fieldName, field] of Object.entries(m.fields)) {
+    if (!(field as FieldDef).unique) continue;
+    // The `id` field gets a PRIMARY KEY which implies UNIQUE — don't double up.
+    if ((field as FieldDef).kind === 'id') continue;
+    const name = tableConstraintName(table, 'uq', [fieldName]);
+    out.push({
+      kind: 'unique',
+      name,
+      table,
+      sql: `ALTER TABLE ${d.quoteIdent(table)} ADD CONSTRAINT ${d.quoteIdent(name)} UNIQUE (${d.quoteIdent(fieldName)})`,
+      dropSql: `ALTER TABLE ${d.quoteIdent(table)} DROP CONSTRAINT IF EXISTS ${d.quoteIdent(name)}`,
+    });
+  }
+  return out;
+}
+
+function buildCompositeUniques(d: Dialect, m: ModelDef<any>): DDLStatement[] {
+  const table = m.collection;
+  const out: DDLStatement[] = [];
+  for (const cols of m.uniques ?? []) {
+    const name = tableConstraintName(table, 'uq', cols);
+    const colList = cols.map(d.quoteIdent).join(', ');
+    out.push({
+      kind: 'unique',
+      name,
+      table,
+      sql: `ALTER TABLE ${d.quoteIdent(table)} ADD CONSTRAINT ${d.quoteIdent(name)} UNIQUE (${colList})`,
+      dropSql: `ALTER TABLE ${d.quoteIdent(table)} DROP CONSTRAINT IF EXISTS ${d.quoteIdent(name)}`,
+    });
+  }
+  return out;
+}
+
+function buildForeignKeys(
+  d: Dialect,
+  m: ModelDef<any>,
+  schema: SchemaMap,
+): DDLStatement[] {
+  const table = m.collection;
+  const out: DDLStatement[] = [];
+  const rels = m.relations();
+  for (const [, rel] of Object.entries(rels)) {
+    const r = rel as RelationDef;
+    // Inverse-side relations don't get FKs (they're the other side of an
+    // owning-side FK on the partner table).
+    if (r.inverse) continue;
+    // FK only when the parent actually owns the column.
+    if (!m.fields[r.on]) continue;
+    // Inverse-one heuristic: if `on` is the model's primary key (kind:'id'),
+    // this is the inverse side of a one-to-one — the FK actually lives on
+    // the target's `refs` column. Skip FK emission here.
+    const onField = m.fields[r.on];
+    if (onField?.kind === 'id') continue;
+    out.push(buildForeignKey(d, table, r, schema));
+  }
+  return out;
+}
+
+function buildForeignKey(
+  d: Dialect,
+  table: string,
+  rel: RelationDef,
+  schema: SchemaMap,
+): DDLStatement {
+  const name = tableConstraintName(table, 'fk', [rel.on]);
+  const onDelete = (() => {
+    switch (rel.onDelete) {
+      case 'Cascade':  return ' ON DELETE CASCADE';
+      case 'SetNull':  return ' ON DELETE SET NULL';
+      case 'Restrict': return ' ON DELETE RESTRICT';
+      case 'NoAction':
+      default:         return ' ON DELETE NO ACTION';
+    }
+  })();
+  // `rel.target` is the schema map KEY (e.g. 'user'); the actual table name
+  // is the target model's `collection` (e.g. 'users'). Resolve through the
+  // live schema so the FK references the right physical table.
+  const targetModel = (schema as any)[rel.target] as ModelDef<any> | undefined;
+  const targetTable = targetModel?.collection ?? rel.target;
+  return {
+    kind: 'foreignKey',
+    name,
+    table,
+    sql:
+      `ALTER TABLE ${d.quoteIdent(table)} ` +
+      `ADD CONSTRAINT ${d.quoteIdent(name)} ` +
+      `FOREIGN KEY (${d.quoteIdent(rel.on)}) ` +
+      `REFERENCES ${d.quoteIdent(targetTable)} (${d.quoteIdent(rel.refs)})` +
+      onDelete,
+    dropSql: `ALTER TABLE ${d.quoteIdent(table)} DROP CONSTRAINT IF EXISTS ${d.quoteIdent(name)}`,
+  };
+}
+
+function buildEnumChecks(d: Dialect, m: ModelDef<any>): DDLStatement[] {
+  const table = m.collection;
+  const out: DDLStatement[] = [];
+  for (const [fieldName, field] of Object.entries(m.fields)) {
+    const fd = field as FieldDef;
+    if (fd.kind !== 'enum' || !fd.enumValues?.length) continue;
+    const name = tableConstraintName(table, 'enum', [fieldName]);
+    const valList = fd.enumValues.map(escapeSqlString).join(', ');
+    out.push({
+      kind: 'check',
+      name,
+      table,
+      sql:
+        `ALTER TABLE ${d.quoteIdent(table)} ` +
+        `ADD CONSTRAINT ${d.quoteIdent(name)} ` +
+        `CHECK (${d.quoteIdent(fieldName)} IN (${valList}))`,
+      dropSql: `ALTER TABLE ${d.quoteIdent(table)} DROP CONSTRAINT IF EXISTS ${d.quoteIdent(name)}`,
+    });
+  }
+  return out;
+}
+
+function buildIndexes(d: Dialect, m: ModelDef<any>): DDLStatement[] {
+  const table = m.collection;
+  const out: DDLStatement[] = [];
+  for (const idx of m.indexes ?? []) {
+    out.push(buildIndex(d, table, idx));
+  }
+  return out;
+}
+
+function buildIndex(d: Dialect, table: string, idx: IndexDef): DDLStatement {
+  const cols = Object.keys(idx.keys);
+  const name = idx.name ?? tableConstraintName(table, 'idx', cols);
+  const colExpr = cols.map((c) => {
+    const dir = idx.keys[c];
+    if (dir === 'text') return `${d.quoteIdent(c)} text_pattern_ops`;
+    return `${d.quoteIdent(c)} ${dir === -1 ? 'DESC' : 'ASC'}`;
+  }).join(', ');
+  const uniqueKW = idx.unique ? 'UNIQUE ' : '';
+  return {
+    kind: 'index',
+    name,
+    table,
+    sql:
+      `CREATE ${uniqueKW}INDEX IF NOT EXISTS ${d.quoteIdent(name)} ` +
+      `ON ${d.quoteIdent(table)} (${colExpr})`,
+    dropSql: `DROP INDEX IF EXISTS ${d.quoteIdent(name)}`,
+  };
+}

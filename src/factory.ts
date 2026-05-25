@@ -1,0 +1,247 @@
+import type { ClientSession, Document } from 'mongodb';
+import { CollectionWrapper } from './builder/collection';
+import { coerceExtendedJSON } from './adapters/mongo/coerce';
+import { dbClient } from './client';
+import { schema, SchemaMap } from './schema';
+import { ModelFields, ModelRelations, TypedModel } from './schema/core';
+import type { ModelDef } from './schema/types';
+import type { Adapter, AdapterKind } from './adapters/types';
+import type { SqlFragment } from './raw-sql';
+import { detectAdapterKind } from './adapters/detect';
+import { ForgeMissingDriverError } from './adapters/missing-driver';
+import { MongoAdapter } from './adapters/mongo/adapter';
+import { PostgresAdapter } from './adapters/postgres/adapter';
+import { MysqlAdapter } from './adapters/mysql/adapter';
+import { SqliteAdapter } from './adapters/sqlite/adapter';
+
+// createDb() — adapter-agnostic factory.
+//
+// Three call shapes, all returning the same Db handle:
+//
+//   1) URL only — adapter inferred from prefix
+//        createDb({ url: process.env.DATABASE_URL! })
+//
+//   2) Explicit type + URL
+//        createDb({ type: 'postgres', url: 'postgres://…' })
+//
+//   3) Structured config — type required, no url
+//        createDb({ type: 'postgres', host, port, database, user, password })
+//
+// On adapter detection failure or driver-not-installed, throws an actionable
+// error pointing the caller at the install command.
+
+export interface CreateDbOptionsUrl {
+  url: string;
+  type?: AdapterKind;
+}
+
+export interface CreateDbOptionsStructured {
+  type: AdapterKind;
+  host: string;
+  port?: number;
+  database: string;
+  user?: string;
+  password?: string;
+  ssl?: boolean;
+  pool?: { min?: number; max?: number };
+}
+
+export type CreateDbOptions = CreateDbOptionsUrl | CreateDbOptionsStructured;
+
+type CollectionFor<M> = M extends TypedModel<any, any>
+  ? CollectionWrapper<ModelFields<M>, ModelRelations<M>>
+  : never;
+
+type Collections = { [K in keyof SchemaMap]: CollectionFor<SchemaMap[K]> };
+
+export type ForgeDb = Collections & {
+  readonly adapter: Adapter;
+  $transaction: {
+    <T>(fn: (tx: ForgeDb) => Promise<T>): Promise<T>;
+    <T extends readonly unknown[] | []>(
+      promises: T,
+    ): Promise<{ -readonly [P in keyof T]: Awaited<T[P]> }>;
+  };
+  $runCommandRaw(command: Document): Promise<any>;
+  // Accepts BOTH call styles:
+  //   db.$queryRaw`SELECT * FROM users WHERE id = ${id}`   — tagged template
+  //   db.$queryRaw(forgeSql.sql`SELECT ...`)               — pre-built fragment
+  $queryRaw: {
+    <T = any>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T[]>;
+    <T = any>(fragment: SqlFragment): Promise<T[]>;
+  };
+  $executeRaw: {
+    (strings: TemplateStringsArray, ...values: unknown[]): Promise<number>;
+    (fragment: SqlFragment): Promise<number>;
+  };
+  $disconnect(): Promise<void>;
+  // Wave 4 — query lifecycle pub/sub. Subscribe before queries run; returned
+  // function unsubscribes. Listener errors never break queries.
+  $on: {
+    (event: 'query', cb: (e: import('./events').QueryEvent) => void | Promise<void>): () => void;
+    (event: 'error', cb: (e: import('./events').ErrorEvent) => void | Promise<void>): () => void;
+  };
+  $off: {
+    (event: 'query', cb: (e: import('./events').QueryEvent) => void): void;
+    (event: 'error', cb: (e: import('./events').ErrorEvent) => void): void;
+  };
+};
+
+const PROXY_PASSTHROUGH = new Set<PropertyKey>([
+  'then', 'toJSON', 'toString', 'valueOf', 'inspect', 'constructor',
+  'asymmetricMatch', '$$typeof', 'nodeType',
+]);
+
+export async function createDb(opts: CreateDbOptions): Promise<ForgeDb> {
+  const { adapter, url } = await pickAndConnect(opts);
+  return makeDb(adapter, url);
+}
+
+async function pickAndConnect(opts: CreateDbOptions): Promise<{ adapter: Adapter; url: string }> {
+  const url = 'url' in opts ? opts.url : buildUrlFromStructured(opts);
+  const kind = ('type' in opts && opts.type) || detectAdapterKind(url);
+  if (!kind) {
+    throw new Error(
+      `[forge] Could not infer adapter from URL '${redactForLog(url)}'.\n` +
+      `  Pass an explicit type: createDb({ type: 'mongo' | 'postgres' | 'mysql' | 'sqlite', url })`,
+    );
+  }
+  if ('type' in opts && opts.type && 'url' in opts && opts.url) {
+    const detected = detectAdapterKind(opts.url);
+    if (detected && detected !== opts.type) {
+      throw new Error(
+        `[forge] type='${opts.type}' but URL prefix indicates '${detected}'. ` +
+        `Fix one of them before continuing.`,
+      );
+    }
+  }
+  const adapter = instantiateAdapter(kind);
+  await adapter.connect(url);
+  return { adapter, url };
+}
+
+function instantiateAdapter(kind: AdapterKind): Adapter {
+  switch (kind) {
+    case 'mongo':
+      return new MongoAdapter();
+    case 'postgres':
+      return new PostgresAdapter();
+    case 'mysql':
+      return new MysqlAdapter();
+    case 'sqlite':
+      return new SqliteAdapter();
+  }
+}
+
+function buildUrlFromStructured(o: CreateDbOptionsStructured): string {
+  const scheme =
+    o.type === 'postgres' ? 'postgres' :
+    o.type === 'mysql'    ? 'mysql'    :
+    o.type === 'sqlite'   ? 'sqlite'   :
+    'mongodb';
+  if (o.type === 'sqlite') return `sqlite:${o.database}`;
+  const auth = o.user ? `${encodeURIComponent(o.user)}${o.password ? `:${encodeURIComponent(o.password)}` : ''}@` : '';
+  const port = o.port ? `:${o.port}` : '';
+  const ssl = o.ssl ? '?sslmode=require' : '';
+  return `${scheme}://${auth}${o.host}${port}/${o.database}${ssl}`;
+}
+
+function redactForLog(url: string): string {
+  return url.replace(/(:\/\/[^:@/]+):([^@/]+)@/, '$1:****@');
+}
+
+// ─── Db handle construction ─────────────────────────────────────────────────
+
+// Helper: wraps an adapter method so it accepts BOTH tagged-template syntax
+//   db.$queryRaw`SELECT * FROM users WHERE id = ${id}`
+// and pre-built SqlFragment form
+//   db.$queryRaw(forgeSql.sql`SELECT ...`)
+function makeRawCaller<R>(run: (frag: SqlFragment) => Promise<R>) {
+  return function (first: any, ...values: unknown[]): Promise<R> {
+    // Tagged-template signature: first arg is a TemplateStringsArray, which
+    // exposes a `.raw` array of strings. SqlFragments don't.
+    if (Array.isArray(first) && (first as any).raw && Array.isArray((first as any).raw)) {
+      const frag: SqlFragment = { __forgeSql: true, strings: first as readonly string[], values } as const;
+      return run(frag);
+    }
+    return run(first as SqlFragment);
+  };
+}
+
+function makeDb(adapter: Adapter, _url: string): ForgeDb {
+  const cache: Partial<Record<keyof SchemaMap, CollectionWrapper<any>>> = {};
+
+  const root: any = new Proxy({}, {
+    get: (_t, prop) => {
+      if (typeof prop === 'symbol' || PROXY_PASSTHROUGH.has(prop)) return undefined;
+      const key = String(prop);
+      if (key === 'adapter') return adapter;
+      if (key === '$transaction') return $transaction;
+      if (key === '$runCommandRaw') return $runCommandRaw;
+      if (key === '$queryRaw') return makeRawCaller((frag) => adapter.$queryRaw(frag));
+      if (key === '$executeRaw') return makeRawCaller((frag) => adapter.$executeRaw(frag));
+      if (key === '$disconnect') return () => adapter.close();
+      if (key === '$on') return (event: any, cb: any) => adapter.emitter.on(event, cb);
+      if (key === '$off') return (event: any, cb: any) => adapter.emitter.off(event, cb);
+      const model = (schema as any)[key] as ModelDef<any> | undefined;
+      if (!model) return undefined;
+      if (!cache[key as keyof SchemaMap]) {
+        // Wave 2c-2: wrapper takes the active adapter so every execute /
+        // coerce / decode / cascade call dispatches through the right
+        // dialect. Without this, every wrapper would silently fall back
+        // to the Mongo singleton — which is the pre-Wave 2c behaviour.
+        cache[key as keyof SchemaMap] = new CollectionWrapper(model, undefined, adapter);
+      }
+      return cache[key as keyof SchemaMap];
+    },
+  });
+
+  // $transaction now dispatches through the adapter — works for both Mongo
+  // (replica-set ClientSession) and Postgres (pg PoolClient).
+  function $transaction(arg: any): any {
+    if (Array.isArray(arg)) return Promise.all(arg);
+    return adapter.$transaction(async (session) => arg(makeTx(session)));
+  }
+
+  // $runCommandRaw stays Mongo-only — it's the BSON command channel. PG
+  // consumers reach for $queryRaw / $executeRaw (Wave 2d) instead.
+  function $runCommandRaw(command: Document) {
+    if (adapter.kind !== 'mongo') {
+      throw new Error('[forge] $runCommandRaw is Mongo-only. Use $queryRaw on SQL adapters.');
+    }
+    return dbClient.db.command(coerceExtendedJSON(command));
+  }
+
+  function makeTx(session: unknown): ForgeDb {
+    const txCache: Record<string, CollectionWrapper<any>> = {};
+    return new Proxy({} as any, {
+      get: (_t, prop) => {
+        if (typeof prop === 'symbol' || PROXY_PASSTHROUGH.has(prop)) return undefined;
+        const key = String(prop);
+        if (key === 'adapter') return adapter;
+        if (key === '$transaction') return (a: any) => Array.isArray(a) ? Promise.all(a) : a(makeTx(session));
+        if (key === '$queryRaw')   return makeRawCaller((frag) => adapter.$queryRaw(frag, { session }));
+        if (key === '$executeRaw') return makeRawCaller((frag) => adapter.$executeRaw(frag, { session }));
+        if (key === '$runCommandRaw') {
+          if (adapter.kind !== 'mongo') {
+            return () => Promise.reject(new Error('[forge] $runCommandRaw is Mongo-only.'));
+          }
+          return (c: any) => dbClient.db.command(c, { session: session as ClientSession });
+        }
+        if (key === '$disconnect') return () => adapter.close();
+        if (key === '$on') return (event: any, cb: any) => adapter.emitter.on(event, cb);
+        if (key === '$off') return (event: any, cb: any) => adapter.emitter.off(event, cb);
+        const model = (schema as any)[key] as ModelDef<any> | undefined;
+        if (!model) return undefined;
+        if (!txCache[key]) {
+          // Tx wrapper: same adapter, plus the opaque session from
+          // adapter.$transaction (ClientSession / PoolClient / ...).
+          txCache[key] = new CollectionWrapper(model, session, adapter);
+        }
+        return txCache[key];
+      },
+    });
+  }
+
+  return root as ForgeDb;
+}
