@@ -286,6 +286,13 @@ function report(label: string, rows: Result[]) {
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 (async () => {
+  // Wave 5a — when COMPARE=1, dispatch to the 3-way forge/Prisma/Drizzle
+  // comparison bench. The default forge-vs-raw path below is unchanged.
+  if (process.env.COMPARE === '1') {
+    const { runCompare } = await import('./compare/compare-bench');
+    await runCompare();
+    return;
+  }
   console.log(`forge db-bench  seed=${BENCH_SEED} iter=${BENCH_ITER}`);
   console.log('  forge wraps each driver call — overhead = (forge_median - raw_median) / raw_median');
 

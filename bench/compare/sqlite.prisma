@@ -1,0 +1,28 @@
+// Prisma schema for the comparison bench (SQLite).
+// Prisma does NOT own this schema. forge creates the physical table in a
+// shared on-disk SQLite file; we only run prisma generate.
+//
+// The compare bench uses an on-disk SQLite file (not :memory:) so forge,
+// Drizzle, and the Prisma client can all see the same table. better-sqlite3
+// :memory: databases are per-connection and cannot be shared.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "./generated/sqlite"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model User {
+  id         String   @id
+  email      String   @unique
+  name       String
+  // forge stores bool as 0/1 INTEGER on SQLite; Prisma Boolean maps to that.
+  active     Boolean
+  // forge stores enum/timestamps as TEXT on SQLite; model role as String.
+  role       String
+
+  @@map("users")
+}

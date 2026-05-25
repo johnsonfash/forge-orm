@@ -1,0 +1,25 @@
+// Prisma schema for the comparison bench (Postgres).
+// Prisma does NOT own this schema. forge DDL/migrate creates the physical
+// users table; this schema only describes it so the generated client can
+// query it. We never run prisma migrate here, only prisma generate.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "./generated/pg"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id         String   @id
+  email      String   @unique
+  name       String
+  role       String
+  active     Boolean
+  created_at DateTime
+  updated_at DateTime
+
+  @@map("users")
+}
