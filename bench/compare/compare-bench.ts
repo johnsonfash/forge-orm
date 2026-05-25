@@ -283,7 +283,17 @@ async function runPrismaMysql(url: string, sampleId: (idx: number) => string): P
     return { label: "prisma", na: "Prisma 7 needs @prisma/adapter-mariadb + generated client (not installed)" };
   }
   try {
-    const adapter = new PrismaMariaDb({ url });
+    // PrismaMariaDb takes mariadb pool options, not a `url` key — parse the
+    // connection string into host/port/user/password/database.
+    const u = new URL(url);
+    const adapter = new PrismaMariaDb({
+      host: u.hostname,
+      port: u.port ? Number(u.port) : 3306,
+      user: decodeURIComponent(u.username) || "root",
+      password: u.password ? decodeURIComponent(u.password) : undefined,
+      database: u.pathname.replace(/^\//, ""),
+      connectionLimit: 10,
+    });
     const prisma = new PrismaClient({ adapter });
     const samples = await runOps("prisma", {
       findMany: () => prisma.user.findMany({ where: { role: "EDITOR" }, orderBy: { email: "asc" }, take: 20 }),
@@ -364,15 +374,15 @@ async function compareSqlite(): Promise<CompareResult | null> {
 }
 
 async function runPrismaSqlite(file: string, sampleId: (idx: number) => string): Promise<Engine> {
-  let PrismaClient: any, PrismaBetterSQLite3: any;
+  let PrismaClient: any, PrismaBetterSqlite3: any;
   try {
     ({ PrismaClient } = require("./generated/sqlite"));
-    ({ PrismaBetterSQLite3 } = require("@prisma/adapter-better-sqlite3"));
+    ({ PrismaBetterSqlite3 } = require("@prisma/adapter-better-sqlite3"));
   } catch {
     return { label: "prisma", na: "Prisma 7 needs @prisma/adapter-better-sqlite3 + generated client (not installed)" };
   }
   try {
-    const adapter = new PrismaBetterSQLite3({ url: `file:${file}` });
+    const adapter = new PrismaBetterSqlite3({ url: `file:${file}` });
     const prisma = new PrismaClient({ adapter });
     const samples = await runOps("prisma", {
       findMany: () => prisma.user.findMany({ where: { role: "EDITOR" }, orderBy: { email: "asc" }, take: 20 }),
