@@ -8,6 +8,9 @@
   "scripts": {
     "forge:doctor": "ts-node src/scripts/doctor.ts",
     "forge:push": "ts-node src/scripts/push.ts",
+    "forge:diff": "ts-node src/scripts/diff.ts",
+    "forge:diff:apply": "ts-node src/scripts/diff-apply.ts",
+    "forge:rollback": "ts-node src/scripts/rollback.ts",
     "forge:test": "jest",
     "forge:integration:pg": "ts-node --transpile-only --project tsconfig.json integration-pg.ts",
     "forge:integration:mongo": "ts-node --transpile-only --project tsconfig.json integration-mongo.ts",
