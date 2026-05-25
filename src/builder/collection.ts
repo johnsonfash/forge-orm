@@ -1,4 +1,5 @@
 import type { ClientSession, Collection, Document } from 'mongodb';
+import { randomUUID } from 'crypto';
 import { dbClient } from '../adapters/mongo/client';
 import {
   CreateInput,
@@ -330,7 +331,7 @@ export class CollectionWrapper<
 
   // ─── Writes ───────────────────────────────────────────────────────────
 
-  // Wave 4c — block writes on read-only view models.
+  // Block writes on read-only view models.
   private _assertWritable(op: string): void {
     if ((this.model as any).view) {
       throw new Error(
@@ -338,6 +339,45 @@ export class CollectionWrapper<
         `  Use the underlying source model for writes, or drop .asView() from the schema.`,
       );
     }
+  }
+
+  // Auto-generate the primary key when the caller didn't supply one, so you
+  // never have to assign an id on create. Mongo mints an ObjectId in
+  // coerceInbound; SQL dialects have no server default for forge's string id,
+  // so we generate a UUID here. Only fills when the id field has an autoId
+  // default (the f.id() default) and no value was provided.
+  private _autoIdName?: string | null;
+  private _fillAutoId(data: any): any {
+    if (this.adapter.kind === 'mongo' || !data || typeof data !== 'object') return data;
+    if (this._autoIdName === undefined) {
+      this._autoIdName = null;
+      for (const [name, fd] of Object.entries(this.model.fields)) {
+        if ((fd as any).kind === 'id' && (fd as any).default?.kind === 'autoId') { this._autoIdName = name; break; }
+      }
+    }
+    if (this._autoIdName && data[this._autoIdName] == null) {
+      return { ...data, [this._autoIdName]: randomUUID() };
+    }
+    return data;
+  }
+
+  // Auto-bump `.updatedAt()` fields on every update, on all databases. Sets the
+  // field to the current time when the caller didn't set it explicitly. (Mongo
+  // also handles this in coerce; setting it here makes it uniform across SQL too.)
+  private _updatedAtFields?: string[];
+  private _applyUpdatedAt(data: any): any {
+    if (!data || typeof data !== 'object') return data;
+    if (this._updatedAtFields === undefined) {
+      this._updatedAtFields = Object.entries(this.model.fields)
+        .filter(([, fd]) => (fd as any).updatedAt)
+        .map(([name]) => name);
+    }
+    if (this._updatedAtFields.length === 0) return data;
+    const out = { ...data };
+    for (const name of this._updatedAtFields) {
+      if (out[name] === undefined) out[name] = new Date();
+    }
+    return out;
   }
 
   async create<A extends {
@@ -352,7 +392,7 @@ export class CollectionWrapper<
     // Resolve owning-side connectOrCreate first — sets the FK on `scalar` so
     // the parent insert satisfies the FK constraint.
     const resolvedScalar = await this._resolveOwningConnectOrCreate(scalar, nested);
-    const row = this.adapter.coerceInbound(this.model, resolvedScalar);
+    const row = this.adapter.coerceInbound(this.model, this._fillAutoId(resolvedScalar));
     const node = buildInsert(mk, this.model, { rows: [row] }, schema as any);
     const { docs } = await this.adapter.executeInsert(node, this.model, { session: this._session });
     const doc = docs[0];
@@ -392,7 +432,7 @@ export class CollectionWrapper<
     this._assertWritable('createMany');
     if (!Array.isArray(args.data) || args.data.length === 0) return { count: 0 };
     const mk = this._modelKey();
-    const rows = args.data.map((d) => this.adapter.coerceInbound(this.model, d));
+    const rows = args.data.map((d) => this.adapter.coerceInbound(this.model, this._fillAutoId(d)));
     const node = buildInsert(
       mk, this.model,
       { rows, skipDuplicates: args.skipDuplicates },
@@ -415,7 +455,7 @@ export class CollectionWrapper<
     const { scalar, nested } = this._splitNestedWrites(args.data, /*forCreate*/ false);
     const node = buildUpdate(
       mk, this.model,
-      { where: args.where, data: scalar, many: false },
+      { where: args.where, data: this._applyUpdatedAt(scalar), many: false },
       schema as any,
     );
     const { doc } = await this.adapter.executeUpdate(node, this.model, { session: this._session });
@@ -433,7 +473,7 @@ export class CollectionWrapper<
     const mk = this._modelKey();
     const node = buildUpdate(
       mk, this.model,
-      { where: args.where, data: args.data, many: true },
+      { where: args.where, data: this._applyUpdatedAt(args.data), many: true },
       schema as any,
     );
     const r = await this.adapter.executeUpdate(node, this.model, { session: this._session });
@@ -454,10 +494,10 @@ export class CollectionWrapper<
     // Build a coerced create payload for $setOnInsert. The compile-from-ir
     // layer applies defaults; we only need to pre-coerce here so user-supplied
     // ids/dates become BSON types before going through Mongo's BSON.
-    const createCoerced = this.adapter.coerceInbound(this.model, args.create);
+    const createCoerced = this.adapter.coerceInbound(this.model, this._fillAutoId(args.create));
     const node = buildUpdate(
       mk, this.model,
-      { where: args.where, data: args.update, many: false, upsertCreate: createCoerced },
+      { where: args.where, data: this._applyUpdatedAt(args.update), many: false, upsertCreate: createCoerced },
       schema as any,
     );
     const { doc } = await this.adapter.executeUpdate(node, this.model, { session: this._session });

@@ -1,41 +1,54 @@
 # Changelog
 
 All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
-multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite — one code
+multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite - one code
 path, no codegen, no external query engine.
 
-## 1.1.1 — standalone & driver-lazy (fixes 1.1.0)
+## 1.1.2 - auto-generated keys and timestamps on every database
+
+- **Auto-generated primary keys on all databases.** When you create a row
+  without an `id`, forge now generates one on SQL too (a UUID), not just on
+  Mongo (an ObjectId). You no longer assign an id by hand on Postgres, MySQL,
+  or SQLite.
+- **`.updatedAt()` now works on all databases.** It was applied only on Mongo;
+  it now auto-bumps the column on every update for Postgres, MySQL, and SQLite
+  as well. `.default('now')` continues to fill created-at columns.
+- **Rewrote the README** in plain language, organised by feature rather than by
+  internal development phase, with clearer explanations of relations and the
+  automatic fields, and the incidental content removed.
+
+## 1.1.1 - standalone & driver-lazy (fixes 1.1.0)
 
 - **Fix (critical):** importing `forge-orm` no longer requires any database
   driver. `mongodb` (`MongoClient`/`ObjectId`) is now lazy-loaded, so a
-  SQL-only — or import-only — consumer doesn't need the mongodb driver. (1.1.0
+  SQL-only - or import-only - consumer doesn't need the mongodb driver. (1.1.0
   crashed on import with `Cannot find module 'mongodb'`.)
 - **Removed the NestJS integration** (`DatabaseModule`/`DatabaseService`) and the
   `@nestjs/common` dependency. forge is now a **fully standalone,
-  framework-agnostic** library — no framework coupling, no bundled driver.
+  framework-agnostic** library - no framework coupling, no bundled driver.
 - Drivers (`pg` / `mysql2` / `better-sqlite3` / `mongodb`) are **optional peer
   dependencies**: install only the one(s) you use; each is `require()`d lazily
   on first use against that dialect. Verified: `npm install forge-orm` with zero
   drivers imports cleanly and defines schemas.
 - README: explicit "install the driver for your database" table + a no-lock-in note.
 
-## 1.1.0 — drop-in library (schema decoupling)
+## 1.1.0 - drop-in library (schema decoupling)
 
 forge is now a **true drop-in library**: bring your own schema instead of being
-tied to the bundled sample. Backward compatible — omit `schema` and the sample
+tied to the bundled sample. Backward compatible - omit `schema` and the sample
 is used. **354 tests** green across all four dialects (191 unit + 163 integration).
 
 ### Added
 
-- **`createDb({ schema })`** — pass your own `model(...)` map; the returned `db`
+- **`createDb({ schema })`** - pass your own `model(...)` map; the returned `db`
   is typed `ForgeDb<typeof yourSchema>` (fully typed models, where-inputs,
-  relations, select/include — no codegen).
+  relations, select/include - no codegen).
 - Exported the **schema DSL from the package root**: `f`, `model`, `rel`,
   `enums`, `embed`, plus `SchemaShape`, `sampleSchema`, `setActiveSchema`,
   `getActiveSchema`, and the schema/field types.
 - Generic `ForgeDb<S>` and `CollectionWrapper<F, R, SM>` so consumer schemas get
   full nested include/select typing.
-- `examples/custom-schema-demo.ts` (`npm run forge:example:custom`) — runnable
+- `examples/custom-schema-demo.ts` (`npm run forge:example:custom`) - runnable
   end-to-end proof with a non-sample (e-commerce) schema.
 - Canary: `npm run forge:canary` + `forge:canary:load` (real-traffic HTTP service
   on an isolated DB) and the findings in `canary/README.md` / Production notes.
@@ -50,10 +63,10 @@ is used. **354 tests** green across all four dialects (191 unit + 163 integratio
 
 ### Notes
 
-- One active schema per process (last `createDb({ schema })` wins) — fits the
+- One active schema per process (last `createDb({ schema })` wins) - fits the
   one-schema-per-service norm; use separate workers for multiple.
 
-## 1.0.0 — Wave 5 (production hardening)
+## 1.0.0 - Wave 5 (production hardening)
 
 Feature-complete release. **352 tests** green across all four dialects
 (189 unit + PG 53 / SQLite 37 / Mongo 38 / MySQL 35 integration); full
@@ -61,32 +74,32 @@ Feature-complete release. **352 tests** green across all four dialects
 
 ### Added
 
-- **Comparison bench (5a)** — `forge:bench:compare[:pg|:mysql|:sqlite|:mongo]`
+- **Comparison bench (5a)** - `forge:bench:compare[:pg|:mysql|:sqlite|:mongo]`
   runs identical scenarios through **forge vs Prisma vs Drizzle vs the raw
   driver** against the same table, reporting median / p95 / ops·s⁻¹ / overhead.
   Prisma connects via driver-adapters (`@prisma/adapter-{pg,mariadb,better-sqlite3}`);
   `forge:bench:compare:gen` generates the Prisma clients.
-- **Drift detection (5b)** — `forge:diff` introspects the live database
+- **Drift detection (5b)** - `forge:diff` introspects the live database
   (PG `pg_catalog`/`information_schema`, MySQL `INFORMATION_SCHEMA`, SQLite
   `PRAGMA`, Mongo `listCollections`/indexes) and reports missing/extra
   tables, columns, indexes, foreign keys, type-category mismatches, and views.
   Human-readable + `--json`; `--check` exits non-zero for CI gating.
-- **Schema-diff migrations (5c)** — `forge:diff:apply` generates and runs the
+- **Schema-diff migrations (5c)** - `forge:diff:apply` generates and runs the
   reconciling SQL (forward), writing timestamped `migrations/<ts>_*.sql` files
   with matching `-- up` / `-- down` blocks and recording them idempotently in a
   `_forge_migrations` history table. `forge:rollback` runs the latest `down`.
   SQL dialects only.
-- **Materialised views (5d)** — `.asView({ materialised: true })` emits
+- **Materialised views (5d)** - `.asView({ materialised: true })` emits
   `CREATE MATERIALIZED VIEW` (PG), a repopulated table (MySQL/SQLite), or an
   `$out` collection (Mongo). `db.<model>.refresh()` recomputes;
   `db.<model>.scheduleRefresh('30s'|'5m'|'1h')` auto-refreshes and returns a
-  `stop()` (timers are `unref`'d — no leaks).
-- **Native types (5e)** — `f.decimal({ precision, scale })`, `f.uuid({ default })`,
+  `stop()` (timers are `unref`'d - no leaks).
+- **Native types (5e)** - `f.decimal({ precision, scale })`, `f.uuid({ default })`,
   `f.bigint()`, and `.dbgenerated('<expr>')` generated columns, each emitting
   dialect-correct DDL.
-- **`strict` mode (5e)** — `createDb({ strict: true })` rejects unknown `where`
+- **`strict` mode (5e)** - `createDb({ strict: true })` rejects unknown `where`
   keys at runtime (closes the loose `[key: string]: any` escape hatch).
-- **`select`/`include` exclusivity (5e)** — passing both is now a compile-time
+- **`select`/`include` exclusivity (5e)** - passing both is now a compile-time
   type error.
 
 ### Changed
@@ -101,14 +114,14 @@ Feature-complete release. **352 tests** green across all four dialects
   (`translateUpdateData`); its coverage moved to the IR path
   (`buildUpdate` → `compileUpdate`) in `mongo-compile-update.spec.ts`.
 
-## 0.x — Waves 0–4c
+## 0.x - Waves 0–4c
 
-- **Wave 0** — top-level package, optional peer-dependency drivers, `Adapter` scaffold.
-- **Wave 1** — adapter-agnostic query IR; IR-driven read + write paths (Mongo).
-- **Wave 2** — Postgres adapter: compile-from-IR, executor, DDL, migration runner,
+- **Wave 0** - top-level package, optional peer-dependency drivers, `Adapter` scaffold.
+- **Wave 1** - adapter-agnostic query IR; IR-driven read + write paths (Mongo).
+- **Wave 2** - Postgres adapter: compile-from-IR, executor, DDL, migration runner,
   `$queryRaw`/`$executeRaw`, P1xxx/P2xxx error mapping.
-- **Wave 3** — MySQL and SQLite adapters (compile + execute + DDL + migrate + errors).
-- **Wave 4a** — `db.$on('query'|'error')` events, `findManyStream`, `where.search`.
-- **Wave 4b** — `.searchable()` auto-FTS indexes, `.softDeleteAt()`, native cursor
+- **Wave 3** - MySQL and SQLite adapters (compile + execute + DDL + migrate + errors).
+- **Wave 4a** - `db.$on('query'|'error')` events, `findManyStream`, `where.search`.
+- **Wave 4b** - `.searchable()` auto-FTS indexes, `.softDeleteAt()`, native cursor
   streaming, `wireOtel()` OpenTelemetry helper.
-- **Wave 4c** — `.asView()` read-only views; SQLite FTS5 read-route rewriting.
+- **Wave 4c** - `.asView()` read-only views; SQLite FTS5 read-route rewriting.

@@ -1,539 +1,453 @@
-# Forge ORM — Prisma-shape multi-database wrapper
+# forge-orm
 
-> **npm:** [`forge-orm`](https://www.npmjs.com/package/forge-orm) &nbsp;·&nbsp; **install:** `npm install forge-orm` &nbsp;·&nbsp; **repo:** [github.com/johnsonfash/forge-orm](https://github.com/johnsonfash/forge-orm)
+A small, Prisma-shaped data layer for **MongoDB, PostgreSQL, MySQL, and SQLite**.
+You write your models once in plain TypeScript and the same query code runs
+against any of the four databases. There is no code generation step, no Rust
+query engine, and no framework to adopt. It is about 5,000 lines of TypeScript
+you can read in an afternoon.
 
-A self-contained TypeScript data-access layer that mirrors Prisma's API and
-runs against **MongoDB, PostgreSQL, MySQL, and SQLite** from the **same
-code** — no codegen, no Rust query engine, no external CLI. Designed to be
-read end-to-end in an afternoon and dropped into any Node project. (The package
-is **`forge-orm`**; "Forge" is the short name used throughout these docs.)
+```
+npm install forge-orm
+```
 
-> **v1.0** — a **drop-in library**: define your own models and pass them to
-> `createDb({ schema })` (see [Quick start](#quick-start) /
-> [Defining your schema](#defining-your-schema--bring-your-own)). Feature-complete
-> through Wave 5: drift detection (`forge:diff`), schema-diff migrations,
-> materialised views, native types (`decimal`/`uuid`/`bigint`/`dbgenerated`),
-> `strict` mode, and a forge-vs-Prisma-vs-Drizzle comparison bench. **354 tests**
-> green across all four dialects. See [Wave 5](#wave-5--production-hardening) and
-> [Production notes](#production-notes).
+* **npm:** https://www.npmjs.com/package/forge-orm
+* **GitHub:** https://github.com/johnsonfash/forge-orm
+* **License:** MIT
 
 ```ts
-const db = await createDb({ url: process.env.DATABASE_URL! });
+import { createDb, f, model } from 'forge-orm';
 
-const user = await db.user.create({
-  data: { email: 'alice@x.co', name: 'Alice', role: 'EDITOR' },
-});
-
-const posts = await db.post.findMany({
-  where: { author_id: user.id, status: 'PUBLISHED' },
-  include: { comments: true },
-  orderBy: { created_at: 'desc' },
-  take: 20,
-});
-```
-
-That exact code works whether `DATABASE_URL` points at `mongodb://…` or
-`postgres://…`. Forge picks the right adapter at connect time.
-
----
-
-## Table of contents
-
-**Getting started**
-1. [Why forge](#why-forge)
-2. [Install](#install)
-3. [Quick start](#quick-start)
-4. [Schema](#schema) — incl. [Defining your schema (bring your own)](#defining-your-schema--bring-your-own), fields, indexes, relations, embeds
-5. [Adapters & connection strings](#adapters--connection-strings)
-
-**Querying**
-6. [Reading data](#reading-data) — `where` operators, `select` vs `include`, cursor pagination
-7. [Writing data](#writing-data) — create / update / upsert / delete / createMany
-8. [Atomic updates](#atomic-updates)
-9. [Relations & nested writes](#relations--nested-writes) — eager loading, nested writes, cascades
-10. [`groupBy` and aggregations](#groupby-and-aggregations)
-11. [Transactions](#transactions)
-12. [Raw SQL escape hatch](#raw-sql-escape-hatch)
-13. [Errors](#errors)
-
-**Schema lifecycle & tooling**
-14. [Schema sync — `forge:push`](#schema-sync--forgepush)
-15. [`forge:doctor`](#forgedoctor)
-16. [The `.compile` escape hatch](#the-compile-escape-hatch)
-17. [Type safety in detail](#type-safety-in-detail)
-18. [Architecture](#architecture)
-
-**Wave 4 / Wave 5 features**
-- [Observability — `$on` events + `wireOtel`](#wave-4--observability)
-- [Streaming reads — `findManyStream`](#wave-4--streaming-reads)
-- [Full-text search — `.searchable()` + `where.search`](#wave-4--full-text-search)
-- [Wave 5 — production hardening](#wave-5--production-hardening): [comparison bench](#comparison-bench--forge-vs-prisma-vs-drizzle), [native types & generated columns](#native-types--generated-columns), [`strict` mode & select/include XOR](#strict-mode--selectinclude-exclusivity), [drift detection `forge:diff`](#drift-detection--forgediff), [migrations `forge:diff:apply`/`rollback`](#schema-diff-migrations--forgediffapply--forgerollback), [materialised views](#materialised-views)
-
-**Operating & contributing**
-19. [Testing & quality gates](#testing--quality-gates)
-20. [Comparison with Prisma](#comparison-with-prisma)
-21. [Known gaps & roadmap](#known-gaps--roadmap)
-22. [Production notes](#production-notes) — canary findings, pool ceiling, the tx footgun, adoption guidance
-23. [API reference — what the package exports](#api-reference--what-the-package-exports)
-24. [Extending forge — writing a new adapter](#extending-forge--writing-a-new-adapter)
-25. [License & maintenance](#license--maintenance)
-
----
-
-## Why forge
-
-Reach for forge when you want:
-
-- **One codebase, multiple databases.** A service that ships against Mongo
-  today but might run against Postgres tomorrow doesn't have to rewrite its
-  query layer. The IR (intermediate representation) is dialect-portable.
-- **No codegen step.** The schema is one TypeScript file. Add a model, save
-  the file, autocomplete updates. No `prisma generate`, no out-of-sync
-  generated client.
-- **A library you can read.** ~5,000 lines of pure TypeScript across the
-  whole package. `grep` finds field references in one pass. No Rust engine,
-  no protocol buffers, no separate binary.
-- **Real autocomplete.** Verified programmatically against the TypeScript
-  Language Service — see [type safety](#type-safety-in-detail). Atomic ops
-  on optional numeric fields, `select`-narrowed return types, enum literal
-  unions all work.
-- **An escape hatch when you outgrow the wrapper.** `.compile.findMany(...)`
-  hands you the exact MongoDB args object or parameterised SQL string +
-  params, ready to run through your own driver.
-
-Stay with Prisma if you need: Prisma Studio, the migration history /
-shadow-DB drift detection, `$extends` middleware, full feature parity across
-6+ dialects, or the ecosystem of Prisma adapters.
-
-The honest pitch: forge is a *thin* wrapper. In a same-machine micro-benchmark
-its per-call overhead measured competitive with — and often lower than — Prisma
-7.8 and Drizzle (see [the comparison bench](#comparison-bench--forge-vs-prisma-vs-drizzle)),
-and there's no Rust engine to spawn. So you don't pay a performance tax for the
-one-API-across-four-databases design or the readability. That's the whole claim
-— it is **not** "faster"/"better" in any broad sense: it loses on breadth,
-ecosystem, tooling maturity, and production track record. Choose it for thinness
-and multi-DB reach, not to beat Prisma.
-
----
-
-## Install
-
-forge is a single package at the repo root. As an npm package:
-
-```sh
-npm install forge-orm      # the engine + types (zero drivers pulled)
-```
-
-It's a **true drop-in library** — you define your own models and pass them to
-`createDb({ schema })`; the returned `db` is fully typed against *your* schema
-(see [Defining your schema](#defining-your-schema--bring-your-own)). There's
-nothing hardwired: the bundled blog schema is just a `sampleSchema` you can
-import as a reference, and the default when you don't pass one.
-
-You can also **fork-and-own** — clone the repo, edit `src/schema/`, import from
-`src`. It's ~5k lines of readable TypeScript; owning it outright is a legitimate
-model for a dependency this small.
-
-Build/publish: `npm run build` emits `dist/` (compiled JS + `.d.ts`); `npm pack`
-produces a tarball of `dist/` + README + CHANGELOG only (no tests/bench/`.env`);
-`npm publish` once you've set your own package name/scope.
-
-### Then install the driver for *your* database
-
-forge is a **standalone library with no framework coupling and no bundled
-driver** — it ships zero database drivers. You install **only** the one(s) you
-actually use. They're declared as **optional peer dependencies**, so
-`npm install forge-orm` on its own pulls nothing extra and never locks you into
-a database, a driver version, or a framework.
-
-| Your database | URL prefix | Install this driver |
-|---|---|---|
-| **PostgreSQL** | `postgres://` / `postgresql://` | `npm install pg` |
-| **MySQL / MariaDB** | `mysql://` | `npm install mysql2` |
-| **SQLite** | `sqlite:` / `file:` | `npm install better-sqlite3` |
-| **MongoDB** | `mongodb://` / `mongodb+srv://` | `npm install mongodb` |
-
-```sh
-npm install forge-orm        # the engine + types — pulls NO drivers
-npm install pg               # ← add only the driver you need (e.g. Postgres)
-```
-
-You control the driver and its version entirely — forge just `require()`s it
-**lazily**, the first time you actually run a query against that dialect. So
-importing forge, defining your schema, or using one dialect never needs the
-other dialects' drivers installed. If a driver is missing when you connect, you
-get a clear, actionable error instead of a crash:
-
-```
-[forge] postgres adapter needs the 'pg' driver, but it's not installed.
-  Detected:    DATABASE_URL=postgres://user:****@localhost/db  (inferred adapter: postgres)
-  Install:     npm install pg
-  Or override: createDb({ type: 'mongo' | 'postgres' | 'mysql' | 'sqlite', url: '...' })
-```
-
-> **No lock-in, by design.** No ORM-owned migration state you can't leave, no
-> generated client to keep in sync, no framework module to adopt, no driver
-> bundled in. It's plain TypeScript over the official drivers — `.compile.*`
-> even hands you the raw SQL/Mongo args to run yourself if you outgrow the
-> wrapper, and you can drop down to your driver directly at any time.
-
----
-
-## Quick start
-
-```ts
-import { createDb, f, model, rel } from 'forge-orm';
-
-// 1. Define YOUR models (no codegen — this file is the source of truth).
 const User = model('users', {
   id:    f.id(),
   email: f.string().unique(),
   name:  f.string(),
-  role:  f.enumOf(['USER', 'EDITOR', 'ADMIN'] as const).default('USER'),
-}).relate(() => ({ posts: rel.many('post', { on: 'author_id', refs: 'id' }) }));
+});
+
+const db = await createDb({ url: process.env.DATABASE_URL!, schema: { user: User } });
+
+const alice = await db.user.create({ data: { email: 'a@x.co', name: 'Alice' } }); // no id needed
+const users = await db.user.findMany({ where: { name: { contains: 'Ali' } }, take: 10 });
+```
+
+That same code works whether `DATABASE_URL` is a Postgres, MySQL, SQLite, or
+Mongo connection string. forge picks the right driver from the URL.
+
+---
+
+## Contents
+
+* [What forge is, and what it is not](#what-forge-is-and-what-it-is-not)
+* [Install and pick your driver](#install-and-pick-your-driver)
+* [Connecting](#connecting)
+* [Defining a schema](#defining-a-schema)
+  * [Models and automatic values (id, timestamps)](#models-and-automatic-values-id-timestamps)
+  * [Field types](#field-types)
+  * [Field modifiers](#field-modifiers)
+  * [Indexes and unique constraints](#indexes-and-unique-constraints)
+  * [Relations](#relations)
+  * [Embedded objects](#embedded-objects)
+* [Reading data](#reading-data)
+  * [Filtering with `where`](#filtering-with-where)
+  * [Choosing fields: `select` and `include`](#choosing-fields-select-and-include)
+  * [Sorting and pagination](#sorting-and-pagination)
+* [Writing data](#writing-data)
+  * [Number and field updates](#number-and-field-updates)
+  * [Writing related records in one call](#writing-related-records-in-one-call)
+  * [Deletes and cascades](#deletes-and-cascades)
+* [Grouping and aggregates](#grouping-and-aggregates)
+* [Transactions](#transactions)
+* [Running raw SQL](#running-raw-sql)
+* [Errors](#errors)
+* [Full-text search](#full-text-search)
+* [Streaming large results](#streaming-large-results)
+* [Soft delete](#soft-delete)
+* [Views and materialised views](#views-and-materialised-views)
+* [Watching queries](#watching-queries)
+* [Creating tables and migrations](#creating-tables-and-migrations)
+* [Dropping to raw queries with `.compile`](#dropping-to-raw-queries-with-compile)
+* [Type safety](#type-safety)
+* [Performance](#performance)
+* [Testing](#testing)
+* [Limitations and honest notes](#limitations-and-honest-notes)
+* [Contributing](#contributing)
+
+---
+
+## What forge is, and what it is not
+
+forge is a thin wrapper. It turns a Prisma-style call such as
+`db.user.findMany({ where: { active: true } })` into the right query for your
+database and runs it through the official driver (`pg`, `mysql2`,
+`better-sqlite3`, or `mongodb`). The drivers do the actual work; forge builds
+the queries and shapes the results.
+
+Reach for forge when you want one query API across more than one database, a
+dependency small enough to read and fork, full TypeScript autocomplete with no
+generated client to keep in sync, and the option to drop down to raw SQL at any
+time.
+
+forge is **not** a replacement for Prisma or Drizzle in maturity. It is a young
+library with no long production track record. It has fewer features, a smaller
+ecosystem, and no GUI. If you need those, use Prisma or Drizzle. The
+[honest notes](#limitations-and-honest-notes) at the end spell this out.
+
+---
+
+## Install and pick your driver
+
+forge ships no database driver of its own. You install only the driver for the
+database you use. Each one is an optional peer dependency, so `npm install
+forge-orm` on its own pulls nothing extra, and importing forge needs no driver
+at all.
+
+| Database          | Connection string starts with     | Install                       |
+| ----------------- | ---------------------------------- | ----------------------------- |
+| PostgreSQL        | `postgres://` or `postgresql://`   | `npm install pg`              |
+| MySQL or MariaDB  | `mysql://`                         | `npm install mysql2`          |
+| SQLite            | `sqlite:` or `file:`               | `npm install better-sqlite3`  |
+| MongoDB           | `mongodb://` or `mongodb+srv://`   | `npm install mongodb`         |
+
+```sh
+npm install forge-orm      # the library, no drivers
+npm install pg             # add the one you need
+```
+
+The driver loads lazily, the first time you actually run a query against that
+database. So importing forge, defining a schema, or using one database never
+needs the other databases' drivers installed. If a driver is missing when you
+connect, you get a clear message telling you what to install rather than a
+crash.
+
+There is no lock-in. No generated client to regenerate, no migration state you
+cannot leave, no framework module to wire in, and no driver bundled inside. It
+is plain TypeScript over the official drivers, and you can always call the
+driver directly if you outgrow it.
+
+---
+
+## Connecting
+
+`createDb` takes a connection URL and your schema. It returns a typed `db`
+handle whose properties match your model names.
+
+```ts
+import { createDb } from 'forge-orm';
+
+const db = await createDb({
+  url: process.env.DATABASE_URL!,   // postgres://… | mysql://… | sqlite:… | mongodb://…
+  schema: { user: User, post: Post },
+});
+
+// later, when shutting down:
+await db.$disconnect();
+```
+
+Options:
+
+* `url` is the connection string. The prefix selects the database.
+* `schema` is your model map. `db.<key>` exists for each key (for example
+  `db.user`, `db.post`).
+* `type` (optional) forces the database type if the URL is ambiguous:
+  `'postgres' | 'mysql' | 'sqlite' | 'mongo'`.
+* `strict` (optional, default `false`). When `true`, a query that filters on an
+  unknown field name throws instead of silently matching nothing. Useful for
+  catching typos.
+
+You can also pass connection parts instead of a URL:
+
+```ts
+await createDb({ type: 'postgres', host: 'localhost', database: 'app', user: 'me', schema });
+```
+
+---
+
+## Defining a schema
+
+A schema is a plain object mapping a name to a model. You build models with the
+helpers exported from `forge-orm`: `f` (fields), `model`, `rel` (relations),
+`enums`, and `embed`.
+
+```ts
+import { f, model, rel } from 'forge-orm';
+
+const User = model('users', {
+  id:         f.id(),
+  email:      f.string().unique(),
+  name:       f.string(),
+  active:     f.bool().default(true),
+  created_at: f.dateTime().default('now'),
+  updated_at: f.dateTime().default('now').updatedAt(),
+}).relate(() => ({
+  posts: rel.many('post', { on: 'author_id', refs: 'id' }),
+}));
 
 const Post = model('posts', {
   id:        f.id(),
   author_id: f.objectId(),
   title:     f.string(),
-  body:      f.text().searchable(),
-  status:    f.enumOf(['DRAFT', 'PUBLISHED'] as const).default('DRAFT'),
-  created_at: f.dateTime().default('now'),
-}).relate(() => ({ author: rel.one('user', { on: 'author_id', refs: 'id', onDelete: 'Cascade' }) }));
+  body:      f.text(),
+}).relate(() => ({
+  author: rel.one('user', { on: 'author_id', refs: 'id', onDelete: 'Cascade' }),
+}));
 
-const schema = { user: User, post: Post } as const;
-
-// 2. Connect with your schema. The URL prefix picks the adapter; `db` is fully
-//    typed against `schema` — db.user / db.post, their fields, and relations.
-const db = await createDb({ url: process.env.DATABASE_URL!, schema });
-
-// 3. Use it.
-const alice = await db.user.create({ data: { email: 'alice@x.co', name: 'Alice', role: 'EDITOR' } });
-const posts = await db.post.findMany({
-  where: { author_id: alice.id, status: 'PUBLISHED' },
-  include: { author: true },
-  orderBy: { created_at: 'desc' },
-  take: 20,
-});
-
-// 4. Close (idempotent).
-await db.$disconnect();
+export const schema = { user: User, post: Post } as const;
 ```
 
-That **exact code** works whether `DATABASE_URL` is `mongodb://…`, `postgres://…`,
-`mysql://…`, or `sqlite:…` — forge picks the adapter at connect time. Omit
-`schema` and forge uses its bundled `sampleSchema` (a blog/CMS demo). Everything
-below is iteration on this shape.
+Write `as const` on the schema object. It lets TypeScript read the exact model
+and field names, which is what gives you autocomplete and typed results.
 
----
+### Models and automatic values (id, timestamps)
 
-## Schema
+`model(tableName, fields)` declares a table (or a Mongo collection). The first
+argument is the real table name in the database; the object key you give it in
+the schema (`user`, `post`) is what you type as `db.user`.
 
-### Defining your schema — bring your own
+forge fills in three kinds of value for you, so you do not have to:
 
-forge is **not** tied to any built-in schema. You define a map of models with
-the DSL (`f`, `model`, `rel`, `enums`, `embed`, all exported from the package
-root) and hand it to `createDb({ schema })`:
+**Primary key (`f.id()`).** Every model has one. When you create a row without
+passing an `id`, forge generates one automatically on **every** database:
 
 ```ts
-import { f, model, rel, createDb } from 'forge-orm';
-
-const Shop = model('shops', {
-  id:   f.id(),
-  name: f.string().unique(),
-}).relate(() => ({ products: rel.many('product', { on: 'shop_id', refs: 'id' }) }));
-
-const Product = model('products', {
-  id:       f.id(),
-  shop_id:  f.objectId(),
-  title:    f.string(),
-  price:    f.decimal({ precision: 10, scale: 2 }),
-  in_stock: f.bool().default(true),
-}).relate(() => ({ shop: rel.one('shop', { on: 'shop_id', refs: 'id', onDelete: 'Cascade' }) }));
-
-const schema = { shop: Shop, product: Product } as const;   // `as const` is important
-
-const db = await createDb({ url, schema });
-//    ^ db.shop / db.product are fully typed: fields, where-inputs, relations,
-//      select/include narrowing — all inferred from `schema`, no codegen.
+await db.user.create({ data: { email: 'a@x.co', name: 'A' } });  // id is generated
 ```
 
-- The `as const` on the schema map lets TypeScript infer literal model keys and
-  field kinds, which is what drives the typing.
-- `db` has type `ForgeDb<typeof schema>`; you can name it: `type DB = ForgeDb<typeof schema>`.
-- Row types: `Row<typeof Product>` → `{ id: string; shop_id: string; title: string; price: string; in_stock: boolean }`.
-- A runnable end-to-end example lives at `examples/custom-schema-demo.ts`
-  (`npm run forge:example:custom`).
-
-> **Scope of decoupling:** the *active* schema is process-global (last
-> `createDb({ schema })` wins). That fits the near-universal "one schema per
-> service" case. For several genuinely different schemas in one process, run
-> them in separate workers/processes.
-
-The bundled blog/CMS schema (`sampleSchema`, in `src/schema/index.ts`) is the
-default when you don't pass one, and a worked reference for every feature.
-Walking through the patterns it uses:
-
-### Fields
+The generated id is a **string**: an `ObjectId` on Mongo, and a UUID on
+Postgres, MySQL, and SQLite. It is a string (not a sequential number) so the
+same model is portable across all four databases. You can still pass your own
+`id` if you want to control it, and you can let the database generate it instead
+with a UUID default:
 
 ```ts
-import { f, model, rel, enums, embed } from './core';
-
-export const User = model('users', {
-  id:         f.id(),                                      // primary key
-  email:      f.string().unique(),                         // per-field unique
-  name:       f.string(),                                  // required string
-  role:       f.enumOf(['USER', 'EDITOR', 'ADMIN'] as const).default('USER'),
-  age:        f.int().optional(),                          // nullable integer
-  active:     f.bool().default(true),                      // default
-  created_at: f.dateTime().default('now'),                 // server-side default
-  updated_at: f.dateTime().default('now').updatedAt(),     // auto-bumps on write
-});
+id: f.uuid({ default: 'gen_random_uuid' })   // Postgres/MySQL fill it in server-side
 ```
 
-Available field kinds:
+(An auto-incrementing integer key is SQL-only and would not work on Mongo, so it
+is not built in.)
 
-| Builder | Notes |
-|---|---|
-| `f.id()` | Primary key. Auto-generated ObjectId on Mongo; app-supplied text on SQL dialects. |
-| `f.objectId()` | Foreign-key style ref. |
-| `f.string()` | Short string. PG/SQLite: `TEXT`. **MySQL: `VARCHAR(255)`** (indexable/uniqueable without prefix). |
-| `f.text()` | Unbounded string. **MySQL: `TEXT`** (can't be `UNIQUE` without a length prefix). Same as `f.string()` on PG/SQLite/Mongo. |
-| `f.int()` | 32-bit int. |
-| `f.float()` | 64-bit double. PG: `double precision`. MySQL: `DOUBLE`. SQLite: `REAL`. |
-| `f.decimal({ precision, scale })` | Exact numeric (money). PG `numeric(p,s)` · MySQL `DECIMAL(p,s)` · SQLite `NUMERIC` · Mongo `Decimal128`. **JS type: `string`** (avoids float-precision loss). |
-| `f.bigint()` | 64-bit integer. PG `bigint` · MySQL `BIGINT` · SQLite `INTEGER` · Mongo `Long`. JS type: `bigint`. |
-| `f.uuid({ default?: 'gen_random_uuid' })` | PG `uuid` (+ `DEFAULT gen_random_uuid()`) · MySQL `CHAR(36)` (+ `DEFAULT (UUID())`) · SQLite/Mongo `TEXT`/string. JS type: `string`. |
-| `f.bool()` | Boolean. SQLite/MySQL store as `0/1`; forge decodes back to JS `boolean`. |
-| `f.dateTime()` | UTC timestamp. PG: `timestamptz`. MySQL: `DATETIME(3)`. SQLite: ISO string. Mongo: `Date`. |
-| `f.json()` | Arbitrary JSON. PG: `jsonb`. MySQL: `JSON`. SQLite/Mongo: nested doc / serialized. |
-| `f.enumOf([...] as const)` | String literal union + `CHECK` constraint on all SQL dialects. |
-| `f.embed(MyEmbed)` | Single embedded composite — JSON-encoded on SQL dialects. |
-| `f.embedMany(MyEmbed)` | List of embedded composites — JSON array on SQL dialects (default `'[]'`). |
-| `f.stringArray()` | PG: `text[]`. MySQL/SQLite: JSON. Mongo: array. |
-| `f.intArray()` | PG: `integer[]`. MySQL/SQLite: JSON. |
+**Created-at (`f.dateTime().default('now')`).** Set to the current time when the
+row is created. You never pass it.
 
-Modifiers (chain on any field):
+**Updated-at (`f.dateTime().default('now').updatedAt()`).** Set when the row is
+created and **automatically bumped to the current time on every update**, on all
+four databases. You never pass it.
 
 ```ts
-f.string().optional()                      // nullable
-f.string().unique()                        // creates a UNIQUE index
-f.dateTime().default('now')                // server default ('now' | 'autoId' | literal)
-f.dateTime().default('now').updatedAt()    // auto-bumps on every update
-f.string().default('pending')              // literal default
-f.text().searchable()                      // auto full-text index on forge:push (see Full-text search)
-f.dateTime().softDeleteAt()                // marks the soft-delete column (see Soft delete)
-f.decimal({ precision: 14, scale: 2 }).dbgenerated('price * qty')   // DB-computed column (GENERATED ALWAYS AS … STORED)
+const post = await db.post.create({ data: { title: 'Hi' } });
+// post.created_at and post.updated_at are both set
+
+await db.post.update({ where: { id: post.id }, data: { title: 'Hello' } });
+// updated_at is now refreshed automatically
 ```
 
-### Indexes & composite uniques
+`f.objectId()` is for a column that holds another row's id (a foreign key). On
+Mongo it stores an `ObjectId`; on SQL it is plain text.
+
+### Field types
+
+| Builder                              | Type in your code | Notes                                                                 |
+| ------------------------------------ | ----------------- | --------------------------------------------------------------------- |
+| `f.id()`                             | `string`          | Primary key, auto-generated when omitted (see above).                 |
+| `f.objectId()`                       | `string`          | A reference to another row's id (foreign key).                        |
+| `f.string()`                         | `string`          | Short text. On MySQL this is `VARCHAR(255)` so it can be indexed.     |
+| `f.text()`                           | `string`          | Long text. On MySQL this is `TEXT`.                                   |
+| `f.int()`                            | `number`          | 32-bit integer.                                                       |
+| `f.float()`                          | `number`          | Floating point number.                                                |
+| `f.decimal({ precision, scale })`    | `string`          | Exact numbers like money. Returned as a string so digits are exact.   |
+| `f.bigint()`                         | `bigint`          | 64-bit integer.                                                       |
+| `f.uuid({ default })`                | `string`          | UUID. Pass `{ default: 'gen_random_uuid' }` for a database default.   |
+| `f.bool()`                           | `boolean`         | Stored as 0 or 1 on MySQL and SQLite, decoded back to a boolean.      |
+| `f.dateTime()`                       | `Date`            | Timestamp. Accepts a `Date` or an ISO string on input.                |
+| `f.json()`                           | `any`             | Arbitrary JSON. `jsonb` on Postgres, `JSON` on MySQL.                 |
+| `f.enumOf(['A','B'] as const)`       | `'A' \| 'B'`      | A fixed set of string values, checked by the database.                |
+| `f.embed(MyShape)`                   | object            | One nested object. Stored as JSON on SQL, a sub-document on Mongo.    |
+| `f.embedMany(MyShape)`               | object[]          | A list of nested objects.                                             |
+| `f.stringArray()` / `f.intArray()`   | `string[]` / `number[]` | A list of scalars. A native array on Postgres, JSON elsewhere.  |
+
+### Field modifiers
+
+Chain these onto any field.
 
 ```ts
-export const Post = model('posts', {
-  id:         f.id(),
-  author_id:  f.objectId(),
-  title:      f.string(),
-  slug:       f.string().unique(),
-  status:     f.enumOf(['DRAFT', 'PUBLISHED', 'ARCHIVED'] as const),
+f.string().optional()                 // the value can be null
+f.string().unique()                   // a unique index on this column
+f.dateTime().default('now')           // default to the current time (created-at)
+f.dateTime().default('now').updatedAt()  // set on create and auto-bumped on every update
+f.string().default('pending')         // a fixed default value
+f.text().searchable()                 // build a full-text index (see Full-text search)
+f.dateTime().softDeleteAt()           // mark this as the soft-delete column (see Soft delete)
+f.decimal({ precision: 12, scale: 2 }).dbgenerated('price * qty')  // computed by the database
+```
+
+### Indexes and unique constraints
+
+Pass an options object as the third argument to `model`.
+
+```ts
+const Post = model('posts', {
+  id:        f.id(),
+  author_id: f.objectId(),
+  slug:      f.string().unique(),     // single-column unique
+  status:    f.enumOf(['DRAFT', 'PUBLISHED'] as const),
 }, {
-  indexes:  [{ keys: { author_id: 1, status: 1 } }],  // multi-column
-  uniques:  [['author_id', 'slug']],                  // composite unique
+  indexes: [{ keys: { author_id: 1, status: 1 } }],   // a two-column index
+  uniques: [['author_id', 'slug']],                   // a combined unique
 });
 ```
 
 ### Relations
 
+A relation says "this model points at that model." You declare it with
+`.relate()`, which takes a function returning a map of relation names. There are
+two kinds:
+
+* `rel.one(target, { on, refs })` is the side that **holds the foreign key**.
+  For example a post has one author, and the post row stores `author_id`.
+* `rel.many(target, { on, refs })` is the **other side**, a list. A user has
+  many posts. Nothing is stored on the user row; forge looks posts up by their
+  `author_id`.
+
+The options mean:
+
+* `target` is the **key in your schema map** of the model you are pointing at
+  (`'user'`, not the table name `'users'`).
+* `on` is the column that holds the foreign key value.
+* `refs` is the column it points to on the other model (usually `'id'`).
+* `onDelete` (one-side only) controls what happens to this row when the row it
+  points to is deleted: `'Cascade'` (delete this too), `'SetNull'` (clear the
+  foreign key), `'Restrict'`, or `'NoAction'`.
+
 ```ts
-export const Post = model('posts', { ... }).relate(() => ({
-  author:   rel.one('user', { on: 'author_id', refs: 'id', onDelete: 'Cascade' }),
-  comments: rel.many('comment', { on: 'post_id', refs: 'id' }),
-  tags:     rel.many('postTag', { on: 'post_id', refs: 'id' }),
-}));
+const User = model('users', { id: f.id(), name: f.string() })
+  .relate(() => ({
+    // a user has many posts; posts find their user via posts.author_id
+    posts: rel.many('post', { on: 'author_id', refs: 'id' }),
+  }));
+
+const Post = model('posts', { id: f.id(), author_id: f.objectId(), title: f.string() })
+  .relate(() => ({
+    // a post has one author; the foreign key author_id lives on the post row
+    author: rel.one('user', { on: 'author_id', refs: 'id', onDelete: 'Cascade' }),
+  }));
 ```
 
-- `rel.one` → owning side (this model holds the FK column)
-- `rel.many` → inverse side (the other model holds the FK)
-- `on` → field on the owning side that holds the FK
-- `refs` → field on the target being referenced (almost always `id`)
-- `onDelete: 'Cascade' | 'SetNull' | 'NoAction' | 'Restrict'`
-  - PG: emitted as `ON DELETE CASCADE` etc. on the FK constraint
-  - Mongo: emulated by a JS cascade walker on delete
-
-### Self-referential
+A model can point at itself, which is how you build trees such as comment
+replies:
 
 ```ts
-export const Comment = model('comments', {
-  id:        f.id(),
-  parent_id: f.objectId().optional(),
-}).relate(() => ({
-  parent:  rel.one('comment', { on: 'parent_id', refs: 'id' }),
-  replies: rel.many('comment', { on: 'parent_id', refs: 'id' }),
-}));
+const Comment = model('comments', { id: f.id(), parent_id: f.objectId().optional() })
+  .relate(() => ({
+    parent:  rel.one('comment',  { on: 'parent_id', refs: 'id' }),
+    replies: rel.many('comment', { on: 'parent_id', refs: 'id' }),
+  }));
 ```
 
-### Embeds
+Once a relation exists you can load it with `include` (see
+[Choosing fields](#choosing-fields-select-and-include)) and write related rows
+in one call (see [Writing related records](#writing-related-records-in-one-call)).
+
+### Embedded objects
+
+An embedded object is a fixed shape stored inside a row, as JSON on SQL
+databases and as a sub-document on Mongo. Use `embed` to declare the shape.
 
 ```ts
-export const AddressEmbed = () => embed('Address', {
-  street: f.string(), city: f.string(), zip: f.string(), country: f.string(),
+import { embed, f, model } from 'forge-orm';
+
+const Address = () => embed('Address', {
+  street: f.string(),
+  city:   f.string(),
+  zip:    f.string(),
 });
 
-export const User = model('users', {
+const User = model('users', {
   id:      f.id(),
-  address: f.embed(AddressEmbed).optional(),  // nested doc on Mongo, jsonb on PG
+  name:    f.string(),
+  address: f.embed(Address).optional(),       // one address
+  history: f.embedMany(Address),              // a list, defaults to []
 });
+
+await db.user.create({ data: { name: 'A', address: { street: '1 Main', city: 'SF', zip: '94110' } } });
 ```
-
-### Register the schema
-
-```ts
-export const schema = {
-  user: User,
-  post: Post,
-  comment: Comment,
-  // …
-} as const;
-```
-
-The map key (`user`, `post`) is what you'll type at the call site
-(`db.user.findMany(...)`). The string is also what `rel.one('user', …)`
-references — type-checked at compile time via the `_assertAllTargetsValid`
-line at the bottom of `schema/index.ts`.
-
----
-
-## Adapters & connection strings
-
-Adapter selection from URL prefix:
-
-| Prefix | Adapter |
-|---|---|
-| `mongodb://`, `mongodb+srv://` | mongo |
-| `postgres://`, `postgresql://` | postgres |
-| `mysql://`, `mariadb://` | mysql |
-| `sqlite:`, `file:`, `.db` / `.sqlite` filename, `sqlite::memory:` | sqlite |
-
-Three call shapes for `createDb`:
-
-```ts
-// 1. URL only — adapter inferred
-const db = await createDb({ url: process.env.DATABASE_URL! });
-
-// 2. Explicit type override (useful behind proxies / connection poolers
-//    that mangle the URL prefix)
-const db = await createDb({ type: 'postgres', url: '...' });
-
-// 3. Structured config (no URL string)
-const db = await createDb({
-  type: 'postgres',
-  host: 'localhost', port: 5432, database: 'myapp',
-  user: 'postgres', password: '…',
-  pool: { min: 5, max: 50 },
-});
-```
-
-If both `type:` and `url:` are passed and they disagree, forge throws —
-typo / wrong-env-loaded caught early.
 
 ---
 
 ## Reading data
 
-Every read accepts the same arg shape: `where`, `select` OR `include`,
-`omit`, `orderBy`, `take`/`limit`, `skip`/`offset`, `cursor`, `distinct`.
+Every model has the read methods you expect.
 
 ```ts
-// findFirst — one row or null
-const user = await db.user.findFirst({ where: { email: 'a@b.co' } });
-
-// findUnique — by unique field; same shape but `where` is required
-const user2 = await db.user.findUnique({ where: { email: 'a@b.co' } });
-
-// findFirstOrThrow / findUniqueOrThrow — throws DbKnownError P2025 on miss
-const must = await db.user.findFirstOrThrow({ where: { email: 'a@b.co' } });
-
-// findMany — array (possibly empty)
-const recent = await db.post.findMany({
-  where: { status: 'PUBLISHED', author: { is: { active: true } } },
-  orderBy: [{ created_at: 'desc' }, { title: 'asc' }],
-  take: 20,
-  skip: 40,    // alias: offset
-});
-
-// count
-const n = await db.post.count({ where: { author_id: 'u1' } });
-
-// distinct (post-fetch dedupe on Mongo; native DISTINCT ON on PG)
-const tags = await db.post.findMany({ distinct: ['status'] });
+await db.user.findMany({ where: { active: true }, take: 20 });
+await db.user.findFirst({ where: { email: 'a@x.co' } });   // first match or null
+await db.user.findUnique({ where: { id: 'u1' } });          // by a unique field
+await db.user.count({ where: { active: true } });
+await db.user.findFirstOrThrow({ where: { email: 'a@x.co' } });  // throws if missing
 ```
 
-### `where` operators
+### Filtering with `where`
+
+`where` accepts either a direct value or an operator object per field, plus
+`AND`, `OR`, and `NOT`.
 
 ```ts
-{ email: 'a@b.co' }                          // bare equality
-{ email: { equals: 'a@b.co' } }              // explicit
-{ email: { in: ['a@b.co', 'c@d.co'] } }      // in / notIn
-{ email: { contains: 'gmail', mode: 'insensitive' } }   // ILIKE on PG
-{ email: { startsWith: 'a' } }
-{ age:   { gte: 18, lt: 65 } }               // range
-{ tags:  { has: 'forge', hasSome: ['ts', 'pg'], isEmpty: false } }   // arrays
-
-// Logical
-{ AND: [{ active: true }, { age: { gte: 18 } }] }
-{ OR:  [{ email: { contains: '@x.co' } }, { email: { contains: '@y.co' } }] }
-{ NOT: { active: false } }
-
-// Relations
-{ posts: { some: { status: 'PUBLISHED' } } }     // EXISTS (...)
-{ posts: { every: { status: 'PUBLISHED' } } }    // NOT EXISTS (... WHERE NOT ...)
-{ posts: { none: { is_deleted: true } } }
-{ author: { is: { active: true } } }
-{ author: { isNot: { active: false } } }
-```
-
-### `select` vs `include`
-
-```ts
-// select — get back ONLY these scalar fields + listed relations
-await db.user.findFirst({ select: { id: true, email: true } });
-// → { id, email }  — accessing .created_at is a compile error
-
-// include — get back ALL scalars PLUS listed relations
-await db.user.findFirst({ include: { posts: true } });
-// → User & { posts: Post[] }
-
-// Nested args on the included relation
-await db.user.findFirst({
-  include: {
-    posts: { where: { status: 'PUBLISHED' }, orderBy: { created_at: 'desc' }, take: 5 },
+await db.post.findMany({
+  where: {
+    status: 'PUBLISHED',                       // equals
+    title:  { contains: 'forge' },             // text match
+    views:  { gte: 100, lt: 1000 },            // ranges
+    author_id: { in: ['u1', 'u2'] },           // any of
+    OR: [
+      { pinned: true },
+      { created_at: { gt: new Date('2024-01-01') } },
+    ],
   },
 });
-
-// _count for a relation (no hydration, just the count)
-await db.user.findFirst({
-  include: { _count: { select: { posts: true, comments: true } } },
-});
-// → User & { _count: { posts: number; comments: number } }
-
-// omit — opposite of select (drop these fields, keep the rest)
-await db.user.findFirst({ omit: { created_at: true, updated_at: true } });
 ```
 
-### Cursor pagination
+Available operators:
+
+* All types: `equals`, `not`, `in`, `notIn`.
+* Numbers and dates: `lt`, `lte`, `gt`, `gte`.
+* Strings: `contains`, `startsWith`, `endsWith`, and `mode: 'insensitive'`.
+* List fields: `has`, `hasEvery`, `hasSome`, `isEmpty`.
+* Text columns marked `.searchable()`: `search` (see
+  [Full-text search](#full-text-search)).
+
+### Choosing fields: `select` and `include`
+
+By default a query returns all of a model's own columns. To change that, use one
+of these (you may use one or the other, not both at once):
+
+* `select` returns **only** the fields you list. The result type narrows to match.
+* `include` returns all columns **plus** the related records you ask for.
 
 ```ts
-// Single-field cursor
-const page2 = await db.post.findMany({
-  cursor: { id: lastIdFromPage1 },
-  orderBy: { id: 'asc' },
-  take: 20,
+// only these two fields come back
+const slim = await db.user.findMany({ select: { id: true, email: true } });
+
+// the user plus their posts, and each post's comments
+const full = await db.user.findFirst({
+  where:   { id: 'u1' },
+  include: { posts: { include: { comments: true } } },
 });
 
-// Composite cursor (matches a @@unique([a, b]))
-const page2 = await db.like.findMany({
-  cursor: { user_id_post_id_kind: { user_id: 'u1', post_id: 'p1', kind: 'LIKE' } },
-  take: 20,
+// you can filter and limit an included relation
+await db.user.findFirst({
+  include: { posts: { where: { status: 'PUBLISHED' }, orderBy: { created_at: 'desc' }, take: 5 } },
 });
+```
+
+### Sorting and pagination
+
+```ts
+await db.post.findMany({
+  where:   { status: 'PUBLISHED' },
+  orderBy: { created_at: 'desc' },     // or an array for multiple keys
+  take:    20,                          // page size
+  skip:    40,                          // offset
+});
+
+// cursor pagination, for stable paging over large sets
+await db.post.findMany({ take: 20, cursor: { id: lastSeenId }, skip: 1 });
 ```
 
 ---
@@ -541,1184 +455,347 @@ const page2 = await db.like.findMany({
 ## Writing data
 
 ```ts
-// create — returns the created row
-const u = await db.user.create({
-  data: { email: 'alice@x.co', name: 'Alice', role: 'EDITOR' },
-});
+await db.user.create({ data: { email: 'a@x.co', name: 'A' } });   // id auto-generated
 
-// createMany — returns { count }
-const { count } = await db.user.createMany({
-  data: [
-    { email: 'bob@x.co',   name: 'Bob' },
-    { email: 'carol@x.co', name: 'Carol' },
-  ],
-  skipDuplicates: true,  // ON CONFLICT DO NOTHING on PG; ordered:false on Mongo
-});
+await db.user.createMany({ data: [ /* … */ ] });
 
-// update — returns the updated row; throws P2025 if no match
-const updated = await db.user.update({
-  where: { id: u.id },
-  data: { active: false },
-});
+await db.user.update({ where: { id: 'u1' }, data: { name: 'A2' } });
 
-// updateMany — returns { count }
-const { count: n } = await db.user.updateMany({
-  where: { active: false },
-  data: { active: true },
-});
+await db.user.updateMany({ where: { active: false }, data: { active: true } });
 
-// upsert — atomic find-or-create
+// update if found, otherwise create
 await db.user.upsert({
-  where: { email: 'alice@x.co' },
-  create: { email: 'alice@x.co', name: 'Alice' },
-  update: { name: 'Alice (updated)' },
+  where:  { email: 'a@x.co' },
+  create: { email: 'a@x.co', name: 'A' },
+  update: { name: 'A' },
 });
 
-// delete — returns the deleted row
-await db.user.delete({ where: { id: u.id } });
-
-// deleteMany — returns { count }
+await db.user.delete({ where: { id: 'u1' } });
 await db.user.deleteMany({ where: { active: false } });
 ```
 
-Reading-shape sugar applies to writes too — `create`/`update`/`upsert`/`delete`
-all accept `select`/`include`/`omit` to shape the returned row:
+Create and update can also return only selected fields or include relations,
+the same way reads do, by passing `select` or `include` alongside `data`.
+
+### Number and field updates
+
+For number columns you can apply an operation instead of setting a value
+outright:
 
 ```ts
-const userWithProfile = await db.user.create({
-  data: { email: 'a@x.co', name: 'A' },
-  include: { profile: true },
-});
-```
-
----
-
-## Atomic updates
-
-For numeric and array fields, use the atomic operator wrappers — they
-translate to native DB ops (`$inc` / `array_append` / `SET col = col + $n`)
-rather than fetch-modify-write, so they're concurrency-safe.
-
-```ts
-// Numeric atomic ops
 await db.post.update({
   where: { id: 'p1' },
   data: {
-    view_count: { increment: 1 },
-    score:      { decrement: 2 },
-    rating:     { multiply: 1.5 },
-    factor:     { divide: 4 },
+    views:     { increment: 1 },     // also: decrement, multiply, divide, set
+    score:     { multiply: 2 },
+    published: true,
   },
 });
-
-// Array push (text[] / integer[] on PG, $push on Mongo)
-await db.post.update({
-  where: { id: 'p1' },
-  data: { tag_names: { push: 'typescript' } },
-});
-
-// Set field to NULL (use ForgeDbNull or just null)
-import { ForgeDbNull } from 'forge-orm';
-await db.profile.update({ where: { id: 'x' }, data: { bio: ForgeDbNull } });
 ```
 
-The atomic ops also work on **optional numeric fields** — forge's
-`IsNumericField<T>` helper handles `number | null | undefined` properly.
+### Writing related records in one call
 
----
-
-## Relations & nested writes
-
-### Eager loading via `include`
-
-Forge hydrates relations via post-fetch batched queries (one IN-query per
-relation, batched across all parent rows — no N+1).
+When you create or update a row you can act on its relations at the same time:
 
 ```ts
-const u = await db.user.findFirst({
-  where: { id: 'u1' },
-  include: {
-    profile: true,                                    // one-to-one
-    posts: {                                          // one-to-many w/ args
-      where:   { status: 'PUBLISHED' },
-      orderBy: { created_at: 'desc' },
-      take:    10,
-    },
-    _count: { select: { comments: true, likes: true } },  // counts only
-  },
-});
-// u → User & { profile, posts, _count: { comments, likes } }
-```
-
-### Nested writes
-
-```ts
-// Create a user with their first post in one call
 await db.user.create({
   data: {
     email: 'a@x.co', name: 'A',
     posts: {
-      create: { title: 'hi', slug: 'hi', body: '…', status: 'PUBLISHED' },
+      create: { title: 'Hello' },     // create a new related post
+      connect: { id: 'p2' },          // attach an existing one
     },
   },
-});
-
-// Create multiple children
-await db.user.create({
-  data: {
-    email: 'b@x.co', name: 'B',
-    posts: {
-      createMany: { data: [
-        { title: 't1', slug: 's1', body: '...', status: 'PUBLISHED' },
-        { title: 't2', slug: 's2', body: '...', status: 'DRAFT' },
-      ]},
-    },
-  },
-});
-
-// connect: attach to an existing row by id
-await db.postTag.create({
-  data: {
-    post_id: 'p1',
-    tag: { connect: { id: 'tag_typescript' } },
-  },
-});
-
-// connectOrCreate: find-or-create on the target
-await db.postTag.create({
-  data: {
-    post_id: 'p1',
-    tag: { connectOrCreate: {
-      where:  { name: 'typescript' },
-      create: { name: 'typescript' },
-    }},
-  },
-});
-
-// disconnect: clear the FK
-await db.postTag.update({
-  where: { id: 'pt1' },
-  data:  { tag: { disconnect: true } },
-});
-
-// delete / deleteMany on the relation
-await db.user.update({
-  where: { id: 'u1' },
-  data:  { comments: { deleteMany: { is_deleted: true } } },
 });
 ```
 
-### Cascades
+Supported on a relation: `create`, `createMany`, `connect`, `connectOrCreate`
+(find one or make it), `disconnect`, `set`, `delete`, `deleteMany`.
 
-Set `onDelete: 'Cascade' | 'SetNull' | 'NoAction' | 'Restrict'` on the
-relation declaration. Forge emits:
+### Deletes and cascades
 
-- **PG**: `ON DELETE CASCADE` (etc.) on the FK constraint — enforced by the
-  DB engine.
-- **Mongo**: a JS walker runs after each delete to fix up child rows.
+If a relation declares `onDelete: 'Cascade'`, deleting the parent deletes the
+children too. On SQL this is enforced by a foreign key. On Mongo, which has no
+foreign keys, forge walks the relations and deletes the children for you.
 
-Either way, `db.user.delete({ where: { id } })` removes related rows
-according to the schema's declarations — no explicit cleanup code at call
-sites.
+```ts
+await db.user.delete({ where: { id: 'u1' } });   // posts with onDelete:'Cascade' go too
+```
 
 ---
 
-## `groupBy` and aggregations
+## Grouping and aggregates
 
 ```ts
-// Count by enum
 const byRole = await db.user.groupBy({
-  by: ['role'],
+  by:     ['role'],
+  where:  { active: true },
   _count: { _all: true },
-  orderBy: { role: 'asc' },
+  _avg:   { age: true },
+  having: { _count: { id: { gt: 1 } } },
+  orderBy:{ role: 'asc' },
 });
-// → [{ role: 'USER', _count: { _all: 142 } }, { role: 'EDITOR', _count: { _all: 12 } }, …]
-
-// Aggregations: _avg, _sum, _min, _max
-const stats = await db.post.groupBy({
-  by: ['status'],
-  _count: { _all: true },
-  _avg:   { view_count: true },
-  _sum:   { view_count: true },
-  _min:   { view_count: true },
-  _max:   { view_count: true },
-});
-// → [{ status: 'PUBLISHED', _count: {...}, _avg: { view_count: 12.3 }, _sum: {...}, … }, ...]
-
-// `having` — post-aggregate filter
-const popular = await db.user.groupBy({
-  by: ['role'],
-  _count: { _all: true, id: true },
-  having: { _count: { id: { gt: 100 } } },   // only roles with >100 users
-});
+// [{ role: 'USER', _count: { _all: 42 }, _avg: { age: 31.2 } }, …]
 ```
-
-On Postgres this compiles to native `SELECT … COUNT(*), AVG(col) FROM …
-GROUP BY … HAVING … ORDER BY … LIMIT …`. On Mongo it compiles to an
-aggregation pipeline with `$match` + `$group` + `$match` (for having) +
-`$sort` + `$limit`. The wrapper reshapes the flat `__agg_count_all` etc.
-aliases back into Prisma's nested `_count: {...}` payload on the way out.
 
 ---
 
 ## Transactions
 
-```ts
-// Callback form: every write inside the callback runs in one transaction.
-// Throws → automatic rollback. Resolves → automatic commit.
-await db.$transaction(async (tx) => {
-  const u = await tx.user.create({ data: { email: 'a@x.co', name: 'A' } });
-  await tx.profile.create({ data: { user_id: u.id, bio: 'hello' } });
-  await tx.auditLog.create({ data: { actor_id: u.id, event: 'signup' } });
-});
+Run several writes so they all commit together or all roll back.
 
-// Array form: resolves the array; returns the result tuple.
-const [users, posts] = await db.$transaction([
-  db.user.findMany(),
-  db.post.findMany(),
-]);
+```ts
+await db.$transaction(async (tx) => {
+  const user = await tx.user.create({ data: { email: 'a@x.co', name: 'A' } });
+  await tx.post.create({ data: { author_id: user.id, title: 'Hi' } });
+});
 ```
 
-- **Postgres**: `BEGIN`/`COMMIT`/`ROLLBACK` via a borrowed `PoolClient`.
-- **MySQL**: same — `START TRANSACTION`/`COMMIT`/`ROLLBACK` via a borrowed connection.
-- **SQLite**: `BEGIN`/`COMMIT`/`ROLLBACK` on the single in-process connection.
-- **Mongo**: `withTransaction` via a `ClientSession`. **Requires a replica
-  set or mongos** — single-node Mongo throws on `$transaction`. Same
-  limitation Prisma has on its Mongo connector.
+If the callback throws, nothing is saved. You can also pass an array of queries
+to run together: `await db.$transaction([db.user.findMany(), db.post.count()])`.
 
-> **Gotcha (SQL):** don't `try/catch`-and-continue a constraint violation
-> *inside* a `$transaction`. On Postgres a failed statement aborts the whole
-> transaction — the swallowed error doesn't let you proceed; the next statement
-> fails with *"current transaction is aborted"*. forge maps the violation to
-> `P2002` and rolls back cleanly (no partial write), but the catch-and-continue
-> pattern won't work. Check-then-write, use `upsert`, or let the transaction
-> fail and retry. (Surfaced by the canary — see `canary/README.md`.)
+On Mongo, transactions need a replica set (a single-node `mongod` cannot run
+them), which is the same requirement Prisma has.
+
+**One thing to watch on Postgres:** do not catch a constraint error inside a
+transaction and keep going. Postgres marks the whole transaction as failed after
+any error, so the next statement fails with "current transaction is aborted."
+forge rolls the transaction back cleanly and reports the original error, but the
+catch-and-continue pattern will not work. Check first, use `upsert`, or let the
+transaction fail and retry it.
 
 ---
 
-## Raw SQL escape hatch
+## Running raw SQL
 
-Two call styles, both parameterised (injection-safe by default):
+When you need SQL forge does not express, use the tagged template. Values become
+bound parameters, never string-interpolated, so it is safe against injection.
 
 ```ts
-import { forgeSql } from 'forge-orm';
-
-// Tagged template — values become $1, $2, … placeholders automatically
-const id = 'u_42';
-const rows = await db.$queryRaw<{ id: string; email: string }>`
-  SELECT id, email FROM users WHERE id = ${id} AND active = ${true}
-`;
-// rows[0].id is typed `string`, not any.
-
-// Composition with forge.sql / forge.join / forge.empty
-const filter = active
-  ? forgeSql.sql`AND active = ${true}`
-  : forgeSql.empty;
-
-await db.$queryRaw`
-  SELECT * FROM users
-  WHERE org_id = ${orgId}
-  ${filter}
-`;
-
-// $executeRaw — returns affected row count
-const affected = await db.$executeRaw`
-  UPDATE users SET active = false WHERE last_login < ${cutoffDate}
-`;
+const rows = await db.$queryRaw`SELECT * FROM users WHERE email = ${email}`;
+const affected = await db.$executeRaw`UPDATE users SET active = false WHERE last_seen < ${cutoff}`;
 ```
 
-Mongo's `$queryRaw` throws a clear "SQL-only" error — use the aggregation
-pipeline (`db.<model>.aggregate({ pipeline })`) or `$runCommandRaw(cmd)` for
-raw Mongo.
+This is SQL only. On Mongo, use `db.<model>.aggregate({ pipeline })` instead.
 
 ---
 
 ## Errors
 
-Every recoverable error surfaces as `DbKnownError` with a Prisma-shape code,
-identical across adapters:
+Constraint and connection failures come back as a `DbKnownError` with a stable
+code, so you can branch on the cause regardless of which database you are on.
 
 ```ts
 import { DbKnownError } from 'forge-orm';
 
 try {
-  await db.user.create({ data: { email: existingEmail, name: '...' } });
+  await db.user.create({ data: { email: 'taken@x.co', name: 'A' } });
 } catch (e) {
   if (e instanceof DbKnownError && e.code === 'P2002') {
-    // unique violation
-    console.log('email already taken; meta:', e.meta);
-  } else throw e;
+    // unique constraint violation (here, the email already exists)
+  }
 }
 ```
 
-Codes mapped today:
-
-| Code | Meaning | Mongo | PG SQLSTATE | MySQL errno | SQLite code |
-|---|---|---|---|---|---|
-| `P2002` | Unique constraint failed | dup key (11000) | 23505 | 1062 | SQLITE_CONSTRAINT_UNIQUE / _PRIMARYKEY |
-| `P2003` | Foreign key constraint failed | — | 23503 | 1451 / 1452 | SQLITE_CONSTRAINT_FOREIGNKEY |
-| `P2004` | Check constraint failed | — | 23514 | 3819 | SQLITE_CONSTRAINT_CHECK |
-| `P2011` | Null constraint violation | — | 23502 | 1048 | SQLITE_CONSTRAINT_NOTNULL |
-| `P2021` | Table does not exist | — | 42P01 | 1146 | SQLITE_ERROR |
-| `P2022` | Column does not exist | — | 42703 | 1054 | — |
-| `P2024` | Query timeout | — | 57014 | 1205 / 1317 | — |
-| `P2025` | Record not found | findFirstOrThrow miss | — | — | — |
-| `P2034` | Transaction deadlock / serialisation | — | 40P01 / 40001 | 1213 / 1205 | SQLITE_BUSY / _LOCKED |
-| `P1001` | Connection error | — | 08000 / 08006 | 2002 / 2003 / 2006 | SQLITE_IOERR / _CANTOPEN |
-| `P1010` | Authentication failed | — | 28P01 / 28000 | 1045 | — |
-
-`e.meta` carries adapter context: `{ sqlstate, modelName, field_name, target, detail }` on PG; `{ modelName, target }` on Mongo.
+The codes follow Prisma's familiar set (`P2002` unique, `P2003` foreign key,
+`P2004` constraint, and so on).
 
 ---
 
-## Schema sync — `forge:push`
+## Full-text search
 
-Single command, both adapters:
-
-```sh
-# Mongo: creates/updates the indexes declared by `.unique()` / @@unique / @@index
-DATABASE_URL="mongodb://…" npm run forge:push
-
-# Postgres: emits CREATE TABLE / FK / UNIQUE / CHECK / INDEX, runs inside a
-# transaction with `pg_advisory_xact_lock` to serialise concurrent invocations,
-# wraps each statement in a SAVEPOINT so single failures don't abort the batch.
-DATABASE_URL="postgres://…" npm run forge:push
-```
-
-Sample output:
-
-```
-[forge:push] 34 statements to apply, 0 already in place
-  ✓ table       users
-  ✓ table       profiles
-  ✓ unique      forge_users_uq_email
-  ✓ check       forge_users_enum_role
-  ✓ foreignKey  forge_profiles_fk_user_id
-  ✓ index       forge_users_idx_created_at
-  …
-[forge:push] applied 34, skipped 0
-```
-
-Idempotent — re-running against an in-sync DB is a no-op (introspects
-`information_schema.tables` + `pg_constraint` + `pg_indexes`, only applies
-what's missing).
-
----
-
-## `forge:doctor`
-
-Environment checker — prints which drivers are installed and what adapter
-`DATABASE_URL` would resolve to:
-
-```sh
-$ npm run forge:doctor
-
-Forge — environment check
-
-  Drivers installed:
-    ✓ mongodb          6.21.0
-    ✓ pg               8.21.0
-    ✗ mysql2           not installed
-    ✗ better-sqlite3   not installed
-
-  DATABASE_URL:
-    postgres://forge:****@localhost/myapp  →  postgres adapter  (✓ driver installed)
-```
-
----
-
-## The `.compile` escape hatch
-
-Every model wrapper has a `.compile` namespace mirroring its execute methods
-but returning the raw artifact instead of running it. Useful when you want
-forge's typed builder but your own driver for execution:
+Mark a text column `.searchable()`. When you create the tables, forge builds the
+right full-text index for each database (a GIN index on Postgres, a FULLTEXT
+index on MySQL, a text index on Mongo, an FTS5 table on SQLite). Then query it
+with the `search` operator.
 
 ```ts
-const c = db.user.compile.findMany({
-  where: { active: true, age: { gte: 18 } },
-  take: 20,
+const Post = model('posts', { id: f.id(), body: f.text().searchable() });
+
+await db.post.findMany({ where: { body: { search: 'database wrapper' } } });
+```
+
+---
+
+## Streaming large results
+
+To process a large table without loading it all into memory, use
+`findManyStream`. It yields rows one at a time using the driver's native cursor.
+
+```ts
+for await (const user of db.user.findManyStream({ where: { active: true } })) {
+  await sendEmail(user);   // one row in memory at a time
+}
+```
+
+---
+
+## Soft delete
+
+Mark a date column `.softDeleteAt()`. After that, `delete` and `deleteMany` do
+not remove the row. They set that column to the current time, and reads
+automatically skip rows where it is set.
+
+```ts
+const Account = model('accounts', { id: f.id(), deleted_at: f.dateTime().softDeleteAt() });
+
+await db.account.delete({ where: { id: 'a1' } });             // sets deleted_at, row stays
+await db.account.findMany();                                   // does not return a1
+await db.account.findMany({ where: { _withDeleted: true } });  // include soft-deleted rows
+```
+
+---
+
+## Views and materialised views
+
+Declare a read-only view with `.asView()`. Writes to it are rejected; reads work
+normally.
+
+```ts
+const PublishedPosts = model('published_posts', {
+  id: f.id(), title: f.string(), author_id: f.objectId(),
+}).asView({
+  sql: `SELECT id, title, author_id FROM posts WHERE status = 'PUBLISHED'`,
+  sourceCollection: 'posts',   // Mongo equivalent
+  pipeline: [{ $match: { status: 'PUBLISHED' } }],
 });
-
-// On Mongo, c is a typed object you pass straight to the driver:
-// {
-//   kind: 'mongo', collection: 'users', op: 'find',
-//   args: { filter: { $and: [...] }, options: { sort: [...], limit: 20 } }
-// }
-const mongo = require('mongodb');
-const client = new mongo.MongoClient(url);
-await client.connect();
-const docs = await client.db().collection(c.collection)
-  .find(c.args.filter, c.args.options).toArray();
-
-// On Postgres (via buildPostgresCompileApi):
-// {
-//   kind: 'sql', dialect: 'postgres',
-//   sql: 'SELECT … FROM "users" WHERE … LIMIT 20',
-//   params: [true, 18]
-// }
-const { Pool } = require('pg');
-const pool = new Pool({ connectionString: url });
-const { rows } = await pool.query(c.sql, c.params);
 ```
 
-Use cases:
-
-- Plugging forge's typed query builder into a codebase that owns its own
-  connection pool.
-- Generating migration / seed scripts from typed queries.
-- Capturing every query for replay / audit / fuzz testing.
-- Debugging — see exactly what forge would send to the driver.
-
----
-
-## Type safety in detail
-
-Forge's types were verified programmatically by driving the TypeScript
-Language Service directly. See `autocomplete-probe.ts` and
-`typesafety-demo.ts` for the full verification harness.
-
-**What's strictly typed** (autocomplete works, bad inputs are compile errors):
-
-- Per-model `WhereInput` / `CreateInput` / `UpdateInput` / `Select` /
-  `Include` / `FindManyArgs` / `Payload<Args>` — none collapse to `any`,
-  all derive from the schema map via mapped types
-- `select: { fieldName: true }` keys autocomplete from the model's scalar
-  fields; wrong types (`email: 42`) rejected
-- `include: { relName: true }` keys autocomplete from the model's relations;
-  scalars are NOT offered
-- Atomic ops on numeric fields (incl. **optional numerics** like
-  `age?: number | null`) accept `{ increment: 1 }` without `as any`
-- `select`-narrowed return types — `db.user.findFirst({ select: { email: true } })`
-  returns `{ email: string } | null`; accessing `.created_at` is a compile
-  error
-- Enum literal unions — `role: 'WIZARD'` rejected when the schema enum is
-  `'USER' | 'EDITOR' | 'ADMIN'`
-- `groupBy` `by` accepts only real schema fields; `_count`/`_avg`/`_sum`/
-  `_min`/`_max` accept only real fields (`_count` additionally accepts
-  `_all`)
-- Tagged-template `$queryRaw<T>` — return rows typed as `T[]`
-
-**Documented loose surface** (known design trade-offs):
-
-- `where` has a `[k: string]: any` escape hatch to accept composite-unique
-  synthetic keys (Prisma convention). Side effect: top-level field-name
-  typos in `where` and unknown enum strings slip through. DB-level CHECK
-  catches enums at runtime (→ P2004); composite keys would otherwise be
-  unreachable without this.
-- `CreateInput` marks every field optional — missing-required surfaces at
-  runtime as `P2011` (NOT NULL violation) rather than at compile time. The
-  schema's "required" notion is fuzzy (DEFAULT clauses, `.optional()`, auto
-  timestamps).
-- `aggregate({ pipeline: any[] })` is intentionally untyped — BSON
-  pipelines aren't domain-typed. Use `groupBy` (typed) for normal cases.
-
-Verify yourself:
-
-```sh
-# Probe completions via the Language Service API:
-npx ts-node autocomplete-probe.ts
-
-# Assert specific type contracts hold:
-npx tsc --noEmit --strict typesafety-demo.ts
-```
-
----
-
-## Architecture
-
-```
-                        user calls
-                            │
-                            ▼
-                   ┌─────────────────┐
-                   │ CollectionWrapper│   typed Prisma-shape methods
-                   │  (db.user.…)    │
-                   └────────┬────────┘
-                            │
-                            ▼ buildSelect / buildInsert / buildUpdate / …
-                   ┌─────────────────┐
-                   │     Query IR    │   adapter-agnostic intermediate rep
-                   │  (ir/types.ts)  │
-                   └────┬───────┬────┘
-                        │       │
-                ┌───────┘       └───────┐
-                ▼                       ▼
-     ┌──────────────────┐   ┌──────────────────────┐
-     │ adapters/mongo/  │   │ adapters/postgres/   │
-     │   compile-from-ir│   │   compile-from-ir    │
-     │   execute        │   │   execute            │
-     │   ddl + migrate  │   │   ddl + migrate      │
-     └─────────┬────────┘   └──────────┬───────────┘
-               │                        │
-               ▼                        ▼
-        mongodb driver              pg driver
-```
-
-The IR is the keystone — it's what makes "same query, two databases" work.
-A `SelectNode` doesn't know about Mongo filters or SQL `WHERE` clauses; it
-just describes "fetch rows from model X matching this WhereTree." Each
-adapter has its own compiler that turns the IR into a driver-specific call.
-
-When you add a new adapter, you implement the `Adapter` interface — eight
-executor methods + lifecycle. The wrapper, the IR builders, and 90% of the
-type system stay the same.
-
----
-
-## Testing & quality gates
-
-Everything is an npm script — no raw `ts-node` invocations to remember. The
-master gate is **`npm run forge:all`** (no-DB checks → live integration on all
-four dialects → bench). As of v1.0 that's **354 tests** green in ~13s:
-**191 unit** + **163 live integration** (Postgres 53 · SQLite 37 · Mongo 38 · MySQL 35).
-
-```sh
-cd forge
-
-# ─── No DB required (forge:check) ────────────────────────────────
-npm run forge:test          # 191 unit/spec tests (jest): IR build, where/orderby
-                            #   translation, compile-from-ir per dialect, DDL
-                            #   (incl. native-type columns), migrate planning,
-                            #   error mapping, schema integrity, decoupling, …
-npm run forge:typesafety    # strict tsc over typesafety-demo.ts — 19 strict +
-                            #   3 documented-loose + 5 custom-schema assertions
-npm run forge:autocomplete  # prints the REAL completion lists at each cursor
-                            #   position via the TypeScript Language Service API
-npm run forge:check         # the three above in sequence
-
-# ─── Live integration (one isolated DB per run, created + dropped) ─
-npm run forge:integration:pg       # ~53 scenarios vs live Postgres
-npm run forge:integration:mysql    # ~35 scenarios vs live MySQL
-npm run forge:integration:sqlite   # ~37 scenarios vs in-memory SQLite
-npm run forge:integration:sqlite:file   # same, against an on-disk .db file
-npm run forge:integration:mongo    # ~38 scenarios vs live Mongo
-npm run forge:integration          # all four, in sequence
-
-# ─── Benchmarks ──────────────────────────────────────────────────
-npm run forge:bench                # forge vs raw driver, all dialects
-npm run forge:bench:pg             # …or one dialect (:pg/:mysql/:sqlite/:mongo)
-npm run forge:bench:compare:gen    # one-time: generate Prisma clients
-npm run forge:bench:compare        # forge vs Prisma vs Drizzle vs raw (see bench section)
-
-# ─── Schema lifecycle ────────────────────────────────────────────
-npm run forge:doctor               # installed drivers + adapter inferred from DATABASE_URL
-npm run forge:push                 # sync schema (DDL on SQL, indexes/views on Mongo)
-npm run forge:diff                 # drift report (--json, --check for CI gating)
-npm run forge:diff:apply           # generate + run a reconciliation migration (--dry to preview)
-npm run forge:rollback             # roll back the latest migration
-
-# ─── Examples & canary ───────────────────────────────────────────
-npm run forge:example:custom       # runnable drop-in demo with a custom schema
-npm run forge:canary               # real-traffic HTTP service (isolated DB) — see canary/README.md
-npm run forge:canary:load          # concurrent load generator against the canary
-
-# ─── The whole gate ──────────────────────────────────────────────
-npm run forge:all                  # forge:check && forge:integration && forge:bench
-BENCH_SEED=1000 BENCH_ITER=500 npm run forge:bench   # tune the bench
-SKIP_MONGO=1 npm run forge:bench                     # skip an adapter that's not running
-```
-
-**What the test layers cover, and why each exists:**
-
-| Layer | DB? | What it proves |
-|---|---|---|
-| `forge:test` (jest) | no | IR correctness, per-dialect SQL/Mongo compilation, DDL generation (incl. decimal/uuid/bigint/dbgenerated + matviews), migration planning, drift comparator, error-code mapping, schema integrity, **and the schema-decoupling** (`custom-schema.spec.ts`). |
-| `forge:typesafety` | no | The *types* actually catch bad input and resolve correctly — asserted against the TS compiler, including a custom consumer schema (Section C). |
-| `forge:autocomplete` | no | Real IDE completions resolve (not `any`) — via the Language Service. |
-| `forge:integration:*` | yes | The full stack against a real engine: push → CRUD → relations/hydration → nested writes → cascades → transactions → raw SQL → errors → FTS → soft-delete → views → **materialised-view refresh** → strict mode. Each run creates and drops an isolated DB. |
-| `forge:bench` / `:compare` | yes | Per-call overhead vs the raw driver, and vs Prisma/Drizzle (see [the bench section](#comparison-bench--forge-vs-prisma-vs-drizzle) for how to read it honestly). |
-| `canary/` | yes | Behaviour under sustained concurrent real-HTTP traffic — throughput, latency percentiles, memory stability, error modes (see [Production notes](#production-notes)). |
-
-### Configuring connection strings
-
-Every `forge:*` script loads `.env` at startup via dotenv. Copy the example
-and edit values to match your local databases:
-
-```sh
-cd forge
-cp .env.example .env
-$EDITOR .env
-```
-
-`.env` is gitignored. `.env.example` is the canonical list of vars with
-defaults documented inline.
-
-| Variable | Default | Used by |
-|---|---|---|
-| `DATABASE_URL` | — (required at runtime if used) | `forge:doctor`, `forge:push`, application code via `createDb({ url })` |
-| `SMOKE_PG_USER` | `johnfash` (OS login) | `forge:integration:pg` |
-| `SMOKE_PG_HOST` | `127.0.0.1` | `forge:integration:pg` |
-| `SMOKE_PG_PORT` | `5432` | `forge:integration:pg` |
-| `SMOKE_PG_ROOT` | `postgres` (bootstrap db for CREATE/DROP) | `forge:integration:pg` |
-| `SMOKE_MONGO_URL` | `mongodb://127.0.0.1:27017/<unique>` | `forge:integration:mongo` |
-| `BENCH_PG_URL` | `postgres://johnfash@127.0.0.1:5432/postgres` | `forge:bench` |
-| `BENCH_MONGO_URL` | `mongodb://127.0.0.1:27017` | `forge:bench` |
-| `BENCH_SEED` | `500` | `forge:bench` (rows seeded before reads) |
-| `BENCH_ITER` | `200` | `forge:bench` (iterations per scenario) |
-| `SKIP_PG=1` / `SKIP_MONGO=1` | — | `forge:bench` (opt out of an adapter you don't run locally) |
-
-Each integration / bench script creates a uniquely-named isolated
-database/collection per run and **drops it on exit** — no test data ever
-bleeds into existing schemas.
-
----
-
-## Comparison with Prisma
-
-A feature/architecture map — **not** a verdict. Prisma is a mature, widely
-deployed product with a large ecosystem, deep tooling, and a long production
-track record; forge is a compact single-author library. Read this as "here's
-what each gives you and where they differ," not "forge wins."
-
-| Feature | Forge | Prisma |
-|---|---|---|
-| Type-safe queries | ✓ derived from schema (no codegen) | ✓ via codegen |
-| MongoDB | ✓ | ✓ |
-| PostgreSQL | ✓ | ✓ |
-| MySQL | ✓ | ✓ |
-| SQLite | ✓ (in-process via `better-sqlite3`) | ✓ |
-| SQL Server / CockroachDB | — | ✓ |
-| Cold start | ~50 ms (Node + driver) | ~70 ms (Node + Rust engine) |
-| Bundle size | ~50 KB (library) + driver | ~5 MB (includes Rust engine) |
-| Memory per process | ~14 MB (mongodb driver) | ~28 MB (Rust engine + bridge) |
-| Atomic ops | ✓ | ✓ |
-| groupBy / aggregations | ✓ | ✓ |
-| Relation hydration | ✓ batched IN | ✓ batched IN |
-| `select`-narrowed return type | ✓ | ✓ |
-| `include` with nested args | ✓ | ✓ |
-| `connectOrCreate` | ✓ | ✓ |
-| Nested `upsert` / `update` / `delete` on writes | Partial | ✓ |
-| `$transaction` (callback + array) | ✓ | ✓ |
-| `$queryRaw` + tagged template | ✓ | ✓ |
-| Migration history + drift detection | ✓ (Wave 5 — `forge:diff` / `diff:apply` / `rollback`) | ✓ |
-| Prisma Studio equivalent | — (use TablePlus / Compass) | ✓ |
-| `$extends` middleware | — | ✓ |
-| Full-text search | Wave 4 | ✓ |
-| Streaming reads | Wave 4 | ✓ |
-| OpenTelemetry hooks | Wave 4 | ✓ |
-| **Inspection** | ~5,000 lines TS, one folder | Rust engine + protocol + client |
-
-> The cold-start / bundle / memory rows describe Prisma's **default Rust query
-> engine** (Prisma ≤6, and v7 without driver-adapters). Prisma 7's
-> driver-adapter mode drops the Rust engine and narrows those gaps
-> considerably. The benchmark above uses Prisma 7.8 driver-adapters, so it does
-> **not** reflect the Rust-engine numbers in this table — they're different axes.
-
----
-
-## Known gaps & roadmap
-
-**Implemented** (Waves 0–4c):
-
-- ✓ IR layer (adapter-agnostic intermediate representation)
-- ✓ Mongo adapter (compile + execute + cascade walker + push)
-- ✓ Postgres adapter (compile + execute + DDL + migration runner)
-- ✓ MySQL adapter (compile + execute + DDL + migration runner with advisory lock)
-- ✓ SQLite adapter (compile + execute + DDL + migration runner; in-memory + file)
-- ✓ `forge:push` across all four — same command, picks adapter from URL
-- ✓ `forge:doctor`
-- ✓ `.compile` escape hatch (Mongo + Postgres compile APIs)
-- ✓ `$queryRaw` / `$executeRaw` (tagged template + fragment, all SQL dialects)
-- ✓ `$transaction` (callback + array)
-- ✓ Atomic ops (incl. optional numerics)
-- ✓ Relation hydration (all four)
-- ✓ `connectOrCreate` (owning + inverse)
-- ✓ `groupBy` + `_count` / `_avg` / `_sum` / `_min` / `_max` + `having`
-- ✓ Sample schema covering every feature
-- ✓ Error code mapping (P1xxx / P2xxx) for all four dialects
-- ✓ Type-safety verification harness (Language Service probes)
-- ✓ `f.text()` for unbounded strings on MySQL (vs `f.string()` → VARCHAR(255))
-- ✓ Side-by-side bench (forge vs raw driver) on all four dialects
-- ✓ **Wave 4a — observability**: `db.$on('query', cb)` / `$on('error', cb)`
-  event hooks emitting `{ adapter, model, op, sql, params, duration_ms,
-  rowCount }` per query. Zero overhead when no listeners subscribed.
-- ✓ **Wave 4a — streaming reads**: `db.<model>.findManyStream({ chunkSize })`
-  returns `AsyncIterable<Row>` for memory-safe iteration over large result sets.
-- ✓ **Wave 4a — full-text search**: `where: { title: { search: 'q' } }`
-  compiles to PG `to_tsvector(...) @@ plainto_tsquery(...)`, MySQL
-  `MATCH(col) AGAINST (...)`, Mongo `$text: { $search: ... }`. SQLite
-  throws an actionable error directing to FTS5 + `$queryRaw`.
-- ✓ **Wave 4b — `.searchable()` schema marker**: chained onto any string/text
-  field, makes `forge:push` auto-emit the right FTS index per dialect — PG
-  `CREATE INDEX … USING gin(to_tsvector('simple', col))`, MySQL `ADD FULLTEXT`,
-  Mongo `createIndex({col: 'text'})`, SQLite `CREATE VIRTUAL TABLE … USING fts5(...)`.
-- ✓ **Wave 4b — soft delete (`.softDeleteAt()`)**: chained onto a `dateTime`
-  field, marks it the soft-delete column. The wrapper then:
-    • auto-injects `WHERE <col> IS NULL` on every read,
-    • rewrites `.delete()` / `.deleteMany()` to `UPDATE … SET <col> = now()`,
-    • opts out via `where: { ..., _withDeleted: true }`.
-- ✓ **Wave 4b — native cursor streaming**: `findManyStream` now uses each
-  adapter's native cursor (PG `DECLARE … CURSOR`, MySQL `query().stream()`,
-  SQLite `stmt.iterate()`, Mongo `cursor.stream()`) instead of OFFSET/LIMIT
-  chunking. Constant memory regardless of result size.
-- ✓ **Wave 4b — OpenTelemetry helper**: `wireOtel(db, { tracer })` subscribes
-  to `$on('query'/'error')` and emits OTel-semconv spans (`db.system`,
-  `db.operation`, `db.statement`, `db.collection.name`). Optional peer — the
-  helper is structurally typed, so any tracer with `startSpan` works.
-- ✓ **Wave 4c — read-only views (`.asView()`)**: declare a model as a view
-  (`CREATE VIEW` on SQL, `createCollection({ viewOn, pipeline })` on Mongo);
-  the wrapper blocks writes, reads work normally.
-- ✓ **Wave 5a — comparison bench**: `forge:bench:compare` runs the same
-  scenarios through forge **vs Prisma vs Drizzle vs the raw driver** on every
-  dialect, reporting median / p95 / ops·s⁻¹ / overhead-vs-raw.
-- ✓ **Wave 5b — drift detection (`forge:diff`)**: introspects the live DB
-  (PG `pg_catalog`, MySQL `INFORMATION_SCHEMA`, SQLite `PRAGMA`, Mongo
-  `listCollections`) and reports missing/extra tables·columns·indexes·FKs,
-  type-category mismatches, and views. Human + `--json`; `--check` gates CI.
-- ✓ **Wave 5c — schema-diff migrations**: `forge:diff:apply` generates and
-  runs the reconciling SQL (with timestamped `up`/`down` files and a
-  `_forge_migrations` history table); `forge:rollback` reverts the latest.
-- ✓ **Wave 5d — materialised views**: `.asView({ materialised: true })` →
-  PG `CREATE MATERIALIZED VIEW`, MySQL/SQLite table-backed, Mongo `$out`.
-  `db.<model>.refresh()` recomputes; `db.<model>.scheduleRefresh('1h')`
-  auto-refreshes (caller owns the returned `stop()`, no leaked timers).
-- ✓ **Wave 5e — native types**: `f.decimal({ precision, scale })`, `f.uuid({ default })`,
-  `f.bigint()`, and `.dbgenerated('<expr>')` generated columns — each
-  emits dialect-correct DDL.
-- ✓ **Wave 5e — `select`/`include` XOR** enforced at compile time; **`strict: true`**
-  factory option rejects unknown `where` keys at runtime.
-
-### Wave 4 — Observability
+Add `materialised: true` to store the results physically and refresh them on
+demand. On Postgres this is a real materialised view; on MySQL and SQLite it is
+a table that gets repopulated; on Mongo it is a collection filled by the
+pipeline.
 
 ```ts
-const db = await createDb({ url: process.env.DATABASE_URL! });
+const Stats = model('post_stats', { /* … */ }).asView({ materialised: true, sql, /* … */ });
 
-// Subscribe to every query
+await db.postStats.refresh();                    // recompute now
+const stop = db.postStats.scheduleRefresh('1h'); // recompute hourly; call stop() to cancel
+```
+
+---
+
+## Watching queries
+
+Subscribe to every query for logging or metrics. The callback receives the
+database, model, operation, SQL, parameters, duration, and row count. There is
+no cost when nothing is subscribed.
+
+```ts
 const off = db.$on('query', (e) => {
-  console.log(`[${e.adapter}] ${e.op} ${e.model} — ${e.duration_ms.toFixed(2)}ms`);
-  if (e.duration_ms > 100) console.warn(`SLOW: ${e.sql}`, e.params);
+  if (e.duration_ms > 100) console.warn('slow query', e.sql, e.params);
 });
-
-const off2 = db.$on('error', (e) => {
-  console.error(`[${e.adapter}] ${e.op} failed:`, e.error.message);
-});
-
-// Later:
-off();   // unsubscribe — returned by $on
-off2();
+db.$on('error', (e) => console.error(e.op, 'failed', e.error.message));
+// off();  // stop listening
 ```
 
-The emitter does nothing while there are no subscribers (zero overhead).
-The moment a listener attaches, each query also compiles its artifact a
-second time to capture sql/params for the event — measured at ~5–15 µs per
-query in the bench, vs the ms-scale query itself.
+---
 
-### Wave 4 — Streaming reads
+## Creating tables and migrations
 
-```ts
-// Memory-safe iteration over the full users table.
-for await (const user of db.user.findManyStream({
-  where: { active: true },
-  orderBy: { created_at: 'asc' },
-  chunkSize: 500,        // fetches in batches of 500, yields one at a time
-})) {
-  await sendWelcomeEmail(user);    // back-pressure: next batch waits for this
-}
-```
-
-Internally implemented as OFFSET/LIMIT chunking (works on every adapter)
-and one chunk in memory at a time. Native cursor-based streaming for PG
-(`pg-cursor`) / MySQL (`stream: true`) is a Wave 4b optimisation.
-
-### Wave 4 — Full-text search
-
-```ts
-// All three SQL/Mongo backends translate the same query shape:
-const hits = await db.post.findMany({
-  where: { title: { search: 'forge AND wrapper' } },
-});
-
-//   Postgres:  to_tsvector('simple', title) @@ plainto_tsquery('simple', $1)
-//   MySQL:     MATCH(title) AGAINST (? IN NATURAL LANGUAGE MODE)
-//   Mongo:     $text: { $search: '...' }  (collection-scoped, not field-scoped)
-```
-
-**Index requirements** (Wave 4b's `f.text().searchable()` will emit these
-automatically; for now create them once via `$executeRaw`):
+forge can create your tables from the schema and reconcile changes later. These
+run as command-line scripts that read `DATABASE_URL` from the environment:
 
 ```sh
-# Postgres — functional index on the tsvector
-CREATE INDEX posts_title_fts ON posts USING gin(to_tsvector('simple', title));
-
-# MySQL — FULLTEXT index
-ALTER TABLE posts ADD FULLTEXT(title);
-
-# Mongo — text index on the collection (only one per collection)
-db.posts.createIndex({ title: 'text' })
-
-# SQLite — needs FTS5 virtual table; forge throws an actionable error
-#          pointing you at the $queryRaw escape hatch.
+forge:push          # create or update tables, indexes, and constraints to match the schema
+forge:diff          # report differences between the live database and the schema
+forge:diff --json   # the same as machine-readable JSON
+forge:diff --check  # exit non-zero if there is drift (useful in CI)
+forge:diff:apply    # generate and run a migration that reconciles the difference
+forge:rollback      # undo the most recent applied migration
 ```
 
-### Wave 4b — Soft delete
-
-```ts
-// Mark the soft-delete column on the model:
-export const AuditLog = model('audit_logs', {
-  id: f.id(),
-  event: f.string(),
-  deleted_at: f.dateTime().softDeleteAt(),   // ← marker
-});
-
-// Reads automatically filter out soft-deleted rows:
-await db.auditLog.findMany();        // WHERE deleted_at IS NULL (auto)
-await db.auditLog.count();           // same — only live rows
-
-// .delete() / .deleteMany() rewrite to UPDATE … SET deleted_at = now()
-await db.auditLog.delete({ where: { id } });
-// The row still exists, just marked deleted.
-
-// Opt out: see deleted rows too
-await db.auditLog.findFirst({ where: { id, _withDeleted: true } });
-```
-
-### Wave 4b — OpenTelemetry
-
-```ts
-import { trace } from '@opentelemetry/api';
-import { wireOtel } from 'forge-orm';
-
-const tracer = trace.getTracer('myapp');
-const off = wireOtel(db, { tracer });
-
-// Every query/error now emits an OTel span with:
-//   db.system            → 'postgresql' | 'mysql' | 'sqlite' | 'mongodb'
-//   db.operation         → 'select' | 'insert' | 'update' | 'delete' | …
-//   db.statement         → the compiled SQL (truncated to 1024 chars by default)
-//   db.collection.name   → model key
-//   forge.adapter        → forge adapter kind
-//   forge.row_count      → rows returned/affected
-//   forge.duration_ms    → wall-clock duration
-```
-
-The helper is **structurally typed** — `OtelTracer` is just `{ startSpan(...) }`
-so you don't even need `@opentelemetry/api` installed. Pass any object that
-matches the shape and forge will emit spans through it.
-
-- ✓ **Wave 4c — read-only views (`.asView()`)**: declare a model as a view
-  backed by `CREATE VIEW` (PG/MySQL/SQLite) or `createCollection({viewOn,pipeline})`
-  (Mongo). The wrapper blocks every write method with an actionable error;
-  reads work normally.
-- ✓ **Wave 4c — SQLite FTS5 read-route rewriting**: `.searchable()` fields
-  now Just Work on SQLite. `forge:push` emits the FTS5 virtual table + sync
-  triggers (`AFTER INSERT/UPDATE/DELETE`), and `where.search` compiles to
-  `rowid IN (SELECT rowid FROM <table>_fts WHERE <table>_fts MATCH ?)` —
-  no more `$queryRaw` workaround.
-
-### Wave 4c — Read-only views
-
-```ts
-// Declare a view alongside your tables in the schema:
-export const PublishedPosts = model('published_posts', {
-  id: f.id(),
-  title: f.string(),
-  slug: f.string(),
-  view_count: f.int(),
-}).asView({
-  // SQL dialects — a parameter-free SELECT body:
-  sql: `SELECT id, title, slug, view_count FROM posts WHERE status = 'PUBLISHED'`,
-  // Mongo — source collection + aggregation pipeline:
-  sourceCollection: 'posts',
-  pipeline: [
-    { $match: { status: 'PUBLISHED' } },
-    { $project: { _id: 1, title: 1, slug: 1, view_count: 1 } },
-  ],
-});
-// Register in the schema map:
-export const schema = { …, publishedPosts: PublishedPosts };
-
-// Use:
-const live = await db.publishedPosts.findMany();   // ✓ reads from CREATE VIEW
-await db.publishedPosts.create({ data: {...} });    // ✗ throws — read-only view
-```
-
-`forge:push` emits `CREATE OR REPLACE VIEW` (PG/MySQL) / `CREATE VIEW IF NOT EXISTS`
-(SQLite) / `createCollection({viewOn, pipeline})` (Mongo). Every write
-method (`create`, `createMany`, `update`, `updateMany`, `upsert`, `delete`,
-`deleteMany`) throws a clear error with the actionable workaround. Reads
-(`findFirst`, `findMany`, `count`, `groupBy`, hydration) work transparently
-because views look like collections/tables to the query layer.
-
-> **Wave 5 shipped in 1.0.** Everything previously planned here — native types,
-> `dbgenerated`, `select`/`include` XOR, `strict` mode, the comparison bench,
-> drift detection, schema-diff migrations, and materialised views — is
-> implemented and live-tested across all four dialects. See the
-> [Wave 5 sections](#wave-5--production-hardening) below.
-
-**Documented gaps** (remaining):
-
-- `forge:diff` type-comparison is category-level (string/int/decimal/…); a
-  fine-grained `ALTER COLUMN TYPE` is left to a hand-written migration.
-- SQLite can't `ALTER TABLE … ADD FOREIGN KEY`; `forge:diff` reports the
-  missing FK and `diff:apply` emits a guided no-op (rebuild the table).
-- The SQL migration workflow (`forge:diff:apply` / `forge:rollback`) is
-  SQL-only; Mongo stays index-managed through `forge:push`.
+`forge:diff:apply` writes a timestamped SQL file with an `up` and a `down`
+section into a `migrations/` folder and records it in a `_forge_migrations`
+table, so applying is repeatable and reversible. Migrations are SQL only; on
+Mongo, `forge:push` manages indexes and views.
 
 ---
 
-## Wave 5 — production hardening
+## Dropping to raw queries with `.compile`
 
-### Comparison bench — forge vs Prisma vs Drizzle
-
-```bash
-npm run forge:bench:compare:gen     # one-time: generate Prisma clients
-npm run forge:bench:compare         # all dialects, or :pg / :mysql / :sqlite / :mongo
-```
-
-Runs identical scenarios (filtered findMany, indexed findFirst, count, update)
-through forge, Prisma 7.8 (via driver-adapters), Drizzle 0.45, and the raw
-driver against the **same** table forge created, printing each engine's
-median / p95 / ops·s⁻¹ and overhead relative to the raw driver. Representative
-Postgres run (200 iterations, 500 rows, localhost):
-
-```
-  op           raw driver   forge      prisma     drizzle
-  findMany     baseline     +21.5%     +45.7%     +36.9%
-  findFirst    baseline     +41.0%     +86.3%     +73.2%
-  count        baseline     +31.4%     +73.4%     +43.8%
-  update       baseline     +39.6%     +75.3%     +26.5%
-```
-
-forge measures as the lowest-overhead wrapper on reads across PG, MySQL, and
-SQLite; Drizzle's thinner write path edges it out on `update`. (Drizzle has no
-Mongo driver; Prisma's Mongo path needs `@prisma/adapter-mongodb`.)
-
-> **How to read these numbers — and how *not* to.**
->
-> This benchmark says exactly one thing: **forge is a thin wrapper — its
-> per-call overhead is competitive with, and often lower than, Prisma's and
-> Drizzle's.** That's the only claim it supports. It is **not** evidence that
-> forge is "better than" or "faster than" the alternatives. Specifically:
->
-> - It's a **micro-benchmark of four trivial operations on localhost.** The
->   measured deltas (~0.05–0.3 ms) are dwarfed by network latency, connection
->   pooling, and query complexity in any real deployment — wrapper overhead is
->   effectively noise in production.
-> - It's **forge's own harness**, wiring up the competitors. The scenarios were
->   chosen here and each ORM may not be invoked exactly as its authors would.
->   Treat it as "same ballpark," not a leaderboard.
-> - **Low overhead ≠ better.** It says nothing about complex-join planning,
->   correctness at the edges, migrations tooling, ecosystem maturity, generated
->   types, serverless/edge support, or production track record — all areas
->   where Prisma and Drizzle are far ahead of a single-author ~5k-line library.
->
-> The honest takeaway: **you don't pay a performance tax for forge's thinness
-> and its one-API-across-four-databases design.** That — not "beats Prisma" —
-> is the point. Reproduce it yourself and judge in your own environment.
-
-### Native types & generated columns
+If you need the exact query forge would run, ask for it instead of running it.
+You get the Mongo arguments object or the SQL string with its parameters, ready
+to hand to the driver yourself.
 
 ```ts
-const Invoice = model('invoices', {
-  id: f.id(),
-  amount:   f.decimal({ precision: 12, scale: 2 }),   // PG numeric · MySQL DECIMAL · SQLite NUMERIC · Mongo Decimal128
-  ref:      f.uuid({ default: 'gen_random_uuid' }),   // PG uuid+default · MySQL CHAR(36)+UUID() · SQLite/Mongo string
-  qty:      f.bigint(),                                // PG bigint · MySQL BIGINT · SQLite INTEGER · Mongo Long
-  // generated/computed column — DB derives it, never written by the client:
-  total:    f.decimal({ precision: 14, scale: 2 }).dbgenerated('amount * qty'),
-});
-```
-
-### `strict` mode & `select`/`include` exclusivity
-
-```ts
-const db = await createDb({ url, strict: true });
-await db.user.findMany({ where: { emial: 'x' } });   // throws: unknown where key 'emial'
-
-// select and include are mutually exclusive at compile time:
-db.user.findMany({ select: { email: true }, include: { posts: true } });  // ❌ type error
-```
-
-### Drift detection — `forge:diff`
-
-```bash
-forge:diff            # human-readable report of schema-vs-live drift
-forge:diff --json     # machine-readable (CI tooling)
-forge:diff --check    # exit non-zero when drift is found (CI gate)
-```
-
-```
-✗ drift detected on postgres (3 issues):
-  − [column] users: column 'name'
-  − [index]  tags:  index u:name
-  + [table]  stray_table: table 'stray_table' in DB but not in schema
-```
-
-### Schema-diff migrations — `forge:diff:apply` / `forge:rollback`
-
-```bash
-forge:diff:apply        # generate + run the reconciling migration (writes migrations/<ts>_drift.sql)
-forge:diff:apply --dry  # print the SQL without applying
-forge:rollback          # run the latest migration's `down` block
-```
-
-Applied migrations are tracked idempotently in a `_forge_migrations` table; each
-generated file carries matching `-- up` / `-- down` blocks. Bring-DB-up-to-schema
-(forward) and bring-DB-back (rollback) are both first-class. SQL dialects only —
-Mongo stays on `forge:push`.
-
-### Materialised views
-
-```ts
-export const PostStats = model('post_stats', {
-  author_id:   f.objectId(),
-  post_count:  f.bigint(),
-  total_views: f.bigint(),
-}).asView({
-  materialised: true,
-  sql: `SELECT author_id, COUNT(*) AS post_count, COALESCE(SUM(view_count),0) AS total_views
-        FROM posts GROUP BY author_id`,
-  sourceCollection: 'posts',
-  pipeline: [ /* Mongo $group … $out: 'post_stats' */ ],
-});
-
-await db.postStats.refresh();              // PG REFRESH MATERIALIZED VIEW · MySQL/SQLite re-populate · Mongo $out
-const stop = db.postStats.scheduleRefresh('1h');   // auto-refresh; call stop() to clear
+const q = db.user.compile.findMany({ where: { active: true }, take: 20 });
+// SQL:   { sql: 'SELECT … WHERE "active" = $1 LIMIT 20', params: [true] }
+// Mongo: { collection: 'users', op: 'find', args: { filter: { active: true }, options: { limit: 20 } } }
 ```
 
 ---
 
-## Production notes
+## Type safety
 
-**Is it production-ready?** Be calibrated. forge is a thin wrapper over the
-**battle-hardened** official drivers (`pg`, `mysql2`, `better-sqlite3`,
-`mongodb`) — the wire I/O isn't forge's code. Its own surface (IR compilation,
-query building, coercion, cascade walker, migration generation) has **354 tests**
-including live integration on all four dialects, and a canary held up under
-sustained concurrent traffic (below). But it is a young, single-author library
-with **no production track record**, and parts (the Wave 5 migrations especially)
-are new. It is **not** in Prisma's/Drizzle's hardening tier and won't be without
-real mileage.
-
-**Sensible adoption:** own/maintain the code, keep usage mainstream, and — most
-importantly — **write an integration suite for *your* app's actual queries** and
-run it against a prod-like DB, so you're trusting your tests, not just forge's.
-Hold off on: auto-applying migrations to prod (review the generated SQL and run
-it manually), anything where a subtle data bug is catastrophic (billing, ledgers,
-auth) without belt-and-suspenders verification, and serverless/edge until tested
-there.
-
-**Canary findings** (real concurrent HTTP traffic against an isolated DB — see
-`canary/README.md`, run with `npm run forge:canary`):
-
-| Concurrency | Throughput | p50 | p95 | p99 | Error rate |
-|---|---|---|---|---|---|
-| 64  | **2,714 req/s** | 18 ms | 38 ms | 209 ms | 0.03% |
-| 100 | 1,246 req/s | 55 ms | 117 ms | 859 ms | 0.08% |
-
-- **Stable & leak-free.** RSS rose to ~268 MB under heavy load and fell back to
-  ~64 MB when idle; healthy across 138k queries, clean shutdown.
-- **Pool ceiling (tune it).** The PG adapter pool defaults to `max: 50`. Drive
-  concurrency past it and throughput *drops* while p99 spikes (requests queue for
-  a connection). Size the pool to your real concurrency.
-- **Postgres transaction footgun.** Don't `catch`-and-continue a constraint
-  violation *inside* a `$transaction` — Postgres aborts the whole transaction, so
-  the next statement fails with *"current transaction is aborted"*. forge maps the
-  violation to `P2002` and rolls back cleanly (no partial write), but the
-  catch-and-continue pattern won't work; check-then-write, `upsert`, or let it
-  fail and retry. (See the [Transactions](#transactions) gotcha.)
-
----
-
-## API reference — what the package exports
+Types come straight from your schema, with no generated client. `db.user` knows
+its fields, `where` rejects values of the wrong type, `select` narrows the
+result, and `include` returns the related model's shape. Helpers:
 
 ```ts
-import {
-  // Factory
-  createDb,                               // createDb<S>({ url|host…, schema?, type?, strict? }) → ForgeDb<S>
+import type { Row, ForgeDb } from 'forge-orm';
 
-  // Schema DSL (define your models)
-  f, model, rel, enums, embed,
-  sampleSchema, setActiveSchema, getActiveSchema,
-
-  // Raw SQL (safe tagged template + composition)
-  forgeSql, isSqlFragment, compileSqlFragment,
-
-  // Observability
-  ForgeEmitter, wireOtel,
-
-  // IR builders + adapter compile APIs (escape hatches)
-  buildSelect, buildCount, buildInsert, buildUpdate, buildDelete, buildGroupBy,
-  buildPostgresCompileApi,
-
-  // JSON-null markers, validator, errors
-  ForgeDbNull, ForgeJsonNull, ForgeAnyNull, isForgeNullMarker,
-  forgeValidator, DbKnownError, ForgeMissingDriverError, detectAdapterKind,
-} from 'forge-orm';
-
-import type {
-  ForgeDb, CreateDbOptions, SchemaShape,         // db handle + options
-  Field, TypedModel, RelationInfo, Row, EnumDef, // schema types
-  FieldDef, FieldKind, ModelDef, IndexDef, RelationDef, OnDeleteAction, EmbedDef,
-  ForgeOf, ForgeModels,                          // per-model type bundles (no codegen)
-  QueryEvent, ErrorEvent,                         // event payloads
-  SqlFragment, Adapter, AdapterKind, DoctorReport,
-} from 'forge-orm';
-```
-
-Per-model type helpers (derived from your schema, zero codegen):
-
-```ts
-type DB          = ForgeDb<typeof schema>;
-type ProductRow  = Row<typeof Product>;                 // resolved row shape
-type ProductWhere = ForgeOf<'product'>['WhereInput'];   // by schema key
-type ProductCreate = ForgeModels['Product']['CreateInput'];
+type DB   = ForgeDb<typeof schema>;
+type User = Row<typeof User>;     // { id: string; email: string; name: string; … }
 ```
 
 ---
 
-## Extending forge — writing a new adapter
+## Performance
 
-The `Adapter` interface is the contract. To add (say) MySQL:
+forge adds a thin layer over the driver. In a local micro-benchmark of simple
+operations (find, count, update), its per-call overhead measured similar to,
+and often lower than, Prisma and Drizzle, with no separate engine process to
+start.
 
-```ts
-// adapters/mysql/adapter.ts
-export class MysqlAdapter implements Adapter {
-  readonly kind = 'mysql' as const;
-  readonly capabilities = { /* nativeCascades, nativeUpsert, … */ };
-
-  async connect(url: string)  { /* lazy-require mysql2, open pool */ }
-  async close()                { /* pool.end() */ }
-  async doctor()               { /* report driver + capabilities */ }
-
-  // IR executors — IR in, results out
-  executeSelect(node, model, opts?)  { /* ... */ }
-  executeCount(node, model, opts?)   { /* ... */ }
-  executeInsert(node, model, opts?)  { /* ... */ }
-  executeUpdate(node, model, opts?)  { /* ... */ }
-  executeDelete(node, model, opts?)  { /* ... */ }
-  executeGroupBy(node, model, opts?) { /* ... */ }
-  applyProjectionAndHydration(rows, model, plan, opts?) { /* ... */ }
-
-  // Transactions
-  $transaction(fn) { /* BEGIN/COMMIT/ROLLBACK */ }
-
-  // Raw escape hatches
-  $queryRaw(fragment, opts?)    { /* pool.query(sql, params) */ }
-  $executeRaw(fragment, opts?)  { /* pool.query(sql, params).rowCount */ }
-
-  // Coerce / decode / cascade
-  coerceInbound(model, data)              { /* identity / jsonb stringify */ }
-  decodeOutbound(model, row)              { /* identity / decimal parse */ }
-  applyCascadesForDelete(model, docs)     { /* no-op (DB enforces) */ }
-}
-```
-
-Then add a SQL compiler in `adapters/mysql/compile-from-ir.ts` (most of it
-copy-pasted from Postgres, with `?` placeholders instead of `$1, $2, …` and
-MySQL's quoting + upsert dialect). Wire it into `factory.ts`. That's it.
-
-The IR + the `Adapter` interface + the dialect-isolated compiler are why
-this is mechanical work rather than a redesign.
+Read that for what it is: a small synthetic test on localhost. The differences
+are fractions of a millisecond and disappear next to real network latency and
+query complexity. It says nothing about complex joins, correctness, or
+maturity. The point is only that the convenience does not cost you measurable
+performance. Run `forge:bench` and `forge:bench:compare` to see for yourself.
 
 ---
 
-## License & maintenance
+## Testing
 
-Forge ships under the same license as the host project. The codebase is
-small enough to fork and own — if you do, file issues upstream when you fix
-bugs that affect everyone.
+The repository's own test suite (run from a clone) has 191 unit tests and 163
+live integration tests across all four databases.
 
-Built as a practical demonstration that "Prisma-shape" doesn't have to mean
-"Prisma's stack." Sometimes you want ~5,000 lines of TypeScript you can
-read in an afternoon.
+```sh
+npm run forge:check         # unit tests, type checks, and autocomplete checks (no database needed)
+npm run forge:integration   # full CRUD against live Postgres, MySQL, SQLite, and Mongo
+npm run forge:bench         # speed against the raw driver
+npm run forge:all           # all of the above
+```
+
+Each integration run creates a throwaway database and drops it when finished.
+
+---
+
+## Limitations and honest notes
+
+* **It is young.** No long production history, one main author. Treat it as
+  early-stage. If a quiet data bug would be costly, test your own queries
+  against it thoroughly first.
+* **Primary keys are auto-generated strings, not sequential numbers.** forge
+  fills in a UUID (or ObjectId on Mongo) when you omit `id`. An
+  auto-incrementing integer key is SQL-only and not built in.
+* **One schema per process.** `createDb({ schema })` sets the active schema for
+  the whole process. That fits one schema per service. For several different
+  schemas at once, run them in separate processes.
+* **Some nested writes are partial.** Deeply nested `upsert`, `update`, and
+  `set` cover the common cases but not every Prisma shape.
+* **No GUI, no plugin system.** If you need a data browser or middleware, this
+  is not that.
+
+---
+
+## Contributing
+
+The repository is public at https://github.com/johnsonfash/forge-orm. Issues and
+pull requests are welcome. To work on it: clone, `npm install`, then
+`npm run forge:all` to run the full suite. The code is small and organised by
+database adapter under `src/adapters/`, with a shared query layer in `src/ir/`,
+so a change to one database rarely touches another.
+
+MIT licensed.
