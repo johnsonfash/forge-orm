@@ -163,13 +163,20 @@ async function _knownLoose() {
   // B3. Mongo aggregate({ pipeline: any[] }) is intentionally `any[]` — BSON
   //     pipelines aren't domain-typed. Use groupBy (typed) for normal cases.
   await (db.user as any).aggregate({ pipeline: [{ $match: {} }] });
+
+  // A19. Wave 5e — `select` and `include` are mutually exclusive at compile time.
+  // @ts-expect-error — forge rejects passing BOTH select and include
+  await db.user.findMany({ select: { email: true }, include: { posts: true } });
+  // Each alone is fine:
+  await db.user.findMany({ select: { email: true } });
+  await db.user.findMany({ include: { posts: true } });
 }
 
 // =============================================================================
 // Summary
 // =============================================================================
 //
-// Section A: 18 typed assertions hold.
+// Section A: 19 typed assertions hold (incl. select/include exclusivity).
 // Section B: 3 documented loose surfaces (escape hatches, not bugs).
 //
 // To see a specific bad call rejected, copy any commented `@ts-expect-error`

@@ -495,6 +495,14 @@ export type WhereInput<F extends Record<string, Field<any, any>>> = {
 // Helpers — extract the relation-name union from a relations record.
 type RelKeys<R> = Extract<keyof R, string>;
 
+// Wave 5e — make `select` and `include` mutually exclusive at compile time.
+// Intersecting a method's args with this turns "both present" into an
+// impossible type (select: never), so the call fails to typecheck. When only
+// one (or neither) is present it resolves to `unknown` — no constraint.
+export type NoBothSelectInclude<A> = A extends { select: any; include: any }
+  ? { select: never; include: 'forge: use either `select` or `include`, not both' }
+  : unknown;
+
 // CreateInput — scalar fields (all optional, defaults filled in at runtime)
 // + relation directives (connect / create / createMany / set).
 export type CreateInput<

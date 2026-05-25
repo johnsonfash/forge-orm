@@ -5,6 +5,7 @@ import {
   CursorInput,
   Field,
   IncludeInputFor,
+  NoBothSelectInclude,
   OrderByInput,
   RelationInfo,
   Resolve,
@@ -164,7 +165,7 @@ export class CollectionWrapper<
     offset?: number;
     cursor?: CursorInput;
     distinct?: Array<keyof F & string>;
-  }>(args: A = {} as A): Promise<Find1<F, R, A> | null> {
+  }>(args: A & NoBothSelectInclude<A> = {} as any): Promise<Find1<F, R, A> | null> {
     const result = await this._find(args, 1);
     return (result[0] as Find1<F, R, A>) ?? null;
   }
@@ -174,7 +175,7 @@ export class CollectionWrapper<
     select?: ISelect<F, R>;
     include?: IInclude<R>;
     omit?: { [K in keyof F]?: boolean };
-  }>(args: A): Promise<Find1<F, R, A> | null> {
+  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A> | null> {
     return this.findFirst(args as any) as any;
   }
 
@@ -190,7 +191,7 @@ export class CollectionWrapper<
     offset?: number;
     cursor?: CursorInput;
     distinct?: Array<keyof F & string>;
-  }>(args: A = {} as A): Promise<Find1<F, R, A>> {
+  }>(args: A & NoBothSelectInclude<A> = {} as any): Promise<Find1<F, R, A>> {
     const r = await this.findFirst(args);
     if (!r) throw notFoundError(this.model.collection, args.where);
     return r;
@@ -201,7 +202,7 @@ export class CollectionWrapper<
     select?: ISelect<F, R>;
     include?: IInclude<R>;
     omit?: { [K in keyof F]?: boolean };
-  }>(args: A): Promise<Find1<F, R, A>> {
+  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A>> {
     const r = await this.findUnique(args);
     if (!r) throw notFoundError(this.model.collection, args.where);
     return r;
@@ -219,7 +220,7 @@ export class CollectionWrapper<
     offset?: number;
     cursor?: CursorInput;
     distinct?: Array<keyof F & string>;
-  }>(args: A = {} as A): Promise<Find1<F, R, A>[]> {
+  }>(args: A & NoBothSelectInclude<A> = {} as any): Promise<Find1<F, R, A>[]> {
     return this._find(args, undefined) as Promise<Find1<F, R, A>[]>;
   }
 
@@ -333,7 +334,7 @@ export class CollectionWrapper<
     select?: ISelect<F, R>;
     include?: IInclude<R>;
     omit?: { [K in keyof F]?: boolean };
-  }>(args: A): Promise<Find1<F, R, A>> {
+  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A>> {
     this._assertWritable('create');
     const mk = this._modelKey();
     const { scalar, nested } = this._splitNestedWrites(args.data, /*forCreate*/ true);
@@ -396,7 +397,7 @@ export class CollectionWrapper<
     select?: ISelect<F, R>;
     include?: IInclude<R>;
     omit?: { [K in keyof F]?: boolean };
-  }>(args: A): Promise<Find1<F, R, A>> {
+  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A>> {
     this._assertWritable('update');
     this._assertStrictWhere(args.where);
     const mk = this._modelKey();
@@ -435,7 +436,7 @@ export class CollectionWrapper<
     select?: ISelect<F, R>;
     include?: IInclude<R>;
     omit?: { [K in keyof F]?: boolean };
-  }>(args: A): Promise<Find1<F, R, A>> {
+  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A>> {
     this._assertWritable('upsert');
     this._assertStrictWhere(args.where);
     const mk = this._modelKey();
@@ -457,7 +458,7 @@ export class CollectionWrapper<
     select?: ISelect<F, R>;
     include?: IInclude<R>;
     omit?: { [K in keyof F]?: boolean };
-  }>(args: A): Promise<Find1<F, R, A>> {
+  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A>> {
     this._assertWritable('delete');
     this._assertStrictWhere(args.where);
     const mk = this._modelKey();

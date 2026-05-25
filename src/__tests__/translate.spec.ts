@@ -1,7 +1,8 @@
 import { ObjectId } from 'mongodb';
 import { f, model } from '../schema/core';
 import { ModelDef } from '../schema/types';
-import { translateUpdateData } from '../adapters/mongo/translate/data';
+// Wave 5e — `translateUpdateData` (legacy pre-IR update translator) retired;
+// its coverage moved to mongo-compile-update.spec.ts (buildUpdate → compileUpdate).
 import { translateOrderBy } from '../adapters/mongo/translate/orderby';
 import { translateWhere } from '../adapters/mongo/translate/where';
 
@@ -143,41 +144,7 @@ describe('translateWhere — embed-list filters (some / every / none)', () => {
   });
 });
 
-describe('translateUpdateData', () => {
-  test('plain assignment → $set + auto updated_at', () => {
-    const u = translateUpdateData(M, { name: 'x' }) as any;
-    expect(u.$set.name).toBe('x');
-    expect(u.$set.updated_at).toBeInstanceOf(Date);
-  });
-
-  test('increment / decrement → $inc', () => {
-    const u = translateUpdateData(M, { count: { increment: 3 } }) as any;
-    expect(u.$inc).toEqual({ count: 3 });
-
-    const v = translateUpdateData(M, { count: { decrement: 2 } }) as any;
-    expect(v.$inc).toEqual({ count: -2 });
-  });
-
-  test('multiply / divide → $mul', () => {
-    const u = translateUpdateData(M, { count: { multiply: 4 } }) as any;
-    expect(u.$mul.count).toBe(4);
-
-    const v = translateUpdateData(M, { count: { divide: 5 } }) as any;
-    expect(v.$mul.count).toBe(1 / 5);
-  });
-
-  test('explicit set wrapper → $set', () => {
-    const u = translateUpdateData(M, { count: { set: 9 } }) as any;
-    expect(u.$set.count).toBe(9);
-  });
-
-  test('renames `id` → `_id` in update payload', () => {
-    const oid = new ObjectId();
-    const u = translateUpdateData(M, { id: oid.toString(), name: 'x' }) as any;
-    expect(u.$set._id).toBeInstanceOf(ObjectId);
-    expect(u.$set.id).toBeUndefined();
-  });
-});
+// `translateUpdateData` tests moved to mongo-compile-update.spec.ts (Wave 5e).
 
 describe('translateOrderBy', () => {
   test('asc → 1, desc → -1', () => {
