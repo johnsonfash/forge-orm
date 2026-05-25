@@ -3,11 +3,12 @@ import { schema } from '../schema';
 describe('schema integrity (runtime)', () => {
   const allKeys = Object.keys(schema);
 
-  test('sample schema has 9 models registered (8 tables + 1 view)', () => {
-    expect(allKeys.length).toBe(9);
+  test('sample schema has 10 models registered (8 tables + 1 view + 1 materialised view)', () => {
+    expect(allKeys.length).toBe(10);
     expect(allKeys).toEqual(expect.arrayContaining([
       'user', 'profile', 'post', 'comment', 'tag', 'postTag', 'like', 'auditLog',
       'publishedPosts',  // Wave 4c — read-only view over Post
+      'postStats',       // Wave 5d — materialised view (per-author rollups)
     ]));
   });
 
@@ -67,8 +68,11 @@ describe('schema integrity (runtime)', () => {
     expect(issues).toEqual([]);
   });
 
-  test('every model has an `id` field of kind `id`', () => {
+  test('every table model has an `id` field of kind `id` (views may omit it)', () => {
     for (const key of allKeys) {
+      // Wave 5d — view / materialised-view models (e.g. aggregate rollups) need
+      // no synthetic id; skip them.
+      if ((schema as any)[key].view) continue;
       const idField = (schema as any)[key].fields.id;
       expect(idField).toBeDefined();
       expect(idField.kind).toBe('id');

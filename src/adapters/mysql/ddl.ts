@@ -39,16 +39,29 @@ export function buildSchemaDDL(schema: SchemaMap): DDLStatement[] {
     out.push(...buildIndexes(m));
     out.push(...buildSearchableIndexes(m));
   }
-  // Wave 4c — views.
+  // Wave 4c — views. Wave 5d — MySQL has no native materialised views, so a
+  // materialised view is backed by a real TABLE populated from the SELECT;
+  // db.<model>.refresh() truncates + re-inserts.
   for (const key of Object.keys(schema)) {
     const m = (schema as any)[key] as ModelDef<any>;
     if (!m?.view?.sql) continue;
+    const q = d.quoteIdent(m.collection);
+    if (m.view.materialised) {
+      out.push({
+        kind: 'table',
+        name: m.collection,
+        table: m.collection,
+        sql: `CREATE TABLE IF NOT EXISTS ${q} AS ${m.view.sql}`,
+        dropSql: `DROP TABLE IF EXISTS ${q}`,
+      });
+      continue;
+    }
     out.push({
       kind: 'table',
       name: m.collection,
       table: m.collection,
-      sql: `CREATE OR REPLACE VIEW ${d.quoteIdent(m.collection)} AS ${m.view.sql}`,
-      dropSql: `DROP VIEW IF EXISTS ${d.quoteIdent(m.collection)}`,
+      sql: `CREATE OR REPLACE VIEW ${q} AS ${m.view.sql}`,
+      dropSql: `DROP VIEW IF EXISTS ${q}`,
     });
   }
   return out;
@@ -92,6 +105,10 @@ function renderColumn(name: string, field: FieldDef): string {
   const d = MysqlDialect;
   const colName = d.quoteIdent(name);
   const type = d.columnType(field);
+  // Wave 5e — generated column.
+  if (field.dbGenerated) {
+    return `${colName} ${type} GENERATED ALWAYS AS (${field.dbGenerated}) STORED`;
+  }
   const nullable = field.optional ? '' : ' NOT NULL';
   const def = renderDefault(field);
   return `${colName} ${type}${nullable}${def}`;
@@ -99,6 +116,8 @@ function renderColumn(name: string, field: FieldDef): string {
 
 function renderDefault(field: FieldDef): string {
   if (!field.default) {
+    // Wave 5e — uuid DB-side default (MySQL 8+ allows expression defaults).
+    if (field.kind === 'uuid' && field.uuidDefault) return ` DEFAULT (UUID())`;
     if (field.kind === 'embedMany' && !field.optional) return ` DEFAULT (JSON_ARRAY())`;
     return '';
   }

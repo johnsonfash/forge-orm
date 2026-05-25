@@ -32,6 +32,11 @@ export const MysqlDialect: Dialect = {
       case 'text':       return 'TEXT';            // unbounded; can't be UNIQUE without a (n) prefix
       case 'int':        return 'INT';
       case 'float':      return 'DOUBLE PRECISION';
+      case 'decimal':    return field.precision != null
+                           ? `DECIMAL(${field.precision}${field.scale != null ? `,${field.scale}` : ''})`
+                           : 'DECIMAL(10,0)';
+      case 'uuid':       return 'CHAR(36)';
+      case 'bigint':     return 'BIGINT';
       case 'bool':       return 'TINYINT(1)';
       case 'dateTime':   return 'DATETIME(3)';   // millisecond precision
       case 'json':       return 'JSON';

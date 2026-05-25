@@ -8,6 +8,9 @@ export type FieldKind =
   | 'text' // unbounded string — TEXT on MySQL (vs `string`'s VARCHAR(255))
   | 'int'
   | 'float'
+  | 'decimal' // Wave 5e — exact numeric; PG numeric(p,s) / MySQL DECIMAL(p,s) / SQLite NUMERIC / Mongo Decimal128. JS type: string (no float loss).
+  | 'uuid' // Wave 5e — PG uuid / MySQL CHAR(36) / SQLite TEXT / Mongo UUID. JS type: string.
+  | 'bigint' // Wave 5e — PG bigint / MySQL BIGINT / SQLite INTEGER / Mongo Long. JS type: bigint.
   | 'bool'
   | 'dateTime'
   | 'json'
@@ -42,6 +45,18 @@ export interface FieldDef {
   // Reads automatically add `WHERE <col> IS NULL`; deletes become updates that
   // set this column to now(). Only one soft-delete field per model.
   softDeleteAt?: boolean;
+  // Wave 5e — exact-numeric precision/scale for `decimal` fields.
+  //   PG numeric(p,s), MySQL DECIMAL(p,s). SQLite NUMERIC ignores them.
+  precision?: number;
+  scale?: number;
+  // Wave 5e — when true on a `uuid` field, emit a DB-side default:
+  //   PG `DEFAULT gen_random_uuid()`, MySQL `DEFAULT (UUID())`. SQLite/Mongo ignore.
+  uuidDefault?: boolean;
+  // Wave 5e — generated/computed column. Holds the SQL expression.
+  //   PG/MySQL → `GENERATED ALWAYS AS (<expr>) STORED`, SQLite → `AS (<expr>) STORED`.
+  //   Mongo → ignored (warned at push). A dbGenerated column is never written by
+  //   the client; the wrapper drops it from inbound create/update data.
+  dbGenerated?: string;
 }
 
 export type IndexKey = 1 | -1 | 'text';
@@ -97,6 +112,16 @@ export interface ModelDef<F extends Record<string, FieldDef>> {
     pipeline?: unknown[];
     // Source collection (Mongo's createCollection requires it).
     sourceCollection?: string;
+    // Wave 5d — materialised view. When true, DDL emits a physical, refreshable
+    // object instead of a plain view:
+    //   PG     → CREATE MATERIALIZED VIEW; .refresh() runs REFRESH MATERIALIZED VIEW.
+    //   MySQL  → a base TABLE populated from `sql`; .refresh() truncates + re-INSERTs.
+    //   SQLite → same table-backed strategy as MySQL.
+    //   Mongo  → `pipeline` ends in $merge/$out into a target collection; .refresh() re-runs it.
+    materialised?: boolean;
+    // Wave 5d — optional auto-refresh interval (e.g. '30s', '5m', '1h'). The
+    // adapter wires a setInterval that calls refresh(); it's cleared on close().
+    refreshEvery?: string;
   };
 }
 

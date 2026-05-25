@@ -157,6 +157,44 @@ export class MongoAdapter implements Adapter {
     return mongoCascade(model, docs);
   }
 
+  // Wave 5d — materialised view refresh. A Mongo "matview" is a normal
+  // collection populated by an aggregation pipeline whose final stage is
+  // $merge or $out into that collection. refresh() re-runs the pipeline.
+  async refreshView(model: any, _opts?: ExecOpts): Promise<void> {
+    const view = model?.view;
+    const pipeline: any[] = Array.isArray(view?.pipeline) ? view.pipeline : [];
+    const source = view?.sourceCollection;
+    if (!source) {
+      throw new Error(`[forge:mongo] materialised view '${model?.collection}' needs a sourceCollection to refresh`);
+    }
+    const hasOutStage = pipeline.some((s) => s && (s.$merge || s.$out));
+    const full = hasOutStage ? pipeline : [...pipeline, { $out: model.collection }];
+    await dbClient.db.collection(source).aggregate(full).toArray();
+  }
+
+  // Wave 5b — introspection: collections + their indexes (Mongo is schemaless,
+  // so there are no columns/FKs to diff — collection + index level only).
+  async introspect(): Promise<import('../types').DbIntrospection> {
+    const colls = await dbClient.db.listCollections().toArray();
+    const tables = [] as import('../types').IntrospectedTable[];
+    const views = [] as { name: string; materialised?: boolean }[];
+    for (const c of colls as any[]) {
+      if (c.type === 'view') { views.push({ name: c.name, materialised: false }); continue; }
+      const idxs = await dbClient.db.collection(c.name).indexes().catch(() => [] as any[]);
+      tables.push({
+        name: c.name,
+        columns: [],
+        foreignKeys: [],
+        indexes: (idxs as any[]).map((i) => ({
+          name: i.name,
+          columns: Object.keys(i.key ?? {}),
+          unique: i.unique === true,
+        })),
+      });
+    }
+    return { kind: 'mongo', tables, views };
+  }
+
   // ─── Raw escape hatches — Mongo doesn't speak SQL ─────────────────────
   // Mongo's raw channel is the aggregation pipeline (db.<model>.aggregate)
   // or $runCommandRaw on the ForgeDb handle. Throwing here matches Prisma's

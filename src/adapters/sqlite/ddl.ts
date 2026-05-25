@@ -46,16 +46,29 @@ export function buildSchemaDDL(schema: SchemaMap): DDLStatement[] {
   }
 
   // Wave 4c — views. SQLite supports CREATE VIEW; updates / inserts /
-  // deletes against views are blocked at the wrapper layer.
+  // deletes against views are blocked at the wrapper layer. Wave 5d — no
+  // native materialised views, so back them with a TABLE populated from the
+  // SELECT; db.<model>.refresh() clears + re-inserts.
   for (const key of Object.keys(schema)) {
     const m = (schema as any)[key] as ModelDef<any>;
     if (!m?.view?.sql) continue;
+    const q = d.quoteIdent(m.collection);
+    if (m.view.materialised) {
+      out.push({
+        kind: 'table',
+        name: m.collection,
+        table: m.collection,
+        sql: `CREATE TABLE IF NOT EXISTS ${q} AS ${m.view.sql}`,
+        dropSql: `DROP TABLE IF EXISTS ${q}`,
+      });
+      continue;
+    }
     out.push({
       kind: 'table',
       name: m.collection,
       table: m.collection,
-      sql: `CREATE VIEW IF NOT EXISTS ${d.quoteIdent(m.collection)} AS ${m.view.sql}`,
-      dropSql: `DROP VIEW IF EXISTS ${d.quoteIdent(m.collection)}`,
+      sql: `CREATE VIEW IF NOT EXISTS ${q} AS ${m.view.sql}`,
+      dropSql: `DROP VIEW IF EXISTS ${q}`,
     });
   }
 
@@ -179,6 +192,11 @@ function renderColumn(name: string, field: FieldDef): string {
   const d = SqliteDialect;
   const colName = d.quoteIdent(name);
   const type = d.columnType(field);
+  // Wave 5e — SQLite generated column (3.31+). STORED keeps it on disk so it's
+  // introspectable/indexable like the SQL engines.
+  if (field.dbGenerated) {
+    return `${colName} ${type} GENERATED ALWAYS AS (${field.dbGenerated}) STORED`;
+  }
   const nullable = field.optional ? '' : ' NOT NULL';
   const def = renderDefault(field);
   return `${colName} ${type}${nullable}${def}`;

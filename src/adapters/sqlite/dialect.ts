@@ -35,6 +35,9 @@ export const SqliteDialect: Dialect = {
       case 'text':       return 'TEXT';
       case 'int':        return 'INTEGER';
       case 'float':      return 'REAL';
+      case 'decimal':    return 'NUMERIC';        // SQLite has dynamic typing; NUMERIC affinity
+      case 'uuid':       return 'TEXT';
+      case 'bigint':     return 'INTEGER';        // 64-bit; better-sqlite3 returns bigint when safeIntegers
       case 'bool':       return 'INTEGER';       // 0 / 1
       case 'dateTime':   return 'TEXT';           // ISO 8601 string
       case 'json':       return 'TEXT';           // JSON-encoded

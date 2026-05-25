@@ -63,6 +63,11 @@ export const PostgresDialect: Dialect = {
       case 'text':       return 'text';
       case 'int':        return 'integer';
       case 'float':      return 'double precision';
+      case 'decimal':    return field.precision != null
+                           ? `numeric(${field.precision}${field.scale != null ? `,${field.scale}` : ''})`
+                           : 'numeric';
+      case 'uuid':       return 'uuid';
+      case 'bigint':     return 'bigint';
       case 'bool':       return 'boolean';
       case 'dateTime':   return 'timestamptz';
       case 'json':       return 'jsonb';

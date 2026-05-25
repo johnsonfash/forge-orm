@@ -223,6 +223,26 @@ export class SqliteAdapter implements Adapter {
     // PRAGMA foreign_keys = ON is set at connect; cascades happen in-engine.
   }
 
+  // Wave 5d — table-backed materialised view refresh: clear + re-populate from
+  // the view's SELECT body, inside a transaction.
+  async refreshView(model: any, opts?: ExecOpts): Promise<void> {
+    const sql = model?.view?.sql;
+    if (!sql) throw new Error(`[forge:sqlite] '${model?.collection}' has no view SQL to refresh`);
+    const db = (opts?.session as SqliteDb | undefined) ?? this.db;
+    const q = `"${String(model.collection).replace(/"/g, '""')}"`;
+    const tx = (db as any).transaction(() => {
+      db.exec(`DELETE FROM ${q}`);
+      db.exec(`INSERT INTO ${q} ${sql}`);
+    });
+    tx();
+  }
+
+  // Wave 5b — live-schema introspection (sqlite_master + PRAGMA).
+  async introspect(): Promise<import('../types').DbIntrospection> {
+    const { introspectSqlite } = await import('./introspect');
+    return introspectSqlite(this.db);
+  }
+
   // ─── URL → filename ────────────────────────────────────────────────────
 
   private _urlToFilename(url: string): string {

@@ -82,10 +82,43 @@ export class CollectionWrapper<
     public model: ModelDef<any>,
     private _session?: unknown,
     private _adapter?: Adapter,
+    private _strict: boolean = false,
   ) {}
 
   protected get adapter(): Adapter {
     return this._adapter ?? getDefaultMongoAdapter();
+  }
+
+  // Wave 5e — strict mode. When createDb({ strict: true }) is set, reject any
+  // `where` key that isn't a real field, a known synthetic composite-unique
+  // key, a relation name, or a recognised logical/structural operator. This
+  // closes the `[key: string]: any` escape hatch on WhereInput so typos surface
+  // instead of silently matching nothing.
+  private static readonly _whereOps = new Set([
+    'AND', 'OR', 'NOT', '_withDeleted',
+  ]);
+  private _strictKeysCache?: Set<string>;
+  private _allowedWhereKeys(): Set<string> {
+    if (this._strictKeysCache) return this._strictKeysCache;
+    const keys = new Set<string>(CollectionWrapper._whereOps);
+    for (const fieldName of Object.keys(this.model.fields)) keys.add(fieldName);
+    for (const rel of Object.keys(this.model.relations())) keys.add(rel);
+    // Synthetic composite-unique keys mirror Prisma: ['a','b'] → 'a_b'.
+    for (const cols of this.model.uniques ?? []) keys.add(cols.join('_'));
+    this._strictKeysCache = keys;
+    return keys;
+  }
+  private _assertStrictWhere(where: any): void {
+    if (!this._strict || !where || typeof where !== 'object') return;
+    const allowed = this._allowedWhereKeys();
+    for (const key of Object.keys(where)) {
+      if (allowed.has(key)) continue;
+      throw new Error(
+        `[forge:strict] unknown where key '${key}' on '${this.model.collection}'.\n` +
+        `  Known fields: ${Object.keys(this.model.fields).join(', ')}.\n` +
+        `  (strict mode is on — disable with createDb({ strict: false }) to allow loose keys.)`,
+      );
+    }
   }
 
   // Returns a session-bound wrapper for use inside $transaction(callback).
@@ -93,7 +126,7 @@ export class CollectionWrapper<
   // differs. The adapter's session type (Mongo: ClientSession, PG: PoolClient)
   // flows through opaquely via _session.
   withSession(session: unknown): CollectionWrapper<F, R> {
-    return new CollectionWrapper<F, R>(this.model, session, this._adapter);
+    return new CollectionWrapper<F, R>(this.model, session, this._adapter, this._strict);
   }
 
   // Compile namespace — same arg shape as the execute methods, but returns a
@@ -237,6 +270,7 @@ export class CollectionWrapper<
   }
 
   async count(args: { where?: WhereInput<F>; distinct?: Array<keyof F & string> } = {}): Promise<number> {
+    this._assertStrictWhere(args?.where);
     const mk = this._modelKey();
     args = this._withSoftDeleteFilter(args);
     const node = buildCount(mk, this.model, args, schema as any);
@@ -364,6 +398,7 @@ export class CollectionWrapper<
     omit?: { [K in keyof F]?: boolean };
   }>(args: A): Promise<Find1<F, R, A>> {
     this._assertWritable('update');
+    this._assertStrictWhere(args.where);
     const mk = this._modelKey();
     const { scalar, nested } = this._splitNestedWrites(args.data, /*forCreate*/ false);
     const node = buildUpdate(
@@ -382,6 +417,7 @@ export class CollectionWrapper<
     data: IUpdate<F, R>;
   }): Promise<{ count: number }> {
     this._assertWritable('updateMany');
+    this._assertStrictWhere(args.where);
     const mk = this._modelKey();
     const node = buildUpdate(
       mk, this.model,
@@ -401,6 +437,7 @@ export class CollectionWrapper<
     omit?: { [K in keyof F]?: boolean };
   }>(args: A): Promise<Find1<F, R, A>> {
     this._assertWritable('upsert');
+    this._assertStrictWhere(args.where);
     const mk = this._modelKey();
     // Build a coerced create payload for $setOnInsert. The compile-from-ir
     // layer applies defaults; we only need to pre-coerce here so user-supplied
@@ -422,6 +459,7 @@ export class CollectionWrapper<
     omit?: { [K in keyof F]?: boolean };
   }>(args: A): Promise<Find1<F, R, A>> {
     this._assertWritable('delete');
+    this._assertStrictWhere(args.where);
     const mk = this._modelKey();
     // Wave 4b — soft delete: if the model declares a `.softDeleteAt()` field,
     // rewrite DELETE to UPDATE that sets that column to now().
@@ -441,6 +479,7 @@ export class CollectionWrapper<
 
   async deleteMany(args: { where?: WhereInput<F> } = {}): Promise<{ count: number }> {
     this._assertWritable('deleteMany');
+    this._assertStrictWhere(args?.where);
     const mk = this._modelKey();
     // Soft delete: rewrite to updateMany.
     const sd = this._softDeleteField();
@@ -469,6 +508,29 @@ export class CollectionWrapper<
       .aggregate(pipeline, { ...args.options, ...this.sessOpt })
       .toArray();
     return docs.map(stringifyObjectIds);
+  }
+
+  // ─── Wave 5d — materialised views ────────────────────────────────────
+
+  // Recompute a materialised view's contents from its source definition.
+  //   PG     → REFRESH MATERIALIZED VIEW [CONCURRENTLY]
+  //   MySQL  → TRUNCATE + INSERT … SELECT from the view's `sql`
+  //   SQLite → DELETE + INSERT … SELECT from the view's `sql`
+  //   Mongo  → re-run the $merge/$out pipeline
+  // No-ops (with a thrown error) on non-materialised models.
+  async refresh(opts: { concurrently?: boolean } = {}): Promise<void> {
+    const view = (this.model as any).view;
+    if (!view?.materialised) {
+      throw new Error(
+        `[forge] refresh() is only valid on a materialised view. ` +
+        `'${this.model.collection}' is ${view ? 'a plain view' : 'a table'}. ` +
+        `Declare it with .asView({ materialised: true, ... }).`,
+      );
+    }
+    if (typeof (this.adapter as any).refreshView !== 'function') {
+      throw new Error(`[forge] adapter '${this.adapter.kind}' does not implement materialised-view refresh.`);
+    }
+    await (this.adapter as any).refreshView(this.model, { ...opts, session: this._session });
   }
 
   // ─── Internal: read pipeline ─────────────────────────────────────────
@@ -500,6 +562,7 @@ export class CollectionWrapper<
     // Build an IR SelectNode and hand it to the Mongo executor. This is the
     // adapter-agnostic boundary: SQL adapters consume the same node shape
     // in Wave 2+.
+    this._assertStrictWhere(args?.where);
     const mk = this._modelKey();
     args = this._withSoftDeleteFilter(args);
     const cardinality: 'one' | 'many' = hardLimit === 1 ? 'one' : 'many';

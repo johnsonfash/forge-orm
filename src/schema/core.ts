@@ -67,6 +67,14 @@ export class Field<T, K extends FieldKind = FieldKind> {
   softDeleteAt(): Field<T | null, K> {
     return new Field<T | null, K>({ ...this.def, optional: true, softDeleteAt: true });
   }
+
+  // Wave 5e — mark this column as database-generated/computed. `expr` is the
+  // SQL expression (e.g. `"price" * "qty"`). The wrapper never writes a
+  // generated column; the DB computes it. Emitted as GENERATED ALWAYS AS
+  // (<expr>) STORED on PG/MySQL/SQLite; ignored (with a warning) on Mongo.
+  dbgenerated(expr: string): Field<T, K> {
+    return new Field<T, K>({ ...this.def, dbGenerated: expr });
+  }
 }
 
 // ─── f.* — field constructors ───────────────────────────────────────────────
@@ -101,6 +109,34 @@ export const f = {
   text: () => make<string, 'text'>('text'),
   int: () => make<number, 'int'>('int'),
   float: () => make<number, 'float'>('float'),
+
+  // Wave 5e — exact numeric. JS type is `string` to avoid float-precision loss
+  // (e.g. money). PG numeric(p,s) / MySQL DECIMAL(p,s) / SQLite NUMERIC / Mongo Decimal128.
+  decimal: (opts: { precision?: number; scale?: number } = {}) =>
+    new Field<string, 'decimal'>({
+      kind: 'decimal',
+      optional: false,
+      unique: false,
+      updatedAt: false,
+      precision: opts.precision,
+      scale: opts.scale,
+    }),
+
+  // Wave 5e — UUID. JS type `string`. Pass `{ default: 'gen_random_uuid' }` to
+  // emit a DB-side default (PG gen_random_uuid(), MySQL UUID()).
+  uuid: (opts: { default?: 'gen_random_uuid' } = {}) =>
+    new Field<string, 'uuid'>({
+      kind: 'uuid',
+      optional: false,
+      unique: false,
+      updatedAt: false,
+      uuidDefault: opts.default === 'gen_random_uuid',
+    }),
+
+  // Wave 5e — 64-bit integer. JS type `bigint` (use BigInt literals: 1n).
+  // PG bigint / MySQL BIGINT / SQLite INTEGER / Mongo Long.
+  bigint: () => make<bigint, 'bigint'>('bigint'),
+
   bool: () => make<boolean, 'bool'>('bool'),
   dateTime: () => make<Date, 'dateTime'>('dateTime'),
   json: () => make<any, 'json'>('json'),
@@ -200,7 +236,15 @@ interface ChainableModel<F extends Record<string, Field<any, any>>>
   // Wave 4c — declare this model as a read-only view backed by a CREATE VIEW
   // (SQL dialects) or createCollection-as-view (Mongo). The wrapper blocks
   // all write methods; reads work normally.
-  asView(spec: { sql?: string; pipeline?: unknown[]; sourceCollection?: string }): TypedModel<F, {}>;
+  asView(spec: {
+    sql?: string;
+    pipeline?: unknown[];
+    sourceCollection?: string;
+    // Wave 5d — materialised view: physical, refreshable via db.<model>.refresh().
+    materialised?: boolean;
+    // Wave 5d — auto-refresh interval, e.g. '30s', '5m', '1h'.
+    refreshEvery?: string;
+  }): TypedModel<F, {}>;
 }
 
 export const model = <F extends Record<string, Field<any, any>>>(

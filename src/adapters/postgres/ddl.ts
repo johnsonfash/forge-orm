@@ -90,16 +90,29 @@ export function buildSchemaDDL(
     out.push(...buildSearchableIndexes(d, m));
   }
 
-  // Pass 3: Wave 4c — CREATE VIEW for view-marked models.
+  // Pass 3: Wave 4c — CREATE VIEW for view-marked models. Wave 5d —
+  // CREATE MATERIALIZED VIEW when `.asView({ materialised: true })`.
   for (const key of Object.keys(schema)) {
     const m = (schema as any)[key] as ModelDef<any>;
     if (!m?.view?.sql) continue;
+    const q = d.quoteIdent(m.collection);
+    if (m.view.materialised) {
+      out.push({
+        kind: 'table',
+        name: m.collection,
+        table: m.collection,
+        // No CREATE OR REPLACE for matviews; IF NOT EXISTS makes push idempotent.
+        sql: `CREATE MATERIALIZED VIEW IF NOT EXISTS ${q} AS ${m.view.sql}`,
+        dropSql: `DROP MATERIALIZED VIEW IF EXISTS ${q}`,
+      });
+      continue;
+    }
     out.push({
       kind: 'table',          // close enough — DDL applier treats this as a CREATE-DROP unit
       name: m.collection,
       table: m.collection,
-      sql: `CREATE OR REPLACE VIEW ${d.quoteIdent(m.collection)} AS ${m.view.sql}`,
-      dropSql: `DROP VIEW IF EXISTS ${d.quoteIdent(m.collection)}`,
+      sql: `CREATE OR REPLACE VIEW ${q} AS ${m.view.sql}`,
+      dropSql: `DROP VIEW IF EXISTS ${q}`,
     });
   }
 
@@ -148,6 +161,11 @@ function buildCreateTable(d: Dialect, m: ModelDef<any>): DDLStatement {
 function renderColumn(d: Dialect, name: string, field: FieldDef): string {
   const colName = d.quoteIdent(name);
   const type = d.columnType(field);
+  // Wave 5e — generated columns are computed by the DB; they take neither a
+  // default nor an explicit NOT NULL (the expression governs nullability).
+  if (field.dbGenerated) {
+    return `${colName} ${type} GENERATED ALWAYS AS (${field.dbGenerated}) STORED`;
+  }
   const nullable = field.optional ? '' : ' NOT NULL';
   const def = renderDefault(field);
   return `${colName} ${type}${nullable}${def}`;
@@ -155,6 +173,10 @@ function renderColumn(d: Dialect, name: string, field: FieldDef): string {
 
 function renderDefault(field: FieldDef): string {
   if (!field.default) {
+    // Wave 5e — uuid with `{ default: 'gen_random_uuid' }` gets a DB-side default.
+    if (field.kind === 'uuid' && field.uuidDefault) {
+      return ` DEFAULT gen_random_uuid()`;
+    }
     // embedMany without an explicit default still defaults to empty array in
     // the DB so callers don't have to pass `[]` for every create. Optional
     // embedManys remain free to be NULL.

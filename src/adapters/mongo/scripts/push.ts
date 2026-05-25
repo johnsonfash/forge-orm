@@ -230,6 +230,16 @@ export async function pushAllIndexes(): Promise<void> {
       console.log(`   ⚠ view '${m.collection}' missing sourceCollection — skipped`);
       continue;
     }
+    // Wave 5d — materialised view: a real collection populated by the
+    // pipeline's $out/$merge stage (not a Mongo read-only view). Initial
+    // populate happens here; db.<model>.refresh() re-runs it later.
+    if (m.view.materialised) {
+      const hasOut = pipeline.some((s) => s && (s.$merge || s.$out));
+      const full = hasOut ? pipeline : [...pipeline, { $out: m.collection }];
+      await db.collection(source).aggregate(full).toArray();
+      console.log(`\n📦 ${m.collection}  (materialised from ${source})`);
+      continue;
+    }
     const existing = await db.listCollections({ name: m.collection }).toArray();
     if (existing.length > 0) {
       // Drop + recreate to honour any pipeline drift. Cheap — views hold no data.

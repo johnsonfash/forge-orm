@@ -210,4 +210,26 @@ export class MysqlAdapter implements Adapter {
   }
 
   async applyCascadesForDelete(): Promise<void> { /* DB-enforced */ }
+
+  // Wave 5d — table-backed materialised view refresh: clear + re-populate from
+  // the view's SELECT body. Wrapped in a transaction so readers never see an
+  // empty table mid-refresh.
+  async refreshView(model: any, opts?: ExecOpts): Promise<void> {
+    const sql = model?.view?.sql;
+    if (!sql) throw new Error(`[forge:mysql] '${model?.collection}' has no view SQL to refresh`);
+    const q = '`' + String(model.collection).replace(/`/g, '``') + '`';
+    const conn = (opts?.session as MysqlConn | undefined);
+    const run = async (c: MysqlConn | MysqlPool) => {
+      await c.query(`DELETE FROM ${q}`);
+      await c.query(`INSERT INTO ${q} ${sql}`);
+    };
+    if (conn) { await run(conn); return; }
+    await this.$transaction((s) => run(s as MysqlConn));
+  }
+
+  // Wave 5b — live-schema introspection (INFORMATION_SCHEMA).
+  async introspect(): Promise<import('../types').DbIntrospection> {
+    const { introspectMysql } = await import('./introspect');
+    return introspectMysql(this.pool);
+  }
 }

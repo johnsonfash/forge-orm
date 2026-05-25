@@ -38,6 +38,52 @@ export interface DoctorReport {
   notes: string[];
 }
 
+// ─── Wave 5b — live-schema introspection ─────────────────────────────────────
+// A normalized, dialect-agnostic snapshot of what's actually in the database,
+// used by `forge:diff` to compare against the declared forge schema.
+
+export interface IntrospectedColumn {
+  name: string;
+  // Dialect-native type token, lower-cased and trimmed (e.g. 'text', 'integer',
+  // 'numeric(10,2)', 'varchar(255)'). Compared loosely by the diff comparator.
+  type: string;
+  nullable: boolean;
+  // Default expression as the DB reports it (or undefined when none).
+  default?: string;
+}
+
+export interface IntrospectedIndex {
+  name: string;
+  columns: string[];
+  unique: boolean;
+}
+
+export interface IntrospectedForeignKey {
+  name: string;
+  column: string;
+  refTable: string;
+  refColumn: string;
+}
+
+export interface IntrospectedTable {
+  name: string;
+  columns: IntrospectedColumn[];
+  indexes: IntrospectedIndex[];
+  foreignKeys: IntrospectedForeignKey[];
+}
+
+export interface IntrospectedView {
+  name: string;
+  // True for materialised views / table-backed views.
+  materialised?: boolean;
+}
+
+export interface DbIntrospection {
+  kind: AdapterKind;
+  tables: IntrospectedTable[];
+  views: IntrospectedView[];
+}
+
 // Per-adapter execute opts. Each adapter narrows this with its own session
 // type (Mongo's ClientSession, PG's PoolClient, …). Wave 2b carries this as
 // a free-form `unknown` so wrappers can pass through whatever the adapter
@@ -122,4 +168,10 @@ export interface Adapter {
   // Adapters that haven't implemented this return undefined → wrapper falls
   // back to OFFSET/LIMIT chunking.
   streamSelect?(node: any, model: any, opts?: ExecOpts): AsyncIterable<any>;
+
+  // Wave 5b — introspect the live database schema for drift detection.
+  introspect?(): Promise<DbIntrospection>;
+
+  // Wave 5d — recompute a materialised view from its source definition.
+  refreshView?(model: any, opts?: ExecOpts & { concurrently?: boolean }): Promise<void>;
 }

@@ -235,6 +235,21 @@ export class PostgresAdapter implements Adapter {
     // but for PG it's a no-op — the DB engine has already done the work.
   }
 
+  // Wave 5d — REFRESH MATERIALIZED VIEW. CONCURRENTLY needs a unique index on
+  // the matview, so it's opt-in; default is a plain (locking) refresh.
+  async refreshView(model: any, opts?: ExecOpts & { concurrently?: boolean }): Promise<void> {
+    const q = `"${String(model.collection).replace(/"/g, '""')}"`;
+    const client = (opts?.session as PgPoolHandle | undefined) ?? this.pool;
+    const concurrently = opts?.concurrently ? 'CONCURRENTLY ' : '';
+    await client.query(`REFRESH MATERIALIZED VIEW ${concurrently}${q}`);
+  }
+
+  // Wave 5b — introspect live PG schema (information_schema + pg_catalog).
+  async introspect(): Promise<import('../types').DbIntrospection> {
+    const { introspectPg } = await import('./introspect');
+    return introspectPg(this.pool);
+  }
+
   // ─── Raw SQL escape hatches ───────────────────────────────────────────
 
   async $queryRaw(fragment: import('../../raw-sql').SqlFragment, opts?: ExecOpts): Promise<any[]> {

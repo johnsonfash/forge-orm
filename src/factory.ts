@@ -33,6 +33,10 @@ import { SqliteAdapter } from './adapters/sqlite/adapter';
 export interface CreateDbOptionsUrl {
   url: string;
   type?: AdapterKind;
+  // Wave 5e — reject unknown `where` keys at runtime. Off by default (the
+  // WhereInput type has a loose `[key: string]: any` escape hatch for
+  // composite-unique synthetic keys); strict closes it, catching typos.
+  strict?: boolean;
 }
 
 export interface CreateDbOptionsStructured {
@@ -44,6 +48,8 @@ export interface CreateDbOptionsStructured {
   password?: string;
   ssl?: boolean;
   pool?: { min?: number; max?: number };
+  // Wave 5e — see CreateDbOptionsUrl.strict.
+  strict?: boolean;
 }
 
 export type CreateDbOptions = CreateDbOptionsUrl | CreateDbOptionsStructured;
@@ -94,7 +100,7 @@ const PROXY_PASSTHROUGH = new Set<PropertyKey>([
 
 export async function createDb(opts: CreateDbOptions): Promise<ForgeDb> {
   const { adapter, url } = await pickAndConnect(opts);
-  return makeDb(adapter, url);
+  return makeDb(adapter, url, { strict: opts.strict === true });
 }
 
 async function pickAndConnect(opts: CreateDbOptions): Promise<{ adapter: Adapter; url: string }> {
@@ -168,7 +174,7 @@ function makeRawCaller<R>(run: (frag: SqlFragment) => Promise<R>) {
   };
 }
 
-function makeDb(adapter: Adapter, _url: string): ForgeDb {
+function makeDb(adapter: Adapter, _url: string, runtime: { strict: boolean } = { strict: false }): ForgeDb {
   const cache: Partial<Record<keyof SchemaMap, CollectionWrapper<any>>> = {};
 
   const root: any = new Proxy({}, {
@@ -190,7 +196,7 @@ function makeDb(adapter: Adapter, _url: string): ForgeDb {
         // coerce / decode / cascade call dispatches through the right
         // dialect. Without this, every wrapper would silently fall back
         // to the Mongo singleton — which is the pre-Wave 2c behaviour.
-        cache[key as keyof SchemaMap] = new CollectionWrapper(model, undefined, adapter);
+        cache[key as keyof SchemaMap] = new CollectionWrapper(model, undefined, adapter, runtime.strict);
       }
       return cache[key as keyof SchemaMap];
     },
@@ -236,7 +242,7 @@ function makeDb(adapter: Adapter, _url: string): ForgeDb {
         if (!txCache[key]) {
           // Tx wrapper: same adapter, plus the opaque session from
           // adapter.$transaction (ClientSession / PoolClient / ...).
-          txCache[key] = new CollectionWrapper(model, session, adapter);
+          txCache[key] = new CollectionWrapper(model, session, adapter, runtime.strict);
         }
         return txCache[key];
       },

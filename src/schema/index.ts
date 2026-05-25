@@ -211,6 +211,26 @@ export const PublishedPosts = model('published_posts', {
   ],
 });
 
+// Wave 5d — a materialised view: per-author post rollups, recomputed on
+// demand via `db.postStats.refresh()`. PG emits CREATE MATERIALIZED VIEW;
+// MySQL/SQLite back it with a TABLE repopulated on refresh; Mongo populates a
+// collection via the pipeline's $out. `post_count`/`total_views` use f.bigint()
+// to also exercise the Wave 5e bigint type end-to-end.
+export const PostStats = model('post_stats', {
+  author_id: f.objectId(),
+  post_count: f.bigint(),
+  total_views: f.bigint(),
+}).asView({
+  materialised: true,
+  sql: `SELECT author_id, COUNT(*) AS post_count, COALESCE(SUM(view_count), 0) AS total_views FROM posts GROUP BY author_id`,
+  sourceCollection: 'posts',
+  pipeline: [
+    { $group: { _id: '$author_id', post_count: { $sum: 1 }, total_views: { $sum: '$view_count' } } },
+    { $project: { _id: 0, author_id: '$_id', post_count: 1, total_views: 1 } },
+    { $out: 'post_stats' },
+  ],
+});
+
 // ─── Schema registry ────────────────────────────────────────────────────────
 
 export const schema = {
@@ -223,6 +243,7 @@ export const schema = {
   like: Like,
   auditLog: AuditLog,
   publishedPosts: PublishedPosts,
+  postStats: PostStats,
 } as const;
 
 export type SchemaMap = typeof schema;
