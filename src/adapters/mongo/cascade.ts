@@ -1,4 +1,5 @@
-import { ObjectId } from 'mongodb';
+import type { ObjectId } from 'mongodb';
+import { mongo } from './bson';
 import { dbClient } from './client';
 import { RelationInfo } from '../../schema/core';
 import { ModelDef, OnDeleteAction } from '../../schema/types';
@@ -87,10 +88,10 @@ export async function applyCascadesForDelete(
       childOnDef?.kind === 'id' || childOnDef?.kind === 'objectId';
     const inValues = isObjectIdField
       ? parentRefValues.map((v) =>
-          v instanceof ObjectId
+          v instanceof mongo().ObjectId
             ? v
-            : typeof v === 'string' && ObjectId.isValid(v)
-              ? new ObjectId(v)
+            : typeof v === 'string' && mongo().ObjectId.isValid(v)
+              ? new (mongo().ObjectId)(v)
               : v,
         )
       : parentRefValues;
@@ -132,7 +133,7 @@ function unique<T>(arr: T[]): T[] {
   const seen = new Set<string>();
   const out: T[] = [];
   for (const v of arr) {
-    const k = v instanceof ObjectId ? v.toString() : String(v);
+    const k = v instanceof mongo().ObjectId ? v.toString() : String(v);
     if (!seen.has(k)) {
       seen.add(k);
       out.push(v);

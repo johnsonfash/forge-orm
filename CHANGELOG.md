@@ -4,6 +4,21 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite — one code
 path, no codegen, no external query engine.
 
+## 1.1.1 — standalone & driver-lazy (fixes 1.1.0)
+
+- **Fix (critical):** importing `forge-orm` no longer requires any database
+  driver. `mongodb` (`MongoClient`/`ObjectId`) is now lazy-loaded, so a
+  SQL-only — or import-only — consumer doesn't need the mongodb driver. (1.1.0
+  crashed on import with `Cannot find module 'mongodb'`.)
+- **Removed the NestJS integration** (`DatabaseModule`/`DatabaseService`) and the
+  `@nestjs/common` dependency. forge is now a **fully standalone,
+  framework-agnostic** library — no framework coupling, no bundled driver.
+- Drivers (`pg` / `mysql2` / `better-sqlite3` / `mongodb`) are **optional peer
+  dependencies**: install only the one(s) you use; each is `require()`d lazily
+  on first use against that dialect. Verified: `npm install forge-orm` with zero
+  drivers imports cleanly and defines schemas.
+- README: explicit "install the driver for your database" table + a no-lock-in note.
+
 ## 1.1.0 — drop-in library (schema decoupling)
 
 forge is now a **true drop-in library**: bring your own schema instead of being

@@ -71,8 +71,8 @@ export { ForgeEmitter } from './events';
 export { wireOtel } from './observability/otel';
 export type { OtelTracer, OtelSpan, WireOtelOptions } from './observability/otel';
 
-export * from './database.module';
-export * from './database.service';
+// Mongo connection singleton (used internally by the Mongo adapter's default
+// path). Standalone — forge has no framework coupling.
 export { dbClient } from './client';
 
 // ─── Schema (sample blog/CMS) ───────────────────────────────────────────────

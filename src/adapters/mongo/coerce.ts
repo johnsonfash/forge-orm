@@ -1,4 +1,5 @@
-import { ObjectId } from 'mongodb';
+import type { ObjectId } from 'mongodb';
+import { mongo } from './bson';
 import { FieldDef, ModelDef } from '../../schema/types';
 
 // ============================================================================
@@ -18,8 +19,8 @@ import { FieldDef, ModelDef } from '../../schema/types';
 
 const idStringToObjectId = (v: any): any => {
   if (v == null) return v;
-  if (v instanceof ObjectId) return v;
-  if (typeof v === 'string' && ObjectId.isValid(v)) return new ObjectId(v);
+  if (v instanceof mongo().ObjectId) return v;
+  if (typeof v === 'string' && mongo().ObjectId.isValid(v)) return new (mongo().ObjectId)(v);
   return v;
 };
 
@@ -47,7 +48,7 @@ export function coerceFieldValue(field: FieldDef | undefined, value: any): any {
     typeof value === 'object' &&
     !Array.isArray(value) &&
     !(value instanceof Date) &&
-    !(value instanceof ObjectId)
+    !(value instanceof mongo().ObjectId)
   ) {
     const out: any = {};
     let isOp = false;
@@ -131,7 +132,7 @@ export function applyCreateDefaults(model: ModelDef<any>, data: any): any {
     if (out[name] !== undefined) continue;
     if (def.default) {
       if (def.default.kind === 'now') out[name] = new Date();
-      else if (def.default.kind === 'autoId') out[name] = new ObjectId();
+      else if (def.default.kind === 'autoId') out[name] = new (mongo().ObjectId)();
       else out[name] = def.default.value;
     }
     // else: optional and unset → leave field off the doc (Prisma parity).
@@ -180,7 +181,7 @@ export function decodeRow(model: ModelDef<any>, doc: any): any {
 
 function decodeValue(field: FieldDef | undefined, value: any): any {
   if (value == null) return value;
-  if (value instanceof ObjectId) return value.toString();
+  if (value instanceof mongo().ObjectId) return value.toString();
   if (Array.isArray(value)) return value.map((v) => decodeValue(field, v));
   if (field?.kind === 'embed' || field?.kind === 'embedMany') {
     const embed = field.embedOf?.();
@@ -235,12 +236,10 @@ export function coerceExtendedJSON<T>(value: T): T {
   if (keys.length === 1) {
     const k = keys[0];
     if (k === '$oid' && typeof obj.$oid === 'string') {
-      // We import ObjectId lazily to avoid circular imports; require() at
-      // top of this file is cheap and already imported.
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const { ObjectId } = require('mongodb');
-      if (ObjectId.isValid(obj.$oid)) {
-        return new ObjectId(obj.$oid) as unknown as T;
+      // ObjectId is loaded lazily via mongo() so SQL-only installs never need
+      // the mongodb driver just to import forge.
+      if (mongo().ObjectId.isValid(obj.$oid)) {
+        return new (mongo().ObjectId)(obj.$oid) as unknown as T;
       }
     }
     if (k === '$date') {

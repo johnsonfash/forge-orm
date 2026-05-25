@@ -138,19 +138,31 @@ Build/publish: `npm run build` emits `dist/` (compiled JS + `.d.ts`); `npm pack`
 produces a tarball of `dist/` + README + CHANGELOG only (no tests/bench/`.env`);
 `npm publish` once you've set your own package name/scope.
 
-Install whichever drivers you'll use — they're **optional peer dependencies**, so
-installing forge itself pulls zero drivers:
+### Then install the driver for *your* database
+
+forge is a **standalone library with no framework coupling and no bundled
+driver** — it ships zero database drivers. You install **only** the one(s) you
+actually use. They're declared as **optional peer dependencies**, so
+`npm install forge-orm` on its own pulls nothing extra and never locks you into
+a database, a driver version, or a framework.
+
+| Your database | URL prefix | Install this driver |
+|---|---|---|
+| **PostgreSQL** | `postgres://` / `postgresql://` | `npm install pg` |
+| **MySQL / MariaDB** | `mysql://` | `npm install mysql2` |
+| **SQLite** | `sqlite:` / `file:` | `npm install better-sqlite3` |
+| **MongoDB** | `mongodb://` / `mongodb+srv://` | `npm install mongodb` |
 
 ```sh
-npm install mongodb          # if you'll use Mongo
-npm install pg               # if you'll use Postgres
-npm install mysql2           # if you'll use MySQL
-npm install better-sqlite3   # if you'll use SQLite
+npm install forge-orm        # the engine + types — pulls NO drivers
+npm install pg               # ← add only the driver you need (e.g. Postgres)
 ```
 
-Forge's `package.json` declares these as **optional peer dependencies**, so
-`npm install forge` itself pulls zero drivers. If you `createDb({ url:
-'postgres://…' })` without `pg` installed, you get a clear actionable error:
+You control the driver and its version entirely — forge just `require()`s it
+**lazily**, the first time you actually run a query against that dialect. So
+importing forge, defining your schema, or using one dialect never needs the
+other dialects' drivers installed. If a driver is missing when you connect, you
+get a clear, actionable error instead of a crash:
 
 ```
 [forge] postgres adapter needs the 'pg' driver, but it's not installed.
@@ -158,6 +170,12 @@ Forge's `package.json` declares these as **optional peer dependencies**, so
   Install:     npm install pg
   Or override: createDb({ type: 'mongo' | 'postgres' | 'mysql' | 'sqlite', url: '...' })
 ```
+
+> **No lock-in, by design.** No ORM-owned migration state you can't leave, no
+> generated client to keep in sync, no framework module to adopt, no driver
+> bundled in. It's plain TypeScript over the official drivers — `.compile.*`
+> even hands you the raw SQL/Mongo args to run yourself if you outgrow the
+> wrapper, and you can drop down to your driver directly at any time.
 
 ---
 

@@ -1,4 +1,5 @@
-import { ObjectId } from 'mongodb';
+import type { ObjectId } from 'mongodb';
+import { mongo } from './bson';
 import { dbClient } from './client';
 import { schema } from '../../schema';
 import { RelationInfo } from '../../schema/core';
@@ -109,7 +110,7 @@ async function batchLoadRelation(
     childFieldDef?.kind === 'id' || childFieldDef?.kind === 'objectId';
 
   const inValues = isObjectIdField
-    ? keyValues.map((v) => (typeof v === 'string' && ObjectId.isValid(v) ? new ObjectId(v) : v))
+    ? keyValues.map((v) => (typeof v === 'string' && mongo().ObjectId.isValid(v) ? new (mongo().ObjectId)(v) : v))
     : keyValues;
 
   // Compose where: caller's where AND the FK match.
@@ -184,7 +185,7 @@ async function batchCount(
   const keys = unique(rows.map((r) => r[parentSideField]).filter((v) => v != null));
   if (keys.length === 0) return {};
   const inValues = isObjectIdField
-    ? keys.map((v) => (typeof v === 'string' && ObjectId.isValid(v) ? new ObjectId(v) : v))
+    ? keys.map((v) => (typeof v === 'string' && mongo().ObjectId.isValid(v) ? new (mongo().ObjectId)(v) : v))
     : keys;
 
   const pipeline = [

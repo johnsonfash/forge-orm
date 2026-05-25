@@ -2,7 +2,7 @@
 import * as dotenv from 'dotenv';
 dotenv.config();
 
-import { Collection } from 'mongodb';
+import type { Collection } from 'mongodb';
 import { dbClient } from '../client';
 import { schema } from '../../../schema';
 import { FieldDef, ModelDef } from '../../../schema/types';

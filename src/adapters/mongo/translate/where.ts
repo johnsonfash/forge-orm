@@ -1,4 +1,4 @@
-import { Filter } from 'mongodb';
+import type { Filter } from 'mongodb';
 import { ModelDef } from '../../../schema/types';
 import { appKeyToDbKey, coerceFieldValue, getFieldDef } from '../coerce';
 

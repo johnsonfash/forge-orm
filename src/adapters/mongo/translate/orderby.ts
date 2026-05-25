@@ -1,4 +1,4 @@
-import { Sort } from 'mongodb';
+import type { Sort } from 'mongodb';
 import { appKeyToDbKey } from '../coerce';
 
 // Prisma orderBy → Mongo sort.

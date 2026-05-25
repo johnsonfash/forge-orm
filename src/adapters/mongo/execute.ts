@@ -22,7 +22,8 @@ import {
 } from './compile-from-ir';
 import { applyCascadesForDelete } from './cascade';
 import { notFoundError, rethrowMongoError } from './errors';
-import { ObjectId } from 'mongodb';
+import type { ObjectId } from 'mongodb';
+import { mongo } from './bson';
 
 // Mongo IR executor — turns IR nodes into actual driver calls.
 //
@@ -444,7 +445,7 @@ function unique<T>(arr: T[]): T[] {
 
 function stringKey(v: any): string {
   if (v == null) return '\x00';
-  if (v instanceof ObjectId) return v.toHexString();
+  if (v instanceof mongo().ObjectId) return v.toHexString();
   if (typeof v === 'object' && v._bsontype === 'ObjectId') return v.toString();
   return String(v);
 }

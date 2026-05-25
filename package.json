@@ -1,6 +1,6 @@
 {
   "name": "forge-orm",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Prisma-shape multi-database ORM/wrapper for MongoDB, PostgreSQL, MySQL & SQLite from one codebase — no codegen, no query engine. Bring your own schema.",
   "license": "MIT",
   "author": "johnsonfash",
@@ -13,8 +13,18 @@
     "url": "https://github.com/johnsonfash/forge-orm/issues"
   },
   "keywords": [
-    "orm", "prisma", "mongodb", "postgres", "postgresql", "mysql", "sqlite",
-    "database", "query-builder", "typescript", "multi-database", "no-codegen"
+    "orm",
+    "prisma",
+    "mongodb",
+    "postgres",
+    "postgresql",
+    "mysql",
+    "sqlite",
+    "database",
+    "query-builder",
+    "typescript",
+    "multi-database",
+    "no-codegen"
   ],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -22,7 +32,8 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -92,7 +103,6 @@
     }
   },
   "devDependencies": {
-    "@nestjs/common": "^11.1.23",
     "@prisma/adapter-better-sqlite3": "^7.8.0",
     "@prisma/adapter-mariadb": "^7.8.0",
     "@prisma/adapter-pg": "^7.8.0",

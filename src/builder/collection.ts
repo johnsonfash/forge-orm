@@ -1,4 +1,4 @@
-import { ClientSession, Collection, Document } from 'mongodb';
+import type { ClientSession, Collection, Document } from 'mongodb';
 import { dbClient } from '../adapters/mongo/client';
 import {
   CreateInput,
@@ -87,7 +87,7 @@ export class CollectionWrapper<
   private _collection?: Collection<Document>;
   private _compileApi?: MongoCompileApi;
   // Adapter that drives execute / coerce / decode / cascade. Defaults to the
-  // lazily-built Mongo singleton so DatabaseService (Nest) and other Mongo
+  // lazily-built Mongo singleton so the default Mongo path and other Mongo
   // consumers work without surgery. createDb() in factory.ts injects the
   // active adapter explicitly when the user picked Postgres / MySQL / SQLite.
   constructor(

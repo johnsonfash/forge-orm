@@ -105,7 +105,7 @@ describe('CollectionWrapper + PostgresAdapter — write path', () => {
 });
 
 describe('CollectionWrapper falls back to Mongo singleton when no adapter is injected', () => {
-  it('uses Mongo executor by default — proves DatabaseService back-compat', () => {
+  it('uses Mongo executor by default — proves default-adapter back-compat', () => {
     const w = new CollectionWrapper(User);
     expect((w as any).adapter.kind).toBe('mongo');
   });

@@ -1,4 +1,5 @@
-import { ClientSession, Db, MongoClient } from 'mongodb';
+import type { ClientSession, Db, MongoClient } from 'mongodb';
+import { mongo } from './bson';
 
 class DatabaseClient {
   // Lazily created at first `connect()`. Reading `process.env.DATABASE_URL`
@@ -38,7 +39,7 @@ class DatabaseClient {
       );
     }
 
-    this._client = new MongoClient(uri, {
+    this._client = new (mongo().MongoClient)(uri, {
       maxPoolSize: 50,
       minPoolSize: 5,
       connectTimeoutMS: 10_000,

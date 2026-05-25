@@ -215,7 +215,7 @@ export class MongoAdapter implements Adapter {
 }
 
 // Lazily-built singleton used by CollectionWrapper when no explicit adapter
-// is passed. Keeps DatabaseService (Nest, Mongo-only) working without
+// is passed. Keeps the default Mongo path working without
 // surgery — every wrapper falls back to this if nothing else routes a
 // different adapter in.
 let _defaultMongoAdapter: MongoAdapter | undefined;
