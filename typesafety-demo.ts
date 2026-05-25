@@ -12,8 +12,8 @@
 // Honest split: section A is what forge catches strictly; section B documents
 // the known-loose surface so callers know what they get.
 
-import { createDb, forgeSql, ForgeDbNull } from './src';
-import type { ForgeOf } from './src';
+import { createDb, forgeSql, ForgeDbNull, f, model, rel } from './src';
+import type { ForgeOf, ForgeDb } from './src';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -24,7 +24,10 @@ type Equal<A, B> =
   (<T>() => T extends B ? 1 : 2) ? true : false;
 type Expect<T extends true> = T;
 
-declare const db: Awaited<ReturnType<typeof createDb>>;
+// `ForgeDb` with no type arg defaults to the sample SchemaMap, so `db.user`
+// etc. are fully typed here. (A consumer schema flows via createDb({ schema })
+// → ForgeDb<typeof theirSchema>; see custom-schema-demo.ts.)
+declare const db: ForgeDb;
 
 // =============================================================================
 // SECTION A — what's STRICTLY typed (autocomplete works, bad inputs rejected)
@@ -173,15 +176,58 @@ async function _knownLoose() {
 }
 
 // =============================================================================
+// SECTION C — a CUSTOM consumer schema gets full typing (drop-in library proof)
+// =============================================================================
+//
+// forge is no longer hardwired to the sample. Define your own models and pass
+// them to createDb({ schema }); the returned db is typed against YOUR schema.
+
+const CShop = model('shops', {
+  id: f.id(),
+  name: f.string().unique(),
+}).relate(() => ({ products: rel.many('product', { on: 'shop_id', refs: 'id' }) }));
+
+const CProduct = model('products', {
+  id: f.id(),
+  shop_id: f.objectId(),
+  title: f.string(),
+  price: f.decimal({ precision: 10, scale: 2 }),
+  in_stock: f.bool().default(true),
+}).relate(() => ({ shop: rel.one('shop', { on: 'shop_id', refs: 'id', onDelete: 'Cascade' }) }));
+
+const shopSchema = { shop: CShop, product: CProduct } as const;
+
+declare const shopDb: ForgeDb<typeof shopSchema>;
+
+async function _customSchemaTyping() {
+  // C1. db.<yourModel> exists and is a real (non-any) typed collection.
+  const p = await shopDb.product.findFirst({ where: { title: 'Widget' } });
+  type Prod = NonNullable<typeof p>;
+  type _C1 = Expect<Equal<IsAny<typeof p>, false>>;
+  // C2. decimal → string, bool → boolean, on the resolved row.
+  type _C2 = Expect<Equal<Prod['price'], string>>;
+  type _C3 = Expect<Equal<Prod['in_stock'], boolean>>;
+  // C4. include resolves the relation against the CUSTOM schema (Product[]).
+  const s = await shopDb.shop.findFirst({ include: { products: true } });
+  type _C4 = Expect<Equal<IsAny<NonNullable<typeof s>['products']>, false>>;
+  // C5. createDb({ schema }) infers the same generic db type.
+  const inferred = await createDb({ url: 'sqlite::memory:', schema: shopSchema });
+  type _C5 = Expect<Equal<IsAny<typeof inferred.product>, false>>;
+  await inferred.$disconnect();
+}
+void _customSchemaTyping;
+
+// =============================================================================
 // Summary
 // =============================================================================
 //
 // Section A: 19 typed assertions hold (incl. select/include exclusivity).
 // Section B: 3 documented loose surfaces (escape hatches, not bugs).
+// Section C: 5 assertions — a custom consumer schema is fully typed end to end.
 //
 // To see a specific bad call rejected, copy any commented `@ts-expect-error`
 // line into your IDE — TypeScript will surface the actual error message.
 
 if (typeof require !== 'undefined' && require.main === module) {
-  console.log('typesafety-demo.ts compiled. Sections A (18 strict assertions) and B (3 documented gaps) verified.');
+  console.log('typesafety-demo.ts compiled. Sections A (19) + B (3) + C (5 custom-schema) verified.');
 }

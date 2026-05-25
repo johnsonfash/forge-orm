@@ -3,6 +3,7 @@ import { CollectionWrapper } from './builder/collection';
 import { coerceExtendedJSON } from './adapters/mongo/coerce';
 import { dbClient } from './client';
 import { schema, SchemaMap } from './schema';
+import { setActiveSchema, type SchemaShape } from './schema/active';
 import { ModelFields, ModelRelations, TypedModel } from './schema/core';
 import type { ModelDef } from './schema/types';
 import type { Adapter, AdapterKind } from './adapters/types';
@@ -37,6 +38,9 @@ export interface CreateDbOptionsUrl {
   // WhereInput type has a loose `[key: string]: any` escape hatch for
   // composite-unique synthetic keys); strict closes it, catching typos.
   strict?: boolean;
+  // Bring-your-own schema — your `model(...)` map. When omitted, forge uses
+  // the bundled sample schema. One active schema per process.
+  schema?: SchemaShape;
 }
 
 export interface CreateDbOptionsStructured {
@@ -50,20 +54,28 @@ export interface CreateDbOptionsStructured {
   pool?: { min?: number; max?: number };
   // Wave 5e — see CreateDbOptionsUrl.strict.
   strict?: boolean;
+  // Bring-your-own schema — see CreateDbOptionsUrl.schema.
+  schema?: SchemaShape;
 }
 
 export type CreateDbOptions = CreateDbOptionsUrl | CreateDbOptionsStructured;
 
-type CollectionFor<M> = M extends TypedModel<any, any>
-  ? CollectionWrapper<ModelFields<M>, ModelRelations<M>>
+// CollectionFor resolves a model to its wrapper, threading the whole schema
+// map S so nested include/select on this model's relations resolve against the
+// SAME schema (the consumer's, or the sample by default).
+type CollectionFor<M, S extends SchemaShape> = M extends TypedModel<any, any>
+  ? CollectionWrapper<ModelFields<M>, ModelRelations<M>, S>
   : never;
 
-type Collections = { [K in keyof SchemaMap]: CollectionFor<SchemaMap[K]> };
+type Collections<S extends SchemaShape> = { [K in keyof S]: CollectionFor<S[K], S> };
 
-export type ForgeDb = Collections & {
+// ForgeDb is generic over the schema map S. `createDb({ schema })` infers S from
+// the passed map, so `db.<yourModel>` is fully typed; with no schema it defaults
+// to the bundled sample's SchemaMap.
+export type ForgeDb<S extends SchemaShape = SchemaMap> = Collections<S> & {
   readonly adapter: Adapter;
   $transaction: {
-    <T>(fn: (tx: ForgeDb) => Promise<T>): Promise<T>;
+    <T>(fn: (tx: ForgeDb<S>) => Promise<T>): Promise<T>;
     <T extends readonly unknown[] | []>(
       promises: T,
     ): Promise<{ -readonly [P in keyof T]: Awaited<T[P]> }>;
@@ -98,9 +110,14 @@ const PROXY_PASSTHROUGH = new Set<PropertyKey>([
   'asymmetricMatch', '$$typeof', 'nodeType',
 ]);
 
-export async function createDb(opts: CreateDbOptions): Promise<ForgeDb> {
+export async function createDb<S extends SchemaShape = SchemaMap>(
+  opts: CreateDbOptions & { schema?: S },
+): Promise<ForgeDb<S>> {
+  // Bring-your-own-schema: activate the consumer's model map (if given) before
+  // anything reads the schema. Defaults to the bundled sample otherwise.
+  if (opts.schema) setActiveSchema(opts.schema);
   const { adapter, url } = await pickAndConnect(opts);
-  return makeDb(adapter, url, { strict: opts.strict === true });
+  return makeDb(adapter, url, { strict: opts.strict === true }) as unknown as ForgeDb<S>;
 }
 
 async function pickAndConnect(opts: CreateDbOptions): Promise<{ adapter: Adapter; url: string }> {
@@ -174,7 +191,7 @@ function makeRawCaller<R>(run: (frag: SqlFragment) => Promise<R>) {
   };
 }
 
-function makeDb(adapter: Adapter, _url: string, runtime: { strict: boolean } = { strict: false }): ForgeDb {
+function makeDb(adapter: Adapter, _url: string, runtime: { strict: boolean } = { strict: false }): ForgeDb<any> {
   const cache: Partial<Record<keyof SchemaMap, CollectionWrapper<any>>> = {};
 
   const root: any = new Proxy({}, {
@@ -218,7 +235,7 @@ function makeDb(adapter: Adapter, _url: string, runtime: { strict: boolean } = {
     return dbClient.db.command(coerceExtendedJSON(command));
   }
 
-  function makeTx(session: unknown): ForgeDb {
+  function makeTx(session: unknown): ForgeDb<any> {
     const txCache: Record<string, CollectionWrapper<any>> = {};
     return new Proxy({} as any, {
       get: (_t, prop) => {
@@ -249,5 +266,5 @@ function makeDb(adapter: Adapter, _url: string, runtime: { strict: boolean } = {
     });
   }
 
-  return root as ForgeDb;
+  return root as ForgeDb<any>;
 }

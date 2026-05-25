@@ -32,6 +32,22 @@ export {
 // ─── Validator helper ───────────────────────────────────────────────────────
 export { forgeValidator } from './validator';
 
+// ─── Schema DSL — define YOUR OWN models, then `createDb({ schema })` ───────
+// This is what makes forge a drop-in library: bring your own schema map.
+//   import { f, model, rel, enums, embed } from '@guide/forge';
+//   const Product = model('products', { id: f.id(), title: f.string(), price: f.decimal({ precision: 10, scale: 2 }) });
+//   const mySchema = { product: Product } as const;
+//   const db = await createDb({ url, schema: mySchema });   // db.product is fully typed
+export { f, model, rel, enums, embed } from './schema/core';
+export type { Field, TypedModel, RelationInfo, EnumDef, ModelOptions } from './schema/core';
+export type { FieldDef, FieldKind, ModelDef, IndexDef, RelationDef, OnDeleteAction, EmbedDef } from './schema/types';
+// The bundled sample schema (a blog/CMS domain) — handy as a reference, and the
+// default when you don't pass your own. `SchemaShape` is the structural type any
+// schema map satisfies; the active-schema setters are exported for advanced use.
+export { sampleSchema } from './schema';
+export { setActiveSchema, getActiveSchema } from './schema/active';
+export type { SchemaShape } from './schema/active';
+
 // ─── Per-model ergonomic type bundle (Prisma-shape DX, no codegen) ──────────
 // ForgeOf<'user'>['WhereInput']        — generic accessor (any schema key)
 // ForgeModels['User']['CreateInput']   — capitalised dotted lookup

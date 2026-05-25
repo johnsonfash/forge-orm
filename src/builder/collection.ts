@@ -57,21 +57,32 @@ interface NestedSpec {
   data: any;
 }
 
-// Schema-bound aliases: input/output types resolved against the live SchemaMap.
-type S = SchemaMap;
+// Schema-bound aliases — resolved against the schema-map type `SM` (the
+// consumer's schema, or the bundled sample by default). Threading SM lets
+// include/select resolve relation TARGETS against whichever schema this wrapper
+// belongs to, so a custom consumer schema gets full nested typing.
 type Find1<
   F extends Record<string, Field<any, any>>,
   R extends Record<string, RelationInfo>,
   Args,
-> = Resolve<F, R, Args, S>;
+  SM extends Record<string, TypedModel<any, any>>,
+> = Resolve<F, R, Args, SM>;
 type ICreate<F extends Record<string, Field<any, any>>, R extends Record<string, RelationInfo>> = CreateInput<F, R>;
 type IUpdate<F extends Record<string, Field<any, any>>, R extends Record<string, RelationInfo>> = UpdateInput<F, R>;
-type ISelect<F extends Record<string, Field<any, any>>, R extends Record<string, RelationInfo>> = SelectInputFor<F, R, S>;
-type IInclude<R extends Record<string, RelationInfo>> = IncludeInputFor<R, S>;
+type ISelect<
+  F extends Record<string, Field<any, any>>,
+  R extends Record<string, RelationInfo>,
+  SM extends Record<string, TypedModel<any, any>>,
+> = SelectInputFor<F, R, SM>;
+type IInclude<
+  R extends Record<string, RelationInfo>,
+  SM extends Record<string, TypedModel<any, any>>,
+> = IncludeInputFor<R, SM>;
 
 export class CollectionWrapper<
   F extends Record<string, Field<any, any>> = any,
   R extends Record<string, RelationInfo> = Record<string, RelationInfo>,
+  SM extends Record<string, TypedModel<any, any>> = SchemaMap,
 > {
   private _collection?: Collection<Document>;
   private _compileApi?: MongoCompileApi;
@@ -126,8 +137,8 @@ export class CollectionWrapper<
   // The wrapper shares the same model definition + adapter; only the session
   // differs. The adapter's session type (Mongo: ClientSession, PG: PoolClient)
   // flows through opaquely via _session.
-  withSession(session: unknown): CollectionWrapper<F, R> {
-    return new CollectionWrapper<F, R>(this.model, session, this._adapter, this._strict);
+  withSession(session: unknown): CollectionWrapper<F, R, SM> {
+    return new CollectionWrapper<F, R, SM>(this.model, session, this._adapter, this._strict);
   }
 
   // Compile namespace — same arg shape as the execute methods, but returns a
@@ -155,8 +166,8 @@ export class CollectionWrapper<
 
   async findFirst<A extends {
     where?: WhereInput<F>;
-    select?: ISelect<F, R>;
-    include?: IInclude<R>;
+    select?: ISelect<F, R, SM>;
+    include?: IInclude<R, SM>;
     omit?: { [K in keyof F]?: boolean };
     orderBy?: OrderByInput<F> | OrderByInput<F>[];
     take?: number;
@@ -165,24 +176,24 @@ export class CollectionWrapper<
     offset?: number;
     cursor?: CursorInput;
     distinct?: Array<keyof F & string>;
-  }>(args: A & NoBothSelectInclude<A> = {} as any): Promise<Find1<F, R, A> | null> {
+  }>(args: A & NoBothSelectInclude<A> = {} as any): Promise<Find1<F, R, A, SM> | null> {
     const result = await this._find(args, 1);
-    return (result[0] as Find1<F, R, A>) ?? null;
+    return (result[0] as Find1<F, R, A, SM>) ?? null;
   }
 
   async findUnique<A extends {
     where: WhereInput<F>;
-    select?: ISelect<F, R>;
-    include?: IInclude<R>;
+    select?: ISelect<F, R, SM>;
+    include?: IInclude<R, SM>;
     omit?: { [K in keyof F]?: boolean };
-  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A> | null> {
+  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A, SM> | null> {
     return this.findFirst(args as any) as any;
   }
 
   async findFirstOrThrow<A extends {
     where?: WhereInput<F>;
-    select?: ISelect<F, R>;
-    include?: IInclude<R>;
+    select?: ISelect<F, R, SM>;
+    include?: IInclude<R, SM>;
     omit?: { [K in keyof F]?: boolean };
     orderBy?: OrderByInput<F> | OrderByInput<F>[];
     take?: number;
@@ -191,7 +202,7 @@ export class CollectionWrapper<
     offset?: number;
     cursor?: CursorInput;
     distinct?: Array<keyof F & string>;
-  }>(args: A & NoBothSelectInclude<A> = {} as any): Promise<Find1<F, R, A>> {
+  }>(args: A & NoBothSelectInclude<A> = {} as any): Promise<Find1<F, R, A, SM>> {
     const r = await this.findFirst(args);
     if (!r) throw notFoundError(this.model.collection, args.where);
     return r;
@@ -199,10 +210,10 @@ export class CollectionWrapper<
 
   async findUniqueOrThrow<A extends {
     where: WhereInput<F>;
-    select?: ISelect<F, R>;
-    include?: IInclude<R>;
+    select?: ISelect<F, R, SM>;
+    include?: IInclude<R, SM>;
     omit?: { [K in keyof F]?: boolean };
-  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A>> {
+  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A, SM>> {
     const r = await this.findUnique(args);
     if (!r) throw notFoundError(this.model.collection, args.where);
     return r;
@@ -210,8 +221,8 @@ export class CollectionWrapper<
 
   async findMany<A extends {
     where?: WhereInput<F>;
-    select?: ISelect<F, R>;
-    include?: IInclude<R>;
+    select?: ISelect<F, R, SM>;
+    include?: IInclude<R, SM>;
     omit?: { [K in keyof F]?: boolean };
     orderBy?: OrderByInput<F> | OrderByInput<F>[];
     take?: number;
@@ -220,8 +231,8 @@ export class CollectionWrapper<
     offset?: number;
     cursor?: CursorInput;
     distinct?: Array<keyof F & string>;
-  }>(args: A & NoBothSelectInclude<A> = {} as any): Promise<Find1<F, R, A>[]> {
-    return this._find(args, undefined) as Promise<Find1<F, R, A>[]>;
+  }>(args: A & NoBothSelectInclude<A> = {} as any): Promise<Find1<F, R, A, SM>[]> {
+    return this._find(args, undefined) as Promise<Find1<F, R, A, SM>[]>;
   }
 
   // Wave 4 — streaming reads.
@@ -331,10 +342,10 @@ export class CollectionWrapper<
 
   async create<A extends {
     data: ICreate<F, R>;
-    select?: ISelect<F, R>;
-    include?: IInclude<R>;
+    select?: ISelect<F, R, SM>;
+    include?: IInclude<R, SM>;
     omit?: { [K in keyof F]?: boolean };
-  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A>> {
+  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A, SM>> {
     this._assertWritable('create');
     const mk = this._modelKey();
     const { scalar, nested } = this._splitNestedWrites(args.data, /*forCreate*/ true);
@@ -394,10 +405,10 @@ export class CollectionWrapper<
   async update<A extends {
     where: WhereInput<F>;
     data: IUpdate<F, R>;
-    select?: ISelect<F, R>;
-    include?: IInclude<R>;
+    select?: ISelect<F, R, SM>;
+    include?: IInclude<R, SM>;
     omit?: { [K in keyof F]?: boolean };
-  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A>> {
+  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A, SM>> {
     this._assertWritable('update');
     this._assertStrictWhere(args.where);
     const mk = this._modelKey();
@@ -433,10 +444,10 @@ export class CollectionWrapper<
     where: WhereInput<F>;
     create: ICreate<F, R>;
     update: IUpdate<F, R>;
-    select?: ISelect<F, R>;
-    include?: IInclude<R>;
+    select?: ISelect<F, R, SM>;
+    include?: IInclude<R, SM>;
     omit?: { [K in keyof F]?: boolean };
-  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A>> {
+  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A, SM>> {
     this._assertWritable('upsert');
     this._assertStrictWhere(args.where);
     const mk = this._modelKey();
@@ -455,10 +466,10 @@ export class CollectionWrapper<
 
   async delete<A extends {
     where: WhereInput<F>;
-    select?: ISelect<F, R>;
-    include?: IInclude<R>;
+    select?: ISelect<F, R, SM>;
+    include?: IInclude<R, SM>;
     omit?: { [K in keyof F]?: boolean };
-  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A>> {
+  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A, SM>> {
     this._assertWritable('delete');
     this._assertStrictWhere(args.where);
     const mk = this._modelKey();

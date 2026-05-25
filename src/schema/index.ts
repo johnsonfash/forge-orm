@@ -23,6 +23,7 @@
 
 import { rel as $rel, embed, enums, f, ModelRelations, RelationInfo } from './core';
 import { model } from './core';
+import { getActiveSchema, setActiveSchema, type SchemaShape } from './active';
 
 const rel = $rel;
 
@@ -232,8 +233,15 @@ export const PostStats = model('post_stats', {
 });
 
 // ─── Schema registry ────────────────────────────────────────────────────────
-
-export const schema = {
+//
+// `sampleSchema` is the bundled demonstration schema (a blog/CMS domain that
+// exercises every feature). It is ALSO the default active schema, so forge
+// works out of the box for the sample and the test suite.
+//
+// To use forge for YOUR domain, define your own `model(...)` map and pass it:
+//   const db = await createDb({ url, schema: mySchema });
+// forge then reads *your* models everywhere — nothing here is hardwired.
+export const sampleSchema = {
   user: User,
   profile: Profile,
   post: Post,
@@ -246,7 +254,28 @@ export const schema = {
   postStats: PostStats,
 } as const;
 
-export type SchemaMap = typeof schema;
+// Default the active schema to the sample on module load.
+setActiveSchema(sampleSchema as unknown as SchemaShape);
+
+// `schema` is a LIVE VIEW of whichever schema is currently active (the sample
+// by default; whatever `createDb({ schema })` set otherwise). The entire
+// codebase reads models through this proxy, so consumer schemas flow in without
+// threading a map through every function. It's typed as the sample `SchemaMap`
+// for back-compat; per-consumer static typing flows through `ForgeDb<S>`.
+export const schema: SchemaMap = new Proxy({} as SchemaMap, {
+  get: (_t, k) => (getActiveSchema() as any)[k as any],
+  has: (_t, k) => (k as any) in getActiveSchema(),
+  ownKeys: () => Reflect.ownKeys(getActiveSchema() as object),
+  getOwnPropertyDescriptor: (_t, k) => {
+    const a = getActiveSchema() as any;
+    if (!((k as any) in a)) return undefined;
+    return { enumerable: true, configurable: true, writable: false, value: a[k as any] };
+  },
+});
+
+// The sample schema's concrete shape — the default type when no consumer
+// schema is supplied. Consumer schemas type through ForgeDb<S> generically.
+export type SchemaMap = typeof sampleSchema;
 
 // ─── Type-level relation-target validation ──────────────────────────────────
 
