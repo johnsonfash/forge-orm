@@ -56,6 +56,9 @@
   },
   "devDependencies": {
     "@nestjs/common": "^11.1.23",
+    "@prisma/adapter-better-sqlite3": "^7.8.0",
+    "@prisma/adapter-mariadb": "^7.8.0",
+    "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/jest": "^30.0.0",
