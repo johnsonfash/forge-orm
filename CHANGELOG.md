@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to **forge** (`@guide/forge`). Forge is a Prisma-shape
+All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite — one code
 path, no codegen, no external query engine.
 

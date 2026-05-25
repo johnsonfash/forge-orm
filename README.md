@@ -1,9 +1,12 @@
-# Forge — Prisma-shape multi-database wrapper
+# Forge ORM — Prisma-shape multi-database wrapper
+
+> **npm:** [`forge-orm`](https://www.npmjs.com/package/forge-orm) &nbsp;·&nbsp; **install:** `npm install forge-orm` &nbsp;·&nbsp; **repo:** [github.com/johnsonfash/forge-orm](https://github.com/johnsonfash/forge-orm)
 
 A self-contained TypeScript data-access layer that mirrors Prisma's API and
 runs against **MongoDB, PostgreSQL, MySQL, and SQLite** from the **same
 code** — no codegen, no Rust query engine, no external CLI. Designed to be
-read end-to-end in an afternoon and dropped into any Node project.
+read end-to-end in an afternoon and dropped into any Node project. (The package
+is **`forge-orm`**; "Forge" is the short name used throughout these docs.)
 
 > **v1.0** — a **drop-in library**: define your own models and pass them to
 > `createDb({ schema })` (see [Quick start](#quick-start) /
@@ -118,7 +121,7 @@ and multi-DB reach, not to beat Prisma.
 forge is a single package at the repo root. As an npm package:
 
 ```sh
-npm install @guide/forge      # the engine + types (zero drivers pulled)
+npm install forge-orm      # the engine + types (zero drivers pulled)
 ```
 
 It's a **true drop-in library** — you define your own models and pass them to
@@ -161,7 +164,7 @@ Forge's `package.json` declares these as **optional peer dependencies**, so
 ## Quick start
 
 ```ts
-import { createDb, f, model, rel } from '@guide/forge';
+import { createDb, f, model, rel } from 'forge-orm';
 
 // 1. Define YOUR models (no codegen — this file is the source of truth).
 const User = model('users', {
@@ -215,7 +218,7 @@ the DSL (`f`, `model`, `rel`, `enums`, `embed`, all exported from the package
 root) and hand it to `createDb({ schema })`:
 
 ```ts
-import { f, model, rel, createDb } from '@guide/forge';
+import { f, model, rel, createDb } from 'forge-orm';
 
 const Shop = model('shops', {
   id:   f.id(),
@@ -597,7 +600,7 @@ await db.post.update({
 });
 
 // Set field to NULL (use ForgeDbNull or just null)
-import { ForgeDbNull } from '@guide/forge';
+import { ForgeDbNull } from 'forge-orm';
 await db.profile.update({ where: { id: 'x' }, data: { bio: ForgeDbNull } });
 ```
 
@@ -780,7 +783,7 @@ const [users, posts] = await db.$transaction([
 Two call styles, both parameterised (injection-safe by default):
 
 ```ts
-import { forgeSql } from '@guide/forge';
+import { forgeSql } from 'forge-orm';
 
 // Tagged template — values become $1, $2, … placeholders automatically
 const id = 'u_42';
@@ -818,7 +821,7 @@ Every recoverable error surfaces as `DbKnownError` with a Prisma-shape code,
 identical across adapters:
 
 ```ts
-import { DbKnownError } from '@guide/forge';
+import { DbKnownError } from 'forge-orm';
 
 try {
   await db.user.create({ data: { email: existingEmail, name: '...' } });
@@ -1355,7 +1358,7 @@ await db.auditLog.findFirst({ where: { id, _withDeleted: true } });
 
 ```ts
 import { trace } from '@opentelemetry/api';
-import { wireOtel } from '@guide/forge';
+import { wireOtel } from 'forge-orm';
 
 const tracer = trace.getTracer('myapp');
 const off = wireOtel(db, { tracer });
@@ -1623,7 +1626,7 @@ import {
   // JSON-null markers, validator, errors
   ForgeDbNull, ForgeJsonNull, ForgeAnyNull, isForgeNullMarker,
   forgeValidator, DbKnownError, ForgeMissingDriverError, detectAdapterKind,
-} from '@guide/forge';
+} from 'forge-orm';
 
 import type {
   ForgeDb, CreateDbOptions, SchemaShape,         // db handle + options
@@ -1632,7 +1635,7 @@ import type {
   ForgeOf, ForgeModels,                          // per-model type bundles (no codegen)
   QueryEvent, ErrorEvent,                         // event payloads
   SqlFragment, Adapter, AdapterKind, DoctorReport,
-} from '@guide/forge';
+} from 'forge-orm';
 ```
 
 Per-model type helpers (derived from your schema, zero codegen):
