@@ -1,11 +1,30 @@
 {
   "name": "@guide/forge",
   "version": "1.0.0",
-  "private": true,
   "description": "Forge — multi-database wrapper with Prisma-shape API. Selects adapter from connection-string prefix; drivers are optional peer dependencies.",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.lib.json",
+    "prepublishOnly": "npm run build",
     "forge:doctor": "ts-node src/scripts/doctor.ts",
     "forge:push": "ts-node src/scripts/push.ts",
     "forge:diff": "ts-node src/scripts/diff.ts",
