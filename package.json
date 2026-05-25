@@ -14,7 +14,8 @@
   "files": [
     "dist",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "publishConfig": {
     "access": "public"
@@ -24,6 +25,7 @@
   },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.lib.json",
+    "prepare": "npm run build",
     "prepublishOnly": "npm run build",
     "forge:doctor": "ts-node src/scripts/doctor.ts",
     "forge:push": "ts-node src/scripts/push.ts",
