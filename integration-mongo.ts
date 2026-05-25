@@ -448,6 +448,18 @@ async function main() {
       }
     });
 
+    // ─── Wave 5d — materialised view ($out-backed collection) ──────────
+    console.log('\n[wave-5d]');
+
+    await scenario('postStats.refresh() recomputes rollups via $out', async () => {
+      await db.post.create({ data: { author_id: aliceId, title: 'MV', slug: `mv-${STAMP}`, body: 'b', status: 'PUBLISHED', view_count: 9, revisions: [] } as any });
+      await (db as any).postStats.refresh();
+      const rows: any[] = await (db as any).postStats.findMany();
+      const mine = rows.find((r: any) => String(r.author_id) === String(aliceId));
+      assert(mine, `expected rollup for ${aliceId}; got ${rows.length} rows`);
+      assert(Number(mine.post_count) >= 1, `post_count >= 1, got ${mine.post_count}`);
+    });
+
     console.log(`\n[forge:mongo] ${pass} passed, ${fail} failed`);
   } finally {
     try { await mongoDb.dropDatabase(); } catch {}

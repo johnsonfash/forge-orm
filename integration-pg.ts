@@ -627,6 +627,44 @@ async function main() {
       }
     });
 
+    // ─── Wave 5d — materialised view + Wave 5e — strict mode ───────────
+    console.log('\n[wave-5d / 5e]');
+
+    await scenario('CREATE MATERIALIZED VIEW emitted for post_stats', async () => {
+      const r: any = await db.$queryRaw`SELECT matviewname FROM pg_matviews WHERE matviewname = 'post_stats'`;
+      assert(r.length === 1, `expected post_stats matview, got: ${JSON.stringify(r)}`);
+    });
+
+    await scenario('postStats.refresh() recomputes per-author rollups', async () => {
+      await db.post.create({ data: { id: `mv_${STAMP}`, author_id: aliceId, title: 'MV', slug: `mv-${STAMP}`, body: 'mv body', status: 'PUBLISHED', view_count: 7 } as any });
+      await (db as any).postStats.refresh();
+      const rows: any[] = await (db as any).postStats.findMany();
+      const mine = rows.find((r: any) => String(r.author_id) === String(aliceId));
+      assert(mine, `expected a rollup row for author ${aliceId}; got ${rows.length} rows`);
+      assert(Number(mine.post_count) >= 1, `post_count should be >= 1, got ${mine.post_count}`);
+    });
+
+    await scenario('postStats.create throws (read-only view)', async () => {
+      try {
+        await (db as any).postStats.create({ data: { author_id: aliceId, post_count: 1, total_views: 0 } });
+        throw new Error('expected throw');
+      } catch (e: any) {
+        assert(/read-only view/.test(e?.message ?? ''), `wrong error: ${e?.message}`);
+      }
+    });
+
+    await scenario('strict mode rejects unknown where key', async () => {
+      const strict = await createDb({ url: SMOKE_URL, strict: true });
+      try {
+        await (strict as any).user.findMany({ where: { nonexistent_field: 'x' } });
+        throw new Error('expected strict throw');
+      } catch (e: any) {
+        assert(/strict/.test(e?.message ?? ''), `wrong error: ${e?.message}`);
+      } finally {
+        await strict.$disconnect();
+      }
+    });
+
     console.log(`\n[forge:pg] ${pass} passed, ${fail} failed`);
   } finally {
     await db.$disconnect();

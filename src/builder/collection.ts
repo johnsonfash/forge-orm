@@ -533,6 +533,18 @@ export class CollectionWrapper<
     await (this.adapter as any).refreshView(this.model, { ...opts, session: this._session });
   }
 
+  // Wave 5d — auto-refresh on an interval. Returns a stop() that clears the
+  // timer (the caller owns the lifecycle — no hidden leaked timers). Use the
+  // model's declared `.asView({ refreshEvery })` value, or pass one explicitly.
+  scheduleRefresh(every?: string): () => void {
+    const spec = every ?? (this.model as any).view?.refreshEvery;
+    const ms = parseDuration(spec);
+    if (!ms) throw new Error(`[forge] scheduleRefresh needs a duration like '30s' / '5m' / '1h' (got ${JSON.stringify(spec)})`);
+    const timer = setInterval(() => { void this.refresh().catch(() => { /* swallow — surfaced via $on('error') */ }); }, ms);
+    if (typeof (timer as any).unref === 'function') (timer as any).unref();  // don't keep the process alive
+    return () => clearInterval(timer);
+  }
+
   // ─── Internal: read pipeline ─────────────────────────────────────────
 
   // Wave 4b — return the soft-delete field name if the model has one.
@@ -804,6 +816,18 @@ export class CollectionWrapper<
       // skip it for now (no current call sites). Easy to add later.
     }
   }
+}
+
+// Wave 5d — parse a simple duration string ('30s', '5m', '1h', '2d') to ms.
+// Returns undefined for unparseable input so callers can give a clear error.
+export function parseDuration(spec: string | undefined): number | undefined {
+  if (!spec || typeof spec !== 'string') return undefined;
+  const m = /^(\d+)\s*(ms|s|m|h|d)$/.exec(spec.trim());
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  const unit = m[2];
+  const mult = unit === 'ms' ? 1 : unit === 's' ? 1000 : unit === 'm' ? 60_000 : unit === 'h' ? 3_600_000 : 86_400_000;
+  return n * mult;
 }
 
 // Internal: stringify ObjectId leaks in aggregation output.
