@@ -5,11 +5,14 @@ runs against **MongoDB, PostgreSQL, MySQL, and SQLite** from the **same
 code** — no codegen, no Rust query engine, no external CLI. Designed to be
 read end-to-end in an afternoon and dropped into any Node project.
 
-> **v1.0** — feature-complete through Wave 5: drift detection (`forge:diff`),
-> schema-diff migrations, materialised views, native types
-> (`decimal`/`uuid`/`bigint`/`dbgenerated`), `strict` mode, and a forge-vs-
-> Prisma-vs-Drizzle comparison bench. **352 tests** green across all four
-> dialects. See [Wave 5 — production hardening](#wave-5--production-hardening).
+> **v1.0** — a **drop-in library**: define your own models and pass them to
+> `createDb({ schema })` (see [Quick start](#quick-start) /
+> [Defining your schema](#defining-your-schema--bring-your-own)). Feature-complete
+> through Wave 5: drift detection (`forge:diff`), schema-diff migrations,
+> materialised views, native types (`decimal`/`uuid`/`bigint`/`dbgenerated`),
+> `strict` mode, and a forge-vs-Prisma-vs-Drizzle comparison bench. **354 tests**
+> green across all four dialects. See [Wave 5](#wave-5--production-hardening) and
+> [Production notes](#production-notes).
 
 ```ts
 const db = await createDb({ url: process.env.DATABASE_URL! });
@@ -33,28 +36,44 @@ That exact code works whether `DATABASE_URL` points at `mongodb://…` or
 
 ## Table of contents
 
+**Getting started**
 1. [Why forge](#why-forge)
 2. [Install](#install)
 3. [Quick start](#quick-start)
-4. [Schema](#schema)
+4. [Schema](#schema) — incl. [Defining your schema (bring your own)](#defining-your-schema--bring-your-own), fields, indexes, relations, embeds
 5. [Adapters & connection strings](#adapters--connection-strings)
-6. [Reading data](#reading-data)
-7. [Writing data](#writing-data)
+
+**Querying**
+6. [Reading data](#reading-data) — `where` operators, `select` vs `include`, cursor pagination
+7. [Writing data](#writing-data) — create / update / upsert / delete / createMany
 8. [Atomic updates](#atomic-updates)
-9. [Relations & nested writes](#relations--nested-writes)
+9. [Relations & nested writes](#relations--nested-writes) — eager loading, nested writes, cascades
 10. [`groupBy` and aggregations](#groupby-and-aggregations)
 11. [Transactions](#transactions)
 12. [Raw SQL escape hatch](#raw-sql-escape-hatch)
 13. [Errors](#errors)
+
+**Schema lifecycle & tooling**
 14. [Schema sync — `forge:push`](#schema-sync--forgepush)
 15. [`forge:doctor`](#forgedoctor)
 16. [The `.compile` escape hatch](#the-compile-escape-hatch)
 17. [Type safety in detail](#type-safety-in-detail)
 18. [Architecture](#architecture)
-19. [Running tests](#running-tests)
+
+**Wave 4 / Wave 5 features**
+- [Observability — `$on` events + `wireOtel`](#wave-4--observability)
+- [Streaming reads — `findManyStream`](#wave-4--streaming-reads)
+- [Full-text search — `.searchable()` + `where.search`](#wave-4--full-text-search)
+- [Wave 5 — production hardening](#wave-5--production-hardening): [comparison bench](#comparison-bench--forge-vs-prisma-vs-drizzle), [native types & generated columns](#native-types--generated-columns), [`strict` mode & select/include XOR](#strict-mode--selectinclude-exclusivity), [drift detection `forge:diff`](#drift-detection--forgediff), [migrations `forge:diff:apply`/`rollback`](#schema-diff-migrations--forgediffapply--forgerollback), [materialised views](#materialised-views)
+
+**Operating & contributing**
+19. [Testing & quality gates](#testing--quality-gates)
 20. [Comparison with Prisma](#comparison-with-prisma)
 21. [Known gaps & roadmap](#known-gaps--roadmap)
-22. [Extending forge — writing a new adapter](#extending-forge--writing-a-new-adapter)
+22. [Production notes](#production-notes) — canary findings, pool ceiling, the tx footgun, adoption guidance
+23. [API reference — what the package exports](#api-reference--what-the-package-exports)
+24. [Extending forge — writing a new adapter](#extending-forge--writing-a-new-adapter)
+25. [License & maintenance](#license--maintenance)
 
 ---
 
@@ -96,28 +115,28 @@ and multi-DB reach, not to beat Prisma.
 
 ## Install
 
-forge is a single package at the repo root. Two ways to consume it:
+forge is a single package at the repo root. As an npm package:
 
-**(a) Fork-and-own (recommended today).** Clone the repo, edit `src/schema/` to
-your domain, import from `src`. You own ~5k lines you can read and change — the
-intended model, because forge's schema is a compile-time singleton (see caveat
-below), so your models live *inside* the package.
+```sh
+npm install @guide/forge      # the engine + types (zero drivers pulled)
+```
 
-**(b) As a built npm package.** `npm run build` emits `dist/` (compiled JS +
-`.d.ts`); `npm pack` produces a publishable tarball (`dist/` + README + CHANGELOG
-only — no tests/bench/`.env`). `main`/`types` resolve to `dist`. `npm publish`
-once you've set your own package name/scope.
+It's a **true drop-in library** — you define your own models and pass them to
+`createDb({ schema })`; the returned `db` is fully typed against *your* schema
+(see [Defining your schema](#defining-your-schema--bring-your-own)). There's
+nothing hardwired: the bundled blog schema is just a `sampleSchema` you can
+import as a reference, and the default when you don't pass one.
 
-> **Library caveat — bring-your-own-schema is not yet decoupled.** The schema
-> registry (`src/schema/index.ts`) is imported as a singleton across the
-> factory and adapters, so a published build ships with *that* schema's models
-> baked in (`db.user`, `db.post`, …). To use forge for your own domain today
-> you replace `src/schema` and rebuild — i.e. fork-and-own. Turning the schema
-> into a `createDb({ schema })` parameter (a true drop-in library) is a known
-> follow-up refactor, not yet done.
+You can also **fork-and-own** — clone the repo, edit `src/schema/`, import from
+`src`. It's ~5k lines of readable TypeScript; owning it outright is a legitimate
+model for a dependency this small.
 
-Either way, install whichever drivers you'll use (**optional peer dependencies**
-— installing forge pulls zero drivers):
+Build/publish: `npm run build` emits `dist/` (compiled JS + `.d.ts`); `npm pack`
+produces a tarball of `dist/` + README + CHANGELOG only (no tests/bench/`.env`);
+`npm publish` once you've set your own package name/scope.
+
+Install whichever drivers you'll use — they're **optional peer dependencies**, so
+installing forge itself pulls zero drivers:
 
 ```sh
 npm install mongodb          # if you'll use Mongo
@@ -142,41 +161,97 @@ Forge's `package.json` declares these as **optional peer dependencies**, so
 ## Quick start
 
 ```ts
-import { createDb } from '@forge';
+import { createDb, f, model, rel } from '@guide/forge';
 
-// 1. Connect. The URL prefix picks the adapter.
-const db = await createDb({ url: process.env.DATABASE_URL! });
+// 1. Define YOUR models (no codegen — this file is the source of truth).
+const User = model('users', {
+  id:    f.id(),
+  email: f.string().unique(),
+  name:  f.string(),
+  role:  f.enumOf(['USER', 'EDITOR', 'ADMIN'] as const).default('USER'),
+}).relate(() => ({ posts: rel.many('post', { on: 'author_id', refs: 'id' }) }));
 
-// 2. Use it. Every call is fully typed against your schema.
-const alice = await db.user.create({
-  data: {
-    email: 'alice@example.com',
-    name: 'Alice',
-    role: 'EDITOR',
-    address: { street: '1 Main', city: 'sf', zip: '94110', country: 'us' },
-  },
-});
+const Post = model('posts', {
+  id:        f.id(),
+  author_id: f.objectId(),
+  title:     f.string(),
+  body:      f.text().searchable(),
+  status:    f.enumOf(['DRAFT', 'PUBLISHED'] as const).default('DRAFT'),
+  created_at: f.dateTime().default('now'),
+}).relate(() => ({ author: rel.one('user', { on: 'author_id', refs: 'id', onDelete: 'Cascade' }) }));
 
+const schema = { user: User, post: Post } as const;
+
+// 2. Connect with your schema. The URL prefix picks the adapter; `db` is fully
+//    typed against `schema` — db.user / db.post, their fields, and relations.
+const db = await createDb({ url: process.env.DATABASE_URL!, schema });
+
+// 3. Use it.
+const alice = await db.user.create({ data: { email: 'alice@x.co', name: 'Alice', role: 'EDITOR' } });
 const posts = await db.post.findMany({
   where: { author_id: alice.id, status: 'PUBLISHED' },
-  include: { comments: { where: { is_deleted: false } } },
+  include: { author: true },
   orderBy: { created_at: 'desc' },
   take: 20,
 });
 
-// 3. Close (idempotent).
+// 4. Close (idempotent).
 await db.$disconnect();
 ```
 
-That's it. Everything else is iteration on this shape.
+That **exact code** works whether `DATABASE_URL` is `mongodb://…`, `postgres://…`,
+`mysql://…`, or `sqlite:…` — forge picks the adapter at connect time. Omit
+`schema` and forge uses its bundled `sampleSchema` (a blog/CMS demo). Everything
+below is iteration on this shape.
 
 ---
 
 ## Schema
 
-The shipped sample is a blog/CMS domain at `src/schema/index.ts`.
-Replace it with your own models to use forge in another project. Walking
-through the patterns:
+### Defining your schema — bring your own
+
+forge is **not** tied to any built-in schema. You define a map of models with
+the DSL (`f`, `model`, `rel`, `enums`, `embed`, all exported from the package
+root) and hand it to `createDb({ schema })`:
+
+```ts
+import { f, model, rel, createDb } from '@guide/forge';
+
+const Shop = model('shops', {
+  id:   f.id(),
+  name: f.string().unique(),
+}).relate(() => ({ products: rel.many('product', { on: 'shop_id', refs: 'id' }) }));
+
+const Product = model('products', {
+  id:       f.id(),
+  shop_id:  f.objectId(),
+  title:    f.string(),
+  price:    f.decimal({ precision: 10, scale: 2 }),
+  in_stock: f.bool().default(true),
+}).relate(() => ({ shop: rel.one('shop', { on: 'shop_id', refs: 'id', onDelete: 'Cascade' }) }));
+
+const schema = { shop: Shop, product: Product } as const;   // `as const` is important
+
+const db = await createDb({ url, schema });
+//    ^ db.shop / db.product are fully typed: fields, where-inputs, relations,
+//      select/include narrowing — all inferred from `schema`, no codegen.
+```
+
+- The `as const` on the schema map lets TypeScript infer literal model keys and
+  field kinds, which is what drives the typing.
+- `db` has type `ForgeDb<typeof schema>`; you can name it: `type DB = ForgeDb<typeof schema>`.
+- Row types: `Row<typeof Product>` → `{ id: string; shop_id: string; title: string; price: string; in_stock: boolean }`.
+- A runnable end-to-end example lives at `examples/custom-schema-demo.ts`
+  (`npm run forge:example:custom`).
+
+> **Scope of decoupling:** the *active* schema is process-global (last
+> `createDb({ schema })` wins). That fits the near-universal "one schema per
+> service" case. For several genuinely different schemas in one process, run
+> them in separate workers/processes.
+
+The bundled blog/CMS schema (`sampleSchema`, in `src/schema/index.ts`) is the
+default when you don't pass one, and a worked reference for every feature.
+Walking through the patterns it uses:
 
 ### Fields
 
@@ -204,7 +279,10 @@ Available field kinds:
 | `f.string()` | Short string. PG/SQLite: `TEXT`. **MySQL: `VARCHAR(255)`** (indexable/uniqueable without prefix). |
 | `f.text()` | Unbounded string. **MySQL: `TEXT`** (can't be `UNIQUE` without a length prefix). Same as `f.string()` on PG/SQLite/Mongo. |
 | `f.int()` | 32-bit int. |
-| `f.float()` | 64-bit double. |
+| `f.float()` | 64-bit double. PG: `double precision`. MySQL: `DOUBLE`. SQLite: `REAL`. |
+| `f.decimal({ precision, scale })` | Exact numeric (money). PG `numeric(p,s)` · MySQL `DECIMAL(p,s)` · SQLite `NUMERIC` · Mongo `Decimal128`. **JS type: `string`** (avoids float-precision loss). |
+| `f.bigint()` | 64-bit integer. PG `bigint` · MySQL `BIGINT` · SQLite `INTEGER` · Mongo `Long`. JS type: `bigint`. |
+| `f.uuid({ default?: 'gen_random_uuid' })` | PG `uuid` (+ `DEFAULT gen_random_uuid()`) · MySQL `CHAR(36)` (+ `DEFAULT (UUID())`) · SQLite/Mongo `TEXT`/string. JS type: `string`. |
 | `f.bool()` | Boolean. SQLite/MySQL store as `0/1`; forge decodes back to JS `boolean`. |
 | `f.dateTime()` | UTC timestamp. PG: `timestamptz`. MySQL: `DATETIME(3)`. SQLite: ISO string. Mongo: `Date`. |
 | `f.json()` | Arbitrary JSON. PG: `jsonb`. MySQL: `JSON`. SQLite/Mongo: nested doc / serialized. |
@@ -217,11 +295,14 @@ Available field kinds:
 Modifiers (chain on any field):
 
 ```ts
-f.string().optional()             // nullable
-f.string().unique()               // creates a UNIQUE index
-f.dateTime().default('now')       // server default
-f.dateTime().default('now').updatedAt()   // auto-bumps on update
-f.string().default('pending')     // literal default
+f.string().optional()                      // nullable
+f.string().unique()                        // creates a UNIQUE index
+f.dateTime().default('now')                // server default ('now' | 'autoId' | literal)
+f.dateTime().default('now').updatedAt()    // auto-bumps on every update
+f.string().default('pending')              // literal default
+f.text().searchable()                      // auto full-text index on forge:push (see Full-text search)
+f.dateTime().softDeleteAt()                // marks the soft-delete column (see Soft delete)
+f.decimal({ precision: 14, scale: 2 }).dbgenerated('price * qty')   // DB-computed column (GENERATED ALWAYS AS … STORED)
 ```
 
 ### Indexes & composite uniques
@@ -516,7 +597,7 @@ await db.post.update({
 });
 
 // Set field to NULL (use ForgeDbNull or just null)
-import { ForgeDbNull } from '@forge';
+import { ForgeDbNull } from '@guide/forge';
 await db.profile.update({ where: { id: 'x' }, data: { bio: ForgeDbNull } });
 ```
 
@@ -699,7 +780,7 @@ const [users, posts] = await db.$transaction([
 Two call styles, both parameterised (injection-safe by default):
 
 ```ts
-import { forgeSql } from '@forge';
+import { forgeSql } from '@guide/forge';
 
 // Tagged template — values become $1, $2, … placeholders automatically
 const id = 'u_42';
@@ -737,7 +818,7 @@ Every recoverable error surfaces as `DbKnownError` with a Prisma-shape code,
 identical across adapters:
 
 ```ts
-import { DbKnownError } from '@forge';
+import { DbKnownError } from '@guide/forge';
 
 try {
   await db.user.create({ data: { email: existingEmail, name: '...' } });
@@ -963,40 +1044,69 @@ type system stay the same.
 
 ---
 
-## Running tests
+## Testing & quality gates
 
-Every check is an npm script — no raw `ts-node` invocations to remember.
+Everything is an npm script — no raw `ts-node` invocations to remember. The
+master gate is **`npm run forge:all`** (no-DB checks → live integration on all
+four dialects → bench). As of v1.0 that's **354 tests** green in ~13s:
+**191 unit** + **163 live integration** (Postgres 53 · SQLite 37 · Mongo 38 · MySQL 35).
 
 ```sh
-cd forge/library
+cd forge
 
-# ─── No DB required ──────────────────────────────────────────────
+# ─── No DB required (forge:check) ────────────────────────────────
+npm run forge:test          # 191 unit/spec tests (jest): IR build, where/orderby
+                            #   translation, compile-from-ir per dialect, DDL
+                            #   (incl. native-type columns), migrate planning,
+                            #   error mapping, schema integrity, decoupling, …
+npm run forge:typesafety    # strict tsc over typesafety-demo.ts — 19 strict +
+                            #   3 documented-loose + 5 custom-schema assertions
+npm run forge:autocomplete  # prints the REAL completion lists at each cursor
+                            #   position via the TypeScript Language Service API
+npm run forge:check         # the three above in sequence
 
-npm run forge:test          # unit tests (177 assertions, jest)
-npm run forge:typesafety    # strict TS assertions on typesafety-demo.ts
-npm run forge:autocomplete  # prints the actual autocomplete lists per cursor
-                            # position via the TypeScript Language Service
-npm run forge:check         # all three of the above in sequence
+# ─── Live integration (one isolated DB per run, created + dropped) ─
+npm run forge:integration:pg       # ~53 scenarios vs live Postgres
+npm run forge:integration:mysql    # ~35 scenarios vs live MySQL
+npm run forge:integration:sqlite   # ~37 scenarios vs in-memory SQLite
+npm run forge:integration:sqlite:file   # same, against an on-disk .db file
+npm run forge:integration:mongo    # ~38 scenarios vs live Mongo
+npm run forge:integration          # all four, in sequence
 
-# ─── Requires DATABASE_URL ───────────────────────────────────────
+# ─── Benchmarks ──────────────────────────────────────────────────
+npm run forge:bench                # forge vs raw driver, all dialects
+npm run forge:bench:pg             # …or one dialect (:pg/:mysql/:sqlite/:mongo)
+npm run forge:bench:compare:gen    # one-time: generate Prisma clients
+npm run forge:bench:compare        # forge vs Prisma vs Drizzle vs raw (see bench section)
 
-npm run forge:doctor        # shows installed drivers + adapter inferred
-                            # from DATABASE_URL
-npm run forge:push          # pushes schema (DDL on PG, indexes on Mongo);
-                            # picks adapter from DATABASE_URL
+# ─── Schema lifecycle ────────────────────────────────────────────
+npm run forge:doctor               # installed drivers + adapter inferred from DATABASE_URL
+npm run forge:push                 # sync schema (DDL on SQL, indexes/views on Mongo)
+npm run forge:diff                 # drift report (--json, --check for CI gating)
+npm run forge:diff:apply           # generate + run a reconciliation migration (--dry to preview)
+npm run forge:rollback             # roll back the latest migration
 
-# ─── Requires a live local DB ────────────────────────────────────
+# ─── Examples & canary ───────────────────────────────────────────
+npm run forge:example:custom       # runnable drop-in demo with a custom schema
+npm run forge:canary               # real-traffic HTTP service (isolated DB) — see canary/README.md
+npm run forge:canary:load          # concurrent load generator against the canary
 
-npm run forge:integration:pg     # 38 scenarios against live Postgres
-npm run forge:integration:mongo  # 27 scenarios against live Mongo
-npm run forge:integration        # both, in sequence
-
-# ─── Benchmark — forge vs raw driver, side-by-side ───────────────
-
-npm run forge:bench               # default: 500 seed rows, 200 iterations
-BENCH_SEED=1000 BENCH_ITER=500 npm run forge:bench
-SKIP_MONGO=1 npm run forge:bench  # skip an adapter you don't have running
+# ─── The whole gate ──────────────────────────────────────────────
+npm run forge:all                  # forge:check && forge:integration && forge:bench
+BENCH_SEED=1000 BENCH_ITER=500 npm run forge:bench   # tune the bench
+SKIP_MONGO=1 npm run forge:bench                     # skip an adapter that's not running
 ```
+
+**What the test layers cover, and why each exists:**
+
+| Layer | DB? | What it proves |
+|---|---|---|
+| `forge:test` (jest) | no | IR correctness, per-dialect SQL/Mongo compilation, DDL generation (incl. decimal/uuid/bigint/dbgenerated + matviews), migration planning, drift comparator, error-code mapping, schema integrity, **and the schema-decoupling** (`custom-schema.spec.ts`). |
+| `forge:typesafety` | no | The *types* actually catch bad input and resolve correctly — asserted against the TS compiler, including a custom consumer schema (Section C). |
+| `forge:autocomplete` | no | Real IDE completions resolve (not `any`) — via the Language Service. |
+| `forge:integration:*` | yes | The full stack against a real engine: push → CRUD → relations/hydration → nested writes → cascades → transactions → raw SQL → errors → FTS → soft-delete → views → **materialised-view refresh** → strict mode. Each run creates and drops an isolated DB. |
+| `forge:bench` / `:compare` | yes | Per-call overhead vs the raw driver, and vs Prisma/Drizzle (see [the bench section](#comparison-bench--forge-vs-prisma-vs-drizzle) for how to read it honestly). |
+| `canary/` | yes | Behaviour under sustained concurrent real-HTTP traffic — throughput, latency percentiles, memory stability, error modes (see [Production notes](#production-notes)). |
 
 ### Configuring connection strings
 
@@ -1004,7 +1114,7 @@ Every `forge:*` script loads `.env` at startup via dotenv. Copy the example
 and edit values to match your local databases:
 
 ```sh
-cd forge/library
+cd forge
 cp .env.example .env
 $EDITOR .env
 ```
@@ -1443,6 +1553,95 @@ export const PostStats = model('post_stats', {
 
 await db.postStats.refresh();              // PG REFRESH MATERIALIZED VIEW · MySQL/SQLite re-populate · Mongo $out
 const stop = db.postStats.scheduleRefresh('1h');   // auto-refresh; call stop() to clear
+```
+
+---
+
+## Production notes
+
+**Is it production-ready?** Be calibrated. forge is a thin wrapper over the
+**battle-hardened** official drivers (`pg`, `mysql2`, `better-sqlite3`,
+`mongodb`) — the wire I/O isn't forge's code. Its own surface (IR compilation,
+query building, coercion, cascade walker, migration generation) has **354 tests**
+including live integration on all four dialects, and a canary held up under
+sustained concurrent traffic (below). But it is a young, single-author library
+with **no production track record**, and parts (the Wave 5 migrations especially)
+are new. It is **not** in Prisma's/Drizzle's hardening tier and won't be without
+real mileage.
+
+**Sensible adoption:** own/maintain the code, keep usage mainstream, and — most
+importantly — **write an integration suite for *your* app's actual queries** and
+run it against a prod-like DB, so you're trusting your tests, not just forge's.
+Hold off on: auto-applying migrations to prod (review the generated SQL and run
+it manually), anything where a subtle data bug is catastrophic (billing, ledgers,
+auth) without belt-and-suspenders verification, and serverless/edge until tested
+there.
+
+**Canary findings** (real concurrent HTTP traffic against an isolated DB — see
+`canary/README.md`, run with `npm run forge:canary`):
+
+| Concurrency | Throughput | p50 | p95 | p99 | Error rate |
+|---|---|---|---|---|---|
+| 64  | **2,714 req/s** | 18 ms | 38 ms | 209 ms | 0.03% |
+| 100 | 1,246 req/s | 55 ms | 117 ms | 859 ms | 0.08% |
+
+- **Stable & leak-free.** RSS rose to ~268 MB under heavy load and fell back to
+  ~64 MB when idle; healthy across 138k queries, clean shutdown.
+- **Pool ceiling (tune it).** The PG adapter pool defaults to `max: 50`. Drive
+  concurrency past it and throughput *drops* while p99 spikes (requests queue for
+  a connection). Size the pool to your real concurrency.
+- **Postgres transaction footgun.** Don't `catch`-and-continue a constraint
+  violation *inside* a `$transaction` — Postgres aborts the whole transaction, so
+  the next statement fails with *"current transaction is aborted"*. forge maps the
+  violation to `P2002` and rolls back cleanly (no partial write), but the
+  catch-and-continue pattern won't work; check-then-write, `upsert`, or let it
+  fail and retry. (See the [Transactions](#transactions) gotcha.)
+
+---
+
+## API reference — what the package exports
+
+```ts
+import {
+  // Factory
+  createDb,                               // createDb<S>({ url|host…, schema?, type?, strict? }) → ForgeDb<S>
+
+  // Schema DSL (define your models)
+  f, model, rel, enums, embed,
+  sampleSchema, setActiveSchema, getActiveSchema,
+
+  // Raw SQL (safe tagged template + composition)
+  forgeSql, isSqlFragment, compileSqlFragment,
+
+  // Observability
+  ForgeEmitter, wireOtel,
+
+  // IR builders + adapter compile APIs (escape hatches)
+  buildSelect, buildCount, buildInsert, buildUpdate, buildDelete, buildGroupBy,
+  buildPostgresCompileApi,
+
+  // JSON-null markers, validator, errors
+  ForgeDbNull, ForgeJsonNull, ForgeAnyNull, isForgeNullMarker,
+  forgeValidator, DbKnownError, ForgeMissingDriverError, detectAdapterKind,
+} from '@guide/forge';
+
+import type {
+  ForgeDb, CreateDbOptions, SchemaShape,         // db handle + options
+  Field, TypedModel, RelationInfo, Row, EnumDef, // schema types
+  FieldDef, FieldKind, ModelDef, IndexDef, RelationDef, OnDeleteAction, EmbedDef,
+  ForgeOf, ForgeModels,                          // per-model type bundles (no codegen)
+  QueryEvent, ErrorEvent,                         // event payloads
+  SqlFragment, Adapter, AdapterKind, DoctorReport,
+} from '@guide/forge';
+```
+
+Per-model type helpers (derived from your schema, zero codegen):
+
+```ts
+type DB          = ForgeDb<typeof schema>;
+type ProductRow  = Row<typeof Product>;                 // resolved row shape
+type ProductWhere = ForgeOf<'product'>['WhereInput'];   // by schema key
+type ProductCreate = ForgeModels['Product']['CreateInput'];
 ```
 
 ---

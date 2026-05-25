@@ -1,6 +1,6 @@
 {
   "name": "@guide/forge",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Forge — multi-database wrapper with Prisma-shape API. Selects adapter from connection-string prefix; drivers are optional peer dependencies.",
   "license": "MIT",
   "main": "dist/index.js",

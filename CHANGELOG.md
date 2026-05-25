@@ -4,6 +4,40 @@ All notable changes to **forge** (`@guide/forge`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite — one code
 path, no codegen, no external query engine.
 
+## 1.1.0 — drop-in library (schema decoupling)
+
+forge is now a **true drop-in library**: bring your own schema instead of being
+tied to the bundled sample. Backward compatible — omit `schema` and the sample
+is used. **354 tests** green across all four dialects (191 unit + 163 integration).
+
+### Added
+
+- **`createDb({ schema })`** — pass your own `model(...)` map; the returned `db`
+  is typed `ForgeDb<typeof yourSchema>` (fully typed models, where-inputs,
+  relations, select/include — no codegen).
+- Exported the **schema DSL from the package root**: `f`, `model`, `rel`,
+  `enums`, `embed`, plus `SchemaShape`, `sampleSchema`, `setActiveSchema`,
+  `getActiveSchema`, and the schema/field types.
+- Generic `ForgeDb<S>` and `CollectionWrapper<F, R, SM>` so consumer schemas get
+  full nested include/select typing.
+- `examples/custom-schema-demo.ts` (`npm run forge:example:custom`) — runnable
+  end-to-end proof with a non-sample (e-commerce) schema.
+- Canary: `npm run forge:canary` + `forge:canary:load` (real-traffic HTTP service
+  on an isolated DB) and the findings in `canary/README.md` / Production notes.
+
+### Changed
+
+- The exported `schema` is now a live view of the *active* schema (a Proxy over
+  an active-schema registry), defaulting to `sampleSchema`. The ~14 internal
+  consumers are unchanged; consumer schemas flow in via the registry.
+- Repo restructured: git root + npm package root moved to `forge/`; builds to
+  `dist/` with `.d.ts`; `files` allowlist ships `dist` + README + CHANGELOG only.
+
+### Notes
+
+- One active schema per process (last `createDb({ schema })` wins) — fits the
+  one-schema-per-service norm; use separate workers for multiple.
+
 ## 1.0.0 — Wave 5 (production hardening)
 
 Feature-complete release. **352 tests** green across all four dialects
