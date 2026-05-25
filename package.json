@@ -1,6 +1,6 @@
 {
   "name": "@guide/forge",
-  "version": "0.1.0-wave0",
+  "version": "1.0.0",
   "private": true,
   "description": "Forge — multi-database wrapper with Prisma-shape API. Selects adapter from connection-string prefix; drivers are optional peer dependencies.",
   "main": "src/index.ts",
