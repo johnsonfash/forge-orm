@@ -4,6 +4,38 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite - one code
 path, no codegen, no external query engine.
 
+## 1.1.3 — `forge:push` reads the consumer's schema (was: bundled sample)
+
+This release fixes a real bug consumers were hitting silently:
+
+- **`forge:push`, `forge:diff`, and `forge:diff:apply` were hardwired to
+  forge's own bundled sample schema** via a direct relative import. That meant
+  running any of them against your own database silently pushed forge's sample
+  indexes (which don't exist on your collections) instead of yours — and your
+  declared `.unique()` / `@@unique` / `@@index` constraints never landed.
+
+  The bug was caught in production by a consumer whose webhook-idempotency
+  event collection had been protected only by an application-level guard for
+  weeks; the `_id` index was the only index on the collection in the real
+  database, despite the schema declaring `eventId` as unique.
+
+- **New resolution order for the consumer's schema**, used by all three CLI
+  commands:
+  1. `--schema=<path>` flag
+  2. `FORGE_SCHEMA_PATH=<path>` env var
+  3. Convention paths (`src/schema.ts`, `schema.ts`,
+     `src/core/database/schema.ts`, …) auto-detected from `process.cwd()`
+  4. Bundled sample fallback (with a loud warning) — for forge's own monorepo
+     dev/test runs only; consumers should never hit this.
+
+- **TypeScript schemas are auto-registered with `ts-node` in transpile-only
+  mode** when loaded by the CLI, so `forge:push` runs in milliseconds even on
+  schemas with dozens of models. Without this, the default `ts-node` would
+  type-check the whole file (~30-60s on a real schema) before producing any
+  output, which felt like a hang.
+
+- README updated with the new resolution-order rules.
+
 ## 1.1.2 - auto-generated keys and timestamps on every database
 
 - **Auto-generated primary keys on all databases.** When you create a row

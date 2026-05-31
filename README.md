@@ -705,6 +705,44 @@ forge:diff:apply    # generate and run a migration that reconciles the differenc
 forge:rollback      # undo the most recent applied migration
 ```
 
+### Pointing the CLI at your schema
+
+All four scripts above need to know where your schema module lives. Resolution
+order (first hit wins):
+
+1. **`--schema=<path>`** CLI flag — explicit, recommended for CI
+2. **`FORGE_SCHEMA_PATH=<path>`** env var — handy when paired with `DATABASE_URL`
+3. **Convention paths**, tried in order from `process.cwd()`:
+   - `./src/schema.ts`
+   - `./src/schema.js`
+   - `./schema.ts`
+   - `./schema.js`
+   - `./src/core/database/schema.ts`
+   - `./src/db/schema.ts`
+   - `./src/database/schema.ts`
+
+The schema module must export a `schema` constant (or a default export shaped
+the same way):
+
+```ts
+// src/schema.ts
+import { f, model } from 'forge-orm';
+
+export const User = model('users', { … });
+export const Post = model('posts', { … });
+
+export const schema = { User, Post } as const;
+```
+
+If forge can't find a consumer schema it falls back to its bundled sample with
+a loud warning — that path exists so forge's own monorepo tests keep working
+and should never trigger in normal consumer use.
+
+TypeScript schemas are loaded with `ts-node` registered in **transpile-only**
+mode under the hood, so push runs in milliseconds even on schemas with dozens
+of models (no full type-check at push time — the consumer's own build catches
+type errors separately).
+
 `forge:diff:apply` writes a timestamped SQL file with an `up` and a `down`
 section into a `migrations/` folder and records it in a `_forge_migrations`
 table, so applying is repeatable and reversible. Migrations are SQL only; on

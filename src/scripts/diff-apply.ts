@@ -3,8 +3,8 @@ import * as dotenv from 'dotenv';
 dotenv.config();
 
 import { createDb } from '../factory';
-import { schema } from '../schema';
 import { generateMigration } from './migrate-gen';
+import { loadConsumerSchema } from './load-consumer-schema';
 import {
   ensureHistoryTable, listApplied, rawExec, recordMigration,
   renderMigrationFile, splitStatements, timestampSlug, writeMigrationFile,
@@ -23,7 +23,10 @@ async function main() {
   if (!url) { console.error('[forge:diff:apply] DATABASE_URL is not set.'); process.exit(1); }
   const dry = process.argv.includes('--dry');
 
-  const db = await createDb({ url });
+  const { schema, source } = loadConsumerSchema();
+  console.log(`[forge:diff:apply] schema: ${source}`);
+
+  const db = (await createDb({ url, schema })) as any;
   try {
     if (db.adapter.kind === 'mongo') {
       console.error('[forge:diff:apply] Mongo uses forge:push for index management, not SQL migrations.');

@@ -3,14 +3,18 @@ import * as dotenv from 'dotenv';
 dotenv.config();
 
 import { detectAdapterKind } from '../adapters/detect';
+import { loadConsumerSchema } from './load-consumer-schema';
 
 // forge:push — dialect-agnostic schema sync. Picks the right adapter from
-// DATABASE_URL and runs the dialect-appropriate migrator.
+// DATABASE_URL and runs the dialect-appropriate migrator against the
+// consumer's schema (resolved via --schema=<path> / FORGE_SCHEMA_PATH /
+// convention-path auto-detect — see load-consumer-schema.ts for the order).
 //
-//   • mongo    → idempotent index push (existing implementation)
+//   • mongo    → idempotent index push
 //   • postgres → DDL diff + apply, with pg_advisory_xact_lock so concurrent
 //                runs serialise instead of racing
-//   • mysql/sqlite → Wave 3
+//   • mysql    → DDL apply
+//   • sqlite   → DDL apply
 
 async function main() {
   const url = process.env.DATABASE_URL;
@@ -24,18 +28,23 @@ async function main() {
     process.exit(1);
   }
 
+  // Resolve the consumer's schema ONCE up-front so every adapter sees the
+  // same models. Falls back to forge's bundled sample with a loud warning if
+  // no consumer schema is found — for forge's own monorepo dev/test runs only.
+  const { schema, source } = loadConsumerSchema();
+  console.log(`[forge:push] ${kind} — schema: ${source}`);
+
   switch (kind) {
     case 'mongo': {
       const { pushAllIndexes } = await import('../adapters/mongo/scripts/push');
-      await pushAllIndexes();
+      await pushAllIndexes(schema);
       return;
     }
     case 'postgres': {
-      const [{ loadDriver }, { buildSchemaDDL }, { applyMigration, planMigration }, { schema }] = await Promise.all([
+      const [{ loadDriver }, { buildSchemaDDL }, { applyMigration, planMigration }] = await Promise.all([
         import('../adapters/missing-driver'),
         import('../adapters/postgres/ddl'),
         import('../adapters/postgres/migrate'),
-        import('../schema'),
       ]);
       const pg = loadDriver('postgres', url);
       const pool = new pg.Pool({ connectionString: url });
@@ -59,11 +68,10 @@ async function main() {
       return;
     }
     case 'mysql': {
-      const [{ loadDriver }, { buildSchemaDDL }, { applyMigration }, { schema }] = await Promise.all([
+      const [{ loadDriver }, { buildSchemaDDL }, { applyMigration }] = await Promise.all([
         import('../adapters/missing-driver'),
         import('../adapters/mysql/ddl'),
         import('../adapters/mysql/migrate'),
-        import('../schema'),
       ]);
       const mysql = loadDriver('mysql', url);
       const rawPool = mysql.createPool({ uri: url, connectionLimit: 5 });
@@ -83,11 +91,10 @@ async function main() {
       return;
     }
     case 'sqlite': {
-      const [{ loadDriver }, { buildSchemaDDL }, { applyMigration }, { schema }] = await Promise.all([
+      const [{ loadDriver }, { buildSchemaDDL }, { applyMigration }] = await Promise.all([
         import('../adapters/missing-driver'),
         import('../adapters/sqlite/ddl'),
         import('../adapters/sqlite/migrate'),
-        import('../schema'),
       ]);
       const sqlite = loadDriver('sqlite', url);
       const Database = sqlite.default ?? sqlite;

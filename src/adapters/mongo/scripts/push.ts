@@ -4,7 +4,7 @@ dotenv.config();
 
 import type { Collection } from 'mongodb';
 import { dbClient } from '../client';
-import { schema } from '../../../schema';
+import { schema as bundledSampleSchema } from '../../../schema';
 import { FieldDef, ModelDef } from '../../../schema/types';
 
 // ============================================================================
@@ -208,9 +208,18 @@ function collectIndexSpecs(modelName: string, model: ModelDef<any>): IndexSpec[]
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
-export async function pushAllIndexes(): Promise<void> {
+/**
+ * Push every index declared on the supplied schema to MongoDB.
+ *
+ * @param consumerSchema - The consumer's schema map (`{ Users, Posts, ... }`).
+ *                        When omitted, falls back to forge's bundled sample
+ *                        schema — exists for forge's internal test/dev runs;
+ *                        consumers should always pass their own schema.
+ */
+export async function pushAllIndexes(consumerSchema?: any): Promise<void> {
   await dbClient.connect();
   const db = dbClient.db;
+  const schema = consumerSchema ?? bundledSampleSchema;
 
   let created = 0,
     skipped = 0,
@@ -289,7 +298,12 @@ export async function pushAllIndexes(): Promise<void> {
 }
 
 if (require.main === module) {
-  pushAllIndexes()
+  // Stand-alone invocation: load the consumer's schema first.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { loadConsumerSchema } = require('../../../scripts/load-consumer-schema');
+  const { schema, source } = loadConsumerSchema();
+  console.log(`[forge:push] mongo — schema: ${source}`);
+  pushAllIndexes(schema)
     .then(() => process.exit(0))
     .catch((err) => {
       console.error('\n❌ push failed:', err);

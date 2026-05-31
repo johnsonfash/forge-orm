@@ -3,8 +3,8 @@ import * as dotenv from 'dotenv';
 dotenv.config();
 
 import { createDb } from '../factory';
-import { schema } from '../schema';
 import { diffIntrospection, formatDriftReport } from './diff-core';
+import { loadConsumerSchema } from './load-consumer-schema';
 
 // forge:diff — drift detection. Introspects the live database (chosen from
 // DATABASE_URL) and compares it to the declared forge schema, reporting
@@ -26,7 +26,10 @@ async function main() {
   const asJson = process.argv.includes('--json');
   const gate = process.argv.includes('--check');
 
-  const db = await createDb({ url });
+  const { schema, source } = loadConsumerSchema();
+  if (!asJson) console.log(`[forge:diff] schema: ${source}`);
+
+  const db = (await createDb({ url, schema })) as any;
   try {
     if (typeof db.adapter.introspect !== 'function') {
       console.error(`[forge:diff] adapter '${db.adapter.kind}' does not support introspection.`);
