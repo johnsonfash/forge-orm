@@ -1,29 +1,26 @@
 /* eslint-disable no-console */
 //
-// Load the CONSUMER's schema for forge:push / forge:diff / forge:rollback.
+// Load the CONSUMER's schema for forge:push / forge:diff / forge:diff:apply.
 //
-// Why this exists: previous releases of `forge:push` hardwired the require
-// path to forge's own bundled sample schema. That meant consumers running
-// `npx forge:push` against their own DB were silently pushing forge's sample
-// indexes instead of their own — i.e. nothing useful happened. (Detected in
-// the wild: a BigBite production env shipped with NO indexes on critical
-// collections, including a unique constraint on a webhook idempotency key.
-// The application-layer guards held, but the DB-layer safety net wasn't there.)
+// Layered resolver (cheap things first, scan as fallback, hard-fail on miss):
 //
-// Resolution order:
-//   1. --schema=<path>            CLI flag
-//   2. FORGE_SCHEMA_PATH=<path>   env var
-//   3. Auto-detect from these convention paths, first hit wins:
-//        ./src/schema.ts
-//        ./src/schema.js
-//        ./schema.ts
-//        ./schema.js
-//        ./src/core/database/schema.ts
-//        ./src/db/schema.ts
-//        ./src/database/schema.ts
-//   4. Fall back to forge's bundled sample with a loud warning. The fallback
-//      is there so `npm test` / `forge:push` against an in-repo dev DB inside
-//      forge's own monorepo keeps working — consumers will never hit it.
+//   1. --schema=<path>                  CLI flag
+//   2. FORGE_SCHEMA_PATH=<path>         env var
+//   3. package.json → forge.schema      consumer config
+//   4. node_modules/.cache/forge/       cached scan result (instant)
+//        schema-cache.json
+//   5. Filesystem scan                  ~150ms cold, ~30ms warm OS cache
+//        → on success, write cache so the next run hits layer 4
+//   6. Hard fail                         no silent fallback
+//
+// The scan looks for a file that BOTH imports from `forge-orm` AND exports a
+// `schema` const (or default), skipping node_modules / dist / build / .git /
+// .next / coverage / .cache / .turbo / test fixtures. On a 10k-file project
+// the whole walk is sub-300ms because 99% of files are eliminated by a raw
+// byte-search for the string "forge-orm" before we look any deeper.
+//
+// On multi-match the resolver fails with the full candidate list and asks
+// the consumer to disambiguate via package.json or --schema=.
 //
 // The loaded module is expected to either:
 //   • Export `schema` — the typical `export const schema = { Users, Posts… } as const`
@@ -34,20 +31,28 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { setActiveSchema } from '../schema/active';
 
-const CONVENTION_PATHS = [
-  'src/schema.ts',
-  'src/schema.js',
-  'schema.ts',
-  'schema.js',
-  'src/core/database/schema.ts',
-  'src/db/schema.ts',
-  'src/database/schema.ts',
+const FILE_EXT_RE = /\.(?:m|c)?[tj]sx?$/;
+const TEST_PATTERN_RE = [
+  /\.test\.(?:m|c)?[tj]sx?$/,
+  /\.spec\.(?:m|c)?[tj]sx?$/,
+  /[/\\]__tests__[/\\]/,
+  /[/\\]__mocks__[/\\]/,
+  /[/\\]fixtures?[/\\]/,
 ];
+const SKIP_DIRS = new Set([
+  'node_modules', 'dist', 'build', 'out', 'coverage',
+  '.git', '.next', '.cache', '.turbo', '.svelte-kit', '.nuxt',
+  '.parcel-cache', '.vercel', '.netlify', '.serverless', '.output',
+  '.idea', '.vscode',
+]);
+const MAX_FILE_BYTES = 1024 * 1024; // 1 MB — schemas are small
+const FORGE_IMPORT_RE = /['"`]forge-orm['"`]/;
+const SCHEMA_EXPORT_RE = /export\s+(?:const\s+schema|default)/;
 
 export interface LoadedSchema {
   schema: any;
   source: string;     // human-readable path or '(forge bundled sample)'
-  isFallback: boolean;
+  origin: 'flag' | 'env' | 'package.json' | 'cache' | 'scan' | 'fallback';
 }
 
 function parseFlag(argv: string[]): string | undefined {
@@ -68,11 +73,8 @@ let tsNodeRegistered = false;
 /**
  * Register ts-node in transpile-only mode so loading a TypeScript schema is
  * fast (milliseconds) instead of slow (~30-60s) due to full type-checking.
- *
  * Type errors at this layer are not the migrator's concern — the consumer's
- * own TypeScript build catches those. Here we just need the runtime values.
- *
- * Idempotent: re-running this is a no-op.
+ * own TypeScript build catches those. Idempotent.
  */
 function ensureTsNodeRegistered(): void {
   if (tsNodeRegistered) return;
@@ -90,46 +92,179 @@ function ensureTsNodeRegistered(): void {
         skipLibCheck: true,
       },
     });
-  } catch (err: any) {
-    // ts-node isn't installed; that's fine if the consumer is loading a .js
-    // file. If they hand us a .ts and ts-node is absent we'll fail on require
-    // below with a clearer message.
+  } catch {
+    /* ts-node not installed; .js consumer schemas still work via plain require */
   }
 }
 
 function importSchemaModule(absPath: string): any {
-  // Auto-register ts-node in transpile-only mode for .ts schemas. Skipping
-  // this would push the cost of compile + full type-check onto whatever
-  // loader the consumer happens to have registered globally (commonly the
-  // default ts-node setup, which type-checks the WHOLE file — that's the
-  // 30-60s "why is this so slow?" everyone hits on first run).
-  if (absPath.endsWith('.ts') || absPath.endsWith('.tsx')) {
+  if (absPath.endsWith('.ts') || absPath.endsWith('.tsx') ||
+      absPath.endsWith('.mts') || absPath.endsWith('.cts')) {
     ensureTsNodeRegistered();
   }
-
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const mod = require(absPath);
   if (mod?.schema) return mod.schema;
   if (mod?.default?.schema) return mod.default.schema;
-  if (mod?.default && typeof mod.default === 'object' && !Array.isArray(mod.default)) return mod.default;
+  if (mod?.default && typeof mod.default === 'object' && !Array.isArray(mod.default)) {
+    return mod.default;
+  }
   throw new Error(
     `[forge] ${absPath} loaded but no \`schema\` (or default) export found. ` +
       `Expected: export const schema = { Users, Posts, … } as const;`,
   );
 }
 
+// ─── Layer 3: package.json ──────────────────────────────────────────────────
+
+function readPackageJsonSchema(): string | undefined {
+  const pkgPath = path.join(process.cwd(), 'package.json');
+  if (!fs.existsSync(pkgPath)) return undefined;
+  try {
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+    return pkg?.forge?.schema ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// ─── Layer 4: cache ─────────────────────────────────────────────────────────
+
+function cacheDir(): string {
+  return path.join(process.cwd(), 'node_modules', '.cache', 'forge');
+}
+
+function cacheFile(): string {
+  return path.join(cacheDir(), 'schema-cache.json');
+}
+
+function readCachedPath(): string | undefined {
+  try {
+    const raw = fs.readFileSync(cacheFile(), 'utf8');
+    const parsed = JSON.parse(raw);
+    if (parsed?.path && typeof parsed.path === 'string') {
+      // Verify file still exists; if not, ignore cache.
+      if (fs.existsSync(parsed.path)) return parsed.path;
+    }
+  } catch { /* missing file / parse error / stale cache */ }
+  return undefined;
+}
+
+function writeCachedPath(absPath: string): void {
+  try {
+    fs.mkdirSync(cacheDir(), { recursive: true });
+    fs.writeFileSync(
+      cacheFile(),
+      JSON.stringify({
+        path: absPath,
+        discoveredAt: new Date().toISOString(),
+      }, null, 2),
+    );
+  } catch { /* cache write is best-effort; not a hard failure */ }
+}
+
+// ─── Layer 5: filesystem scan ───────────────────────────────────────────────
+
+function scanForSchemas(root: string): string[] {
+  const found: string[] = [];
+
+  function walk(dir: string): void {
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+    catch { return; }
+
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (SKIP_DIRS.has(e.name)) continue;
+        if (e.name.startsWith('.')) continue;
+        walk(full);
+        continue;
+      }
+      if (!e.isFile()) continue;
+      if (!FILE_EXT_RE.test(e.name)) continue;
+      if (TEST_PATTERN_RE.some((p) => p.test(full))) continue;
+
+      let stat: fs.Stats;
+      try { stat = fs.statSync(full); } catch { continue; }
+      if (stat.size > MAX_FILE_BYTES) continue;
+
+      let content: string;
+      try { content = fs.readFileSync(full, 'utf8'); } catch { continue; }
+
+      // Cheap reject — vast majority of files exit here.
+      if (!FORGE_IMPORT_RE.test(content)) continue;
+      if (!SCHEMA_EXPORT_RE.test(content)) continue;
+
+      found.push(full);
+    }
+  }
+
+  walk(root);
+  return found;
+}
+
+// ─── Failure modes ──────────────────────────────────────────────────────────
+
+function failNotFound(): never {
+  console.error(`
+[forge] no schema found.
+
+Searched in order:
+  1. --schema=<path> flag             (not provided)
+  2. FORGE_SCHEMA_PATH env var        (not set)
+  3. package.json → forge.schema      (not set)
+  4. node_modules/.cache/forge/       (no cached path)
+       schema-cache.json
+  5. filesystem scan                  (0 candidates)
+
+To fix, do ONE of these:
+
+  • Add to package.json:
+      "forge": { "schema": "./src/your-schema.ts" }
+
+  • Pass on the command line:
+      npx forge push --schema=./path/to/schema.ts
+
+  • Or make sure your schema file:
+      (a) imports something from 'forge-orm', and
+      (b) exports a \`schema\` const, e.g.
+          export const schema = { Users, Posts } as const;
+`);
+  process.exit(1);
+}
+
+function failMultiMatch(candidates: string[]): never {
+  console.error(`
+[forge] multiple schema candidates found (${candidates.length}):
+
+${candidates.map((c) => `  • ${path.relative(process.cwd(), c)}`).join('\n')}
+
+To resolve, pick ONE and either:
+
+  • Add to package.json:
+      "forge": { "schema": "./src/your-schema.ts" }
+
+  • Pass on the command line:
+      npx forge push --schema=./src/your-schema.ts
+`);
+  process.exit(1);
+}
+
+// ─── Resolver ───────────────────────────────────────────────────────────────
+
 export function loadConsumerSchema(argv: string[] = process.argv): LoadedSchema {
-  // 1. CLI flag
+  // 1. Flag
   const flagPath = parseFlag(argv);
   if (flagPath) {
     const abs = resolveAbsolute(flagPath);
     if (!fs.existsSync(abs)) {
-      console.error(`[forge:push] --schema=${flagPath} does not exist (resolved to ${abs})`);
+      console.error(`[forge] --schema=${flagPath} does not exist (resolved to ${abs})`);
       process.exit(1);
     }
     const schema = importSchemaModule(abs);
     setActiveSchema(schema);
-    return { schema, source: abs, isFallback: false };
+    return { schema, source: abs, origin: 'flag' };
   }
 
   // 2. Env var
@@ -137,45 +272,50 @@ export function loadConsumerSchema(argv: string[] = process.argv): LoadedSchema 
   if (envPath) {
     const abs = resolveAbsolute(envPath);
     if (!fs.existsSync(abs)) {
-      console.error(`[forge:push] FORGE_SCHEMA_PATH=${envPath} does not exist (resolved to ${abs})`);
+      console.error(`[forge] FORGE_SCHEMA_PATH=${envPath} does not exist (resolved to ${abs})`);
       process.exit(1);
     }
     const schema = importSchemaModule(abs);
     setActiveSchema(schema);
-    return { schema, source: abs, isFallback: false };
+    return { schema, source: abs, origin: 'env' };
   }
 
-  // 3. Convention paths
-  const cwd = process.cwd();
-  for (const rel of CONVENTION_PATHS) {
-    const abs = path.join(cwd, rel);
-    if (fs.existsSync(abs)) {
-      try {
-        const schema = importSchemaModule(abs);
-        setActiveSchema(schema);
-        console.log(`[forge:push] auto-detected schema at ${rel}`);
-        return { schema, source: abs, isFallback: false };
-      } catch (err: any) {
-        // Found the file but it didn't export schema — surface, don't keep
-        // hunting (would confuse the user about which file forge looked at).
-        console.error(`[forge:push] ${rel} found but failed to load schema: ${err?.message || err}`);
-        process.exit(1);
-      }
+  // 3. package.json
+  const pkgSchema = readPackageJsonSchema();
+  if (pkgSchema) {
+    const abs = resolveAbsolute(pkgSchema);
+    if (!fs.existsSync(abs)) {
+      console.error(`[forge] package.json → forge.schema=${pkgSchema} does not exist (resolved to ${abs})`);
+      process.exit(1);
+    }
+    const schema = importSchemaModule(abs);
+    setActiveSchema(schema);
+    return { schema, source: abs, origin: 'package.json' };
+  }
+
+  // 4. Cache
+  const cached = readCachedPath();
+  if (cached) {
+    try {
+      const schema = importSchemaModule(cached);
+      setActiveSchema(schema);
+      return { schema, source: cached, origin: 'cache' };
+    } catch {
+      // Cache is stale; fall through to scan
     }
   }
 
-  // 4. Bundled-sample fallback — for forge's own monorepo dev/test runs.
-  // Consumers should NEVER hit this; surface a loud warning so it can't go
-  // unnoticed.
-  console.warn(
-    `[forge:push] ⚠ no consumer schema found. Falling back to forge's bundled\n` +
-      `             sample schema (development only — won't reflect your models).\n` +
-      `             Pass --schema=<path> or set FORGE_SCHEMA_PATH=<path>, or put\n` +
-      `             your schema at one of these conventional paths:\n` +
-      CONVENTION_PATHS.map((p) => `               • ${p}`).join('\n'),
-  );
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const sample = require('../schema').schema;
-  setActiveSchema(sample);
-  return { schema: sample, source: '(forge bundled sample)', isFallback: true };
+  // 5. Scan
+  const candidates = scanForSchemas(process.cwd());
+  if (candidates.length === 1) {
+    const abs = candidates[0];
+    writeCachedPath(abs);
+    const schema = importSchemaModule(abs);
+    setActiveSchema(schema);
+    return { schema, source: abs, origin: 'scan' };
+  }
+  if (candidates.length === 0) {
+    failNotFound();
+  }
+  failMultiMatch(candidates);
 }

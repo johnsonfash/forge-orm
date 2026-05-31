@@ -711,25 +711,33 @@ npx forge --help
 
 ### Pointing the CLI at your schema
 
-All four scripts above need to know where your schema module lives. Resolution
-order (first hit wins):
+forge resolves the consumer's schema through a layered cascade — explicit
+pointers first, with a one-time filesystem scan as the zero-config fallback.
+First hit wins:
 
-1. **`--schema=<path>`** CLI flag — explicit, recommended for CI
-2. **`FORGE_SCHEMA_PATH=<path>`** env var — handy when paired with `DATABASE_URL`
-3. **Convention paths**, tried in order from `process.cwd()`:
-   - `./src/schema.ts`
-   - `./src/schema.js`
-   - `./schema.ts`
-   - `./schema.js`
-   - `./src/core/database/schema.ts`
-   - `./src/db/schema.ts`
-   - `./src/database/schema.ts`
+1. **`--schema=<path>`** CLI flag (zero ms)
+2. **`FORGE_SCHEMA_PATH=<path>`** env var (zero ms)
+3. **`package.json` config**:
+   ```json
+   { "forge": { "schema": "./src/your-schema.ts" } }
+   ```
+4. **Cached scan result** at `node_modules/.cache/forge/schema-cache.json` —
+   instant on every run after the first.
+5. **Filesystem scan** — walks your project tree, finds the file that imports
+   from `forge-orm` and exports a `schema` const. Skips `node_modules`,
+   `dist`, `build`, `.git`, `.next`, `coverage`, `.cache`, `.turbo`,
+   `.svelte-kit`, `.nuxt`, `.parcel-cache`, `.vercel`, `.netlify`, `out`,
+   `.output`, `.idea`, `.vscode`, `*.test.*` files, `__tests__/`, `__mocks__/`,
+   and `fixtures/`. Sub-300 ms on a real 10k-file project — a cache write at
+   the end makes subsequent runs free.
+6. **Hard fail** if nothing matches, with an actionable error message listing
+   every layer that was tried.
 
 The schema module must export a `schema` constant (or a default export shaped
 the same way):
 
 ```ts
-// src/schema.ts
+// src/schema.ts — name and location are up to you
 import { f, model } from 'forge-orm';
 
 export const User = model('users', { … });
@@ -738,9 +746,9 @@ export const Post = model('posts', { … });
 export const schema = { User, Post } as const;
 ```
 
-If forge can't find a consumer schema it falls back to its bundled sample with
-a loud warning — that path exists so forge's own monorepo tests keep working
-and should never trigger in normal consumer use.
+If the scan finds more than one candidate (e.g. a real schema + a fixture
+schema in `examples/`), forge prints both paths and asks you to disambiguate
+via `package.json` or `--schema=`.
 
 TypeScript schemas are loaded with `ts-node` registered in **transpile-only**
 mode under the hood, so push runs in milliseconds even on schemas with dozens

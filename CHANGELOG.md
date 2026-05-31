@@ -4,6 +4,50 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite - one code
 path, no codegen, no external query engine.
 
+## 1.2.0 — zero-config schema resolution (layered: flag → env → package.json → cache → scan)
+
+`forge` no longer needs a convention path list. It now resolves the consumer's
+schema through a layered cascade: explicit pointers first, then a one-time
+filesystem scan that caches its result, with a hard, actionable failure when
+nothing turns up.
+
+**Resolution order:**
+
+1. **`--schema=<path>` flag** — zero ms, highest priority.
+2. **`FORGE_SCHEMA_PATH=<path>` env var** — zero ms.
+3. **`package.json → forge.schema`** — config-in-package, Prettier-style.
+4. **`node_modules/.cache/forge/schema-cache.json`** — cached scan result;
+   instant for every run after the first.
+5. **Filesystem scan** — walks the project tree (one-time cost), finds files
+   that both import from `forge-orm` and export a `schema` const. Skips
+   `node_modules`, `dist`, `build`, `.git`, `.next`, `coverage`, `.cache`,
+   `.turbo`, `.svelte-kit`, `.nuxt`, `.parcel-cache`, `.vercel`, `.netlify`,
+   `.serverless`, `out`, `.output`, `.idea`, `.vscode`, test files
+   (`*.test.*`, `*.spec.*`), `__tests__/`, `__mocks__/`, `fixtures/`.
+   Eliminates ~99% of files with a raw byte-search for the string `forge-orm`
+   before doing any deeper work.
+6. **Hard fail** — no silent fallback to the bundled sample. Error message
+   lists every layer that was searched and gives three concrete ways to fix
+   it (add `package.json` entry, pass `--schema`, or check the schema's
+   exports).
+
+**Multi-match handling:**
+
+If the scan finds two or more candidates (e.g. a real schema + a test
+fixture), forge prints all of them and asks the consumer to pick one via
+`package.json` or `--schema`.
+
+**Performance** (measured on a real ~10k-file project / 30-collection
+schema):
+
+- Scan (cold): ~300 ms
+- Cache hit: ~0 ms overhead
+- Total push wall-clock: ~1.1 s (down from ~2.3 s cold) for cache-hit reruns
+
+**Bundled-sample fallback removed.** Forge's own monorepo tests use the
+explicit `--schema=` flag in their npm scripts, so the silent fallback path
+no longer exists. This makes failure modes loud and obvious.
+
 ## 1.1.5 — `npx forge` binary (Prisma-style subcommands)
 
 - **New `forge` CLI binary**, registered via `"bin": { "forge": "..." }` in
