@@ -4,6 +4,28 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite - one code
 path, no codegen, no external query engine.
 
+## 1.1.5 — `npx forge` binary (Prisma-style subcommands)
+
+- **New `forge` CLI binary**, registered via `"bin": { "forge": "..." }` in
+  `package.json`. After `npm install forge-orm`, consumers can now run:
+
+  ```sh
+  npx forge push           # idempotently sync schema → DB
+  npx forge diff           # show drift
+  npx forge diff apply     # generate + apply reconciliation migration
+  npx forge rollback       # undo last migration
+  npx forge doctor         # adapter pre-flight checks
+  npx forge --help
+  ```
+
+  No env vars, no flags, no glue scripts required. Schema is auto-detected
+  from convention paths (`src/schema.ts`, `src/core/database/schema.ts`,
+  etc.) or pointed at with `--schema=<path>` / `FORGE_SCHEMA_PATH`.
+
+  The old `forge:push` / `forge:diff` / `forge:diff:apply` / `forge:rollback`
+  npm scripts continue to work inside the forge monorepo for our own dev/test
+  runs.
+
 ## 1.1.4 — `forge:push` exits cleanly when work is done
 
 - **`forge:push` no longer hangs after the push completes.** The top-level CLI

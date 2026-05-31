@@ -693,17 +693,21 @@ db.$on('error', (e) => console.error(e.op, 'failed', e.error.message));
 
 ## Creating tables and migrations
 
-forge can create your tables from the schema and reconcile changes later. These
-run as command-line scripts that read `DATABASE_URL` from the environment:
+forge can create your tables from the schema and reconcile changes later. After
+installing `forge-orm`, the `forge` binary is on your `PATH` via `npx`:
 
 ```sh
-forge:push          # create or update tables, indexes, and constraints to match the schema
-forge:diff          # report differences between the live database and the schema
-forge:diff --json   # the same as machine-readable JSON
-forge:diff --check  # exit non-zero if there is drift (useful in CI)
-forge:diff:apply    # generate and run a migration that reconciles the difference
-forge:rollback      # undo the most recent applied migration
+npx forge push           # create or update tables, indexes, and constraints to match the schema
+npx forge diff           # report differences between the live database and the schema
+npx forge diff --json    # the same as machine-readable JSON
+npx forge diff --check   # exit non-zero if there is drift (useful in CI)
+npx forge diff apply     # generate and run a migration that reconciles the difference
+npx forge rollback       # undo the most recent applied migration
+npx forge doctor         # adapter pre-flight checks
+npx forge --help
 ```
+
+`DATABASE_URL` is read from your `.env` or environment.
 
 ### Pointing the CLI at your schema
 
