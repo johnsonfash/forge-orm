@@ -4,6 +4,19 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite - one code
 path, no codegen, no external query engine.
 
+## 1.1.4 — `forge:push` exits cleanly when work is done
+
+- **`forge:push` no longer hangs after the push completes.** The top-level CLI
+  was relying on Node's natural exit, but `pushAllIndexes()` leaves the Mongo
+  client's connection pool open, so the process would sit idle for ~30s
+  waiting for the keepalive to time out. The standalone mongo entry point
+  (`dist/adapters/mongo/scripts/push.js`) was unaffected — it always called
+  `process.exit(0)`. Now the top-level CLI does too.
+
+  Measured on a real ~30-collection / 111-index schema: 1057 ms of actual
+  work; previously the process would sit at 1 s of work + 30 s of dangling
+  connection before Node figured out it was done.
+
 ## 1.1.3 — `forge:push` reads the consumer's schema (was: bundled sample)
 
 This release fixes a real bug consumers were hitting silently:
