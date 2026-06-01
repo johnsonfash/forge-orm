@@ -4,6 +4,46 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite - one code
 path, no codegen, no external query engine.
 
+## 1.3.0 — direct-from-model type inference (`Infer*` family)
+
+Take a `typeof MyModel` and pull out any input/output shape you need —
+no codegen, no `SchemaMap` registration, no detour through
+`ForgeOf<'key'>`. The existing `Row<typeof M>` and `ForgeOf` / `ForgeModels`
+APIs still ship; this adds a more direct path for service signatures,
+DTOs, validation layers, and anywhere outside `db.*`.
+
+**New exported types:**
+
+| Helper | What it gives you |
+| --- | --- |
+| `InferRow<typeof M>` | Row shape — field types after defaults/nullability resolve |
+| `InferWhere<typeof M>` | `where` input — field filters + AND/OR/NOT |
+| `InferWhereUnique<typeof M>` | Partial unique-key lookup |
+| `InferCreate<typeof M>` | `create` input — scalars + nested relation directives |
+| `InferUpdate<typeof M>` | `update` input — plain values + atomic ops on numbers |
+| `InferUpsert<typeof M>` | `{ create, update }` pair |
+| `InferOrderBy<typeof M>` | `{ field: 'asc' \| 'desc' }` per scalar |
+| `InferSelect<typeof M, S?>` | Field-level select; second generic for relation walking |
+| `InferInclude<typeof M, S?>` | Relation include map; second generic for nested args |
+| `InferOmit<typeof M>` | Boolean toggles per scalar |
+| `Infer<typeof M, S?>` | One bundle of every alias above |
+| `InferSchema<typeof schema>` | Mapped bundle across every model in a schema record |
+
+```ts
+const User = model('users', { id: f.id(), email: f.string(), age: f.int().optional() });
+
+type UserCreate = InferCreate<typeof User>;            // { email?: string; age?: number | null; … }
+type UserUpdate = InferUpdate<typeof User>;            // includes { age: { increment: 1 } } shape
+type UserT      = Infer<typeof User>;                  // bundled .Row / .Where / .Create / …
+
+const schema = { user: User, post: Post } as const;
+type T = InferSchema<typeof schema>;
+type PostSelect = T['post']['Select'];                  // relations resolve via schema map
+```
+
+13 new type-level tests cover the family; existing 191 unit + 163 integration
+tests untouched.
+
 ## 1.2.0 — zero-config schema resolution (layered: flag → env → package.json → cache → scan)
 
 `forge` no longer needs a convention path list. It now resolves the consumer's
