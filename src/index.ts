@@ -53,6 +53,28 @@ export type { SchemaShape } from './schema/active';
 // ForgeModels['User']['CreateInput']   — capitalised dotted lookup
 export type { ForgeOf, ForgeModels, PerModelTypes } from './forge-types';
 
+// ─── Direct-from-model inference (no SchemaMap registration required) ──────
+// Take a `typeof MyModel` and pull out any input/output shape you need:
+//   type C = InferCreate<typeof User>;
+//   type U = InferUpdate<typeof User>;
+//   type W = InferWhere<typeof User>;
+//   type All = Infer<typeof User>;            // .Row, .Where, .Create, .Update, …
+//   type Map = InferSchema<typeof mySchema>;  // mapped bundles, with relations
+export type {
+  Infer,
+  InferRow,
+  InferWhere,
+  InferWhereUnique,
+  InferCreate,
+  InferUpdate,
+  InferUpsert,
+  InferOrderBy,
+  InferSelect,
+  InferInclude,
+  InferOmit,
+  InferSchema,
+} from './infer';
+
 // ─── Adapter compile APIs (escape hatch: build SQL/Mongo, run yourself) ─────
 export { buildPostgresCompileApi } from './adapters/postgres/compile';
 
