@@ -105,9 +105,14 @@ function renderColumn(name: string, field: FieldDef): string {
   const d = MysqlDialect;
   const colName = d.quoteIdent(name);
   const type = d.columnType(field);
-  // Wave 5e — generated column.
+  // Generated column.
   if (field.dbGenerated) {
     return `${colName} ${type} GENERATED ALWAYS AS (${field.dbGenerated}) STORED`;
+  }
+  // bigserial — MySQL form is BIGINT NOT NULL AUTO_INCREMENT. No DEFAULT
+  // clause; AUTO_INCREMENT is mutually exclusive with one.
+  if (field.kind === 'id' && field.idType === 'bigserial') {
+    return `${colName} ${type} NOT NULL AUTO_INCREMENT`;
   }
   const nullable = field.optional ? '' : ' NOT NULL';
   const def = renderDefault(field);

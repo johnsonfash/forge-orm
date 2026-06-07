@@ -26,7 +26,13 @@ export const MysqlDialect: Dialect = {
 
   columnType(field: FieldDef) {
     switch (field.kind) {
-      case 'id':         return 'VARCHAR(64)';
+      case 'id':
+        // bigserial → BIGINT AUTO_INCREMENT (NOT NULL appended by renderColumn).
+        // uuid → CHAR(36) (with `DEFAULT (UUID())` via renderDefault).
+        // auto → string column, app-side gen handles the value.
+        if (field.idType === 'bigserial') return 'BIGINT';
+        if (field.idType === 'uuid')      return 'CHAR(36)';
+        return 'VARCHAR(64)';
       case 'objectId':   return 'VARCHAR(64)';
       case 'string':     return 'VARCHAR(255)';   // can be UNIQUE / indexed without a key-length prefix
       case 'text':       return 'TEXT';            // unbounded; can't be UNIQUE without a (n) prefix

@@ -57,7 +57,13 @@ export const PostgresDialect: Dialect = {
 
   columnType(field) {
     switch (field.kind) {
-      case 'id':         return 'text'; // Wave 2d: switch by f.id({ type }) → uuid / bigserial
+      case 'id':
+        // idType drives the underlying PG type. `bigserial` carries its own
+        // sequence + default + NOT NULL — the column-builder must NOT add a
+        // separate default/null clause when it sees this.
+        if (field.idType === 'bigserial') return 'bigserial';
+        if (field.idType === 'uuid')      return 'uuid';
+        return 'text';
       case 'objectId':   return 'text'; // FK to a Mongo-style id is text; pure-PG schemas would use uuid
       case 'string':     return 'text';
       case 'text':       return 'text';
