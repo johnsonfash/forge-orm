@@ -25,6 +25,63 @@ export interface DriftReport {
   dialect: AdapterKind;
   items: DriftItem[];
   inSync: boolean;
+  /** Tables/collections that matched an ignore pattern. Surfaced so the
+   *  caller (CLI / CI) can show "skipped 2 tables — they matched your
+   *  ignore list" without those ever appearing as drift. */
+  ignored?: string[];
+}
+
+/**
+ * Patterns for tables/collections the report should ignore entirely —
+ * useful for engine-managed collections (Atlas metadata, PostgREST
+ * shadows), cross-service collections that aren't declared in your
+ * schema, or anything else that would otherwise look like permanent
+ * drift.
+ *
+ * Strings match the table name exactly. RegExp matches the table name
+ * via `.test()`. A pattern that's only a substring should be written
+ * as a regex (`/system\./i`) so it can't accidentally match unrelated
+ * collection names.
+ *
+ * Pre-baked ignores stay in place regardless: `_forge_migrations` and
+ * any `*_fts` shadows are always filtered (the migration ledger lives
+ * outside the user schema; FTS shadows are an engine implementation
+ * detail). User patterns are additive on top.
+ */
+export type IgnoreSpec = ReadonlyArray<string | RegExp>;
+
+function matchesIgnore(name: string, spec: IgnoreSpec): boolean {
+  for (const p of spec) {
+    if (typeof p === 'string') {
+      if (p === name) return true;
+    } else if (p instanceof RegExp) {
+      if (p.test(name)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Parse a comma-separated ignore-spec string (CLI flag or env var) into
+ * `IgnoreSpec`. Items wrapped in `/.../flags` are treated as regex —
+ * everything else is an exact-match string.
+ *
+ *   parseIgnoreList('logs,/^_atlas_/i,events')
+ *     → ['logs', /^_atlas_/i, 'events']
+ */
+export function parseIgnoreList(raw: string | undefined | null): IgnoreSpec {
+  if (!raw) return [];
+  const out: (string | RegExp)[] = [];
+  for (const item of raw.split(',')) {
+    const trimmed = item.trim();
+    if (!trimmed) continue;
+    const m = /^\/(.+)\/([a-z]*)$/.exec(trimmed);
+    if (m) {
+      try { out.push(new RegExp(m[1], m[2])); continue; } catch { /* fall through */ }
+    }
+    out.push(trimmed);
+  }
+  return out;
 }
 
 // ── Expected-shape derivation ──────────────────────────────────────────────
@@ -128,6 +185,7 @@ function dbTypeCategory(type: string): string | undefined {
 export function diffIntrospection(
   schema: Record<string, any>,
   actual: DbIntrospection,
+  ignore: IgnoreSpec = [],
 ): DriftReport {
   const expected = expectedFromSchema(schema);
   const items: DriftItem[] = [];
@@ -135,6 +193,7 @@ export function diffIntrospection(
   const checkTypes = dialect !== 'sqlite' && dialect !== 'mongo';
   // Mongo is schemaless: only collection + index level make sense.
   const structuralColumns = dialect !== 'mongo';
+  const ignored: string[] = [];
 
   const actualTables = new Map<string, IntrospectedTable>();
   for (const t of actual.tables) actualTables.set(t.name, t);
@@ -187,11 +246,15 @@ export function diffIntrospection(
     }
   }
 
-  // Extra tables in DB not in schema (ignore migration-history + FTS shadows).
+  // Extra tables in DB not in schema. Built-in skips: the migration
+  // ledger and engine-generated FTS shadows. User-supplied `ignore`
+  // patterns drop noisy meta-collections (Atlas, system.*, cross-
+  // service tables) without inheriting them into the schema.
   for (const [name] of actualTables) {
     if (expected.tables.has(name)) continue;
     if (expected.views.some((v) => v.name === name)) continue;  // matview-backing table
     if (name === '_forge_migrations' || /_fts/i.test(name)) continue;
+    if (ignore.length > 0 && matchesIgnore(name, ignore)) { ignored.push(name); continue; }
     items.push({ kind: 'table', direction: 'extra', table: name, detail: `table '${name}' in DB but not in schema` });
   }
 
@@ -205,17 +268,27 @@ export function diffIntrospection(
     }
   }
 
-  return { dialect, items, inSync: items.length === 0 };
+  return {
+    dialect,
+    items,
+    inSync: items.length === 0,
+    ignored: ignored.length > 0 ? ignored : undefined,
+  };
 }
 
 // ── Pretty printer ────────────────────────────────────────────────────────
 
 export function formatDriftReport(r: DriftReport): string {
-  if (r.inSync) return `✓ no drift — live ${r.dialect} schema matches forge schema`;
+  const ignoredTail =
+    r.ignored && r.ignored.length > 0
+      ? `\n  (ignored ${r.ignored.length} table${r.ignored.length === 1 ? '' : 's'}: ${r.ignored.join(', ')})`
+      : '';
+  if (r.inSync) return `✓ no drift — live ${r.dialect} schema matches forge schema${ignoredTail}`;
   const lines = [`✗ drift detected on ${r.dialect} (${r.items.length} issue${r.items.length === 1 ? '' : 's'}):`];
   for (const it of r.items) {
     const tag = it.direction === 'missing' ? '−' : it.direction === 'extra' ? '+' : '≠';
     lines.push(`  ${tag} [${it.kind}] ${it.table}: ${it.detail}`);
   }
+  if (ignoredTail) lines.push(ignoredTail.replace(/^\n  /, '  '));
   return lines.join('\n');
 }

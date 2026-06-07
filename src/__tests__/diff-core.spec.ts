@@ -1,5 +1,5 @@
 import { f, model } from '../schema/core';
-import { diffIntrospection, expectedFromSchema } from '../scripts/diff-core';
+import { diffIntrospection, expectedFromSchema, parseIgnoreList } from '../scripts/diff-core';
 import type { DbIntrospection } from '../adapters/types';
 
 // Wave 5b — drift comparator. Uses a tiny ad-hoc schema (diffIntrospection
@@ -83,5 +83,60 @@ describe('Wave 5b — drift comparator', () => {
     act.tables.push({ name: 'widgets_fts', columns: [], indexes: [], foreignKeys: [] });
     const r = diffIntrospection(miniSchema, act);
     expect(r.inSync).toBe(true);
+  });
+
+  // ── user-supplied ignore patterns (v1.3.1) ─────────────────────────
+
+  test('parseIgnoreList parses strings, regex, and trims whitespace', () => {
+    expect(parseIgnoreList('logs, /^_atlas_/i , events')).toEqual([
+      'logs',
+      /^_atlas_/i,
+      'events',
+    ]);
+    expect(parseIgnoreList('')).toEqual([]);
+    expect(parseIgnoreList(undefined)).toEqual([]);
+  });
+
+  test('parseIgnoreList tolerates a malformed regex by falling back to literal', () => {
+    const parsed = parseIgnoreList('/[unclosed/');
+    // It's a literal string — exact-match by design — not a thrown error.
+    expect(parsed).toEqual(['/[unclosed/']);
+  });
+
+  test('exact-string ignore pattern drops a table from the report', () => {
+    const act = pgActual();
+    act.tables.push({ name: 'sessions', columns: [], indexes: [], foreignKeys: [] });
+    act.tables.push({ name: 'logs', columns: [], indexes: [], foreignKeys: [] });
+    const r = diffIntrospection(miniSchema, act, ['logs']);
+    expect(r.items).toContainEqual(expect.objectContaining({ table: 'sessions', direction: 'extra' }));
+    expect(r.items).not.toContainEqual(expect.objectContaining({ table: 'logs' }));
+    expect(r.ignored).toEqual(['logs']);
+  });
+
+  test('regex ignore pattern matches every collection in a family', () => {
+    const act = pgActual();
+    act.tables.push({ name: '_atlas_metadata', columns: [], indexes: [], foreignKeys: [] });
+    act.tables.push({ name: '_atlas_tokens', columns: [], indexes: [], foreignKeys: [] });
+    act.tables.push({ name: 'events', columns: [], indexes: [], foreignKeys: [] });
+    const r = diffIntrospection(miniSchema, act, [/^_atlas_/i]);
+    expect(r.items).toContainEqual(expect.objectContaining({ table: 'events', direction: 'extra' }));
+    expect(r.ignored?.sort()).toEqual(['_atlas_metadata', '_atlas_tokens']);
+  });
+
+  test('ignored tables that are otherwise the only drift land the report inSync', () => {
+    const act = pgActual();
+    act.tables.push({ name: 'noise', columns: [], indexes: [], foreignKeys: [] });
+    const r = diffIntrospection(miniSchema, act, ['noise']);
+    expect(r.inSync).toBe(true);
+    expect(r.ignored).toEqual(['noise']);
+  });
+
+  test('an empty ignore list is identical to omitting the parameter', () => {
+    const act = pgActual();
+    act.tables.push({ name: 'leftover', columns: [], indexes: [], foreignKeys: [] });
+    const baseline = diffIntrospection(miniSchema, act);
+    const withEmpty = diffIntrospection(miniSchema, act, []);
+    expect(withEmpty.items).toEqual(baseline.items);
+    expect(withEmpty.ignored).toBeUndefined();
   });
 });
