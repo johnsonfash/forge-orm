@@ -93,7 +93,7 @@ export type ForgeDb<S extends SchemaShape = SchemaMap> = Collections<S> & {
     (fragment: SqlFragment): Promise<number>;
   };
   $disconnect(): Promise<void>;
-  // Wave 4 — query lifecycle pub/sub. Subscribe before queries run; returned
+  // Query lifecycle pub/sub. Subscribe before queries run; the returned
   // function unsubscribes. Listener errors never break queries.
   $on: {
     (event: 'query', cb: (e: import('./events').QueryEvent) => void | Promise<void>): () => void;

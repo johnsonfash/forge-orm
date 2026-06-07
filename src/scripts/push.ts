@@ -5,16 +5,13 @@ dotenv.config();
 import { detectAdapterKind } from '../adapters/detect';
 import { loadConsumerSchema } from './load-consumer-schema';
 
-// forge:push — dialect-agnostic schema sync. Picks the right adapter from
-// DATABASE_URL and runs the dialect-appropriate migrator against the
-// consumer's schema (resolved via --schema=<path> / FORGE_SCHEMA_PATH /
-// convention-path auto-detect — see load-consumer-schema.ts for the order).
+// Dialect-agnostic schema sync. Adapter is picked from DATABASE_URL.
+// Schema resolution lives in load-consumer-schema.ts.
 //
-//   • mongo    → idempotent index push
-//   • postgres → DDL diff + apply, with pg_advisory_xact_lock so concurrent
-//                runs serialise instead of racing
-//   • mysql    → DDL apply
-//   • sqlite   → DDL apply
+//   mongo    → idempotent index push
+//   postgres → DDL diff + apply, with pg_advisory_xact_lock against races
+//   mysql    → DDL apply
+//   sqlite   → DDL apply
 
 async function main() {
   const url = process.env.DATABASE_URL;
@@ -28,9 +25,8 @@ async function main() {
     process.exit(1);
   }
 
-  // Resolve the consumer's schema ONCE up-front so every adapter sees the
-  // same models. Falls back to forge's bundled sample with a loud warning if
-  // no consumer schema is found — for forge's own monorepo dev/test runs only.
+  // Resolve once so every adapter sees the same models. Falls back to
+  // the bundled sample (with a warning) for forge's own dev/test runs.
   const { schema, source } = loadConsumerSchema();
   console.log(`[forge:push] ${kind} — schema: ${source}`);
 

@@ -1,20 +1,8 @@
 #!/usr/bin/env node
 /* eslint-disable no-console */
-//
-// `forge` — the consumer-facing CLI binary.
-//
-// Subcommands (Prisma-style spacing, not colons):
-//   forge push           Sync the schema to the live DB (idempotent index/DDL push).
-//   forge diff           Report drift between the live DB and the declared schema.
-//   forge diff apply     Generate a reconciliation migration and apply it forward.
-//   forge rollback       Roll back the most-recently applied migration.
-//   forge doctor         Run adapter pre-flight checks (connectivity, perms, etc.).
-//   forge --help
-//
-// The old `forge:push` / `forge:diff` / `forge:diff:apply` / `forge:rollback` npm
-// scripts continue to work for the forge monorepo itself; this binary is what
-// consumers actually call via `npx forge push` after installing forge-orm.
-//
+// `forge` — consumer-facing CLI. Subcommand list lives in help() below.
+// Internal `forge:*` npm scripts (forge:push etc.) point at the same
+// underlying entry points so the monorepo's own dev/test paths still work.
 
 import * as path from 'node:path';
 
@@ -48,7 +36,6 @@ Database is read from DATABASE_URL (in your .env or environment).
 }
 
 async function main() {
-  // Drop the node binary + script path off argv so subcommand parsing is clean.
   const args = process.argv.slice(2);
   if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
     help();
@@ -56,8 +43,7 @@ async function main() {
   }
 
   const cmd = args[0];
-  // Trim the subcommand from the remaining args so each underlying script sees
-  // a clean argv (its own flags only).
+  // Underlying scripts see only their own flags — strip the subcommand.
   process.argv = [process.argv[0], process.argv[1], ...args.slice(1)];
 
   switch (cmd) {
@@ -65,9 +51,7 @@ async function main() {
       await import('./push');
       return;
     case 'diff': {
-      // `forge diff apply` is the second-word combo. Re-route.
       if (args[1] === 'apply') {
-        // Pop the 'apply' word from argv so diff-apply parses cleanly.
         process.argv = [process.argv[0], process.argv[1], ...args.slice(2)];
         await import('./diff-apply');
         return;

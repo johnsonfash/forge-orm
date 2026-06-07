@@ -52,9 +52,8 @@ export interface MongoArtifact {
   //   aggregate:          { pipeline, options? }           — collection.aggregate(pipeline, options)
   args: Record<string, any>;
   // Post-fetch hydration plan when the caller passed `include` or relation
-  // `select`. In Wave 0 these are emitted as informational notes (the IDs to
-  // hydrate aren't known until the primary query runs). Wave 1's IR layer
-  // turns these into typed sub-artifacts with parent-ID placeholders.
+  // `select` — IDs to hydrate aren't known until the primary query runs,
+  // so this is an informational note for downstream tooling.
   hydration?: Array<{ relation: string; via: 'one' | 'many'; target: string; on: string; refs: string }>;
 }
 
@@ -81,11 +80,8 @@ export interface SQLArtifact {
 //
 // A model's compile namespace exposes one method per op, mirroring the args
 // of the corresponding execute method but returning a typed Compiled artifact
-// instead of a Promise<Row>.
-//
-// Wave 0: every adapter currently in scope is Mongo, so the per-model compile
-// surface is `MongoCompileApi`. Wave 2+ introduces `SQLCompileApi` and the
-// CollectionWrapper picks the right one based on which adapter is active.
+// instead of a Promise<Row>. Mongo surface is `MongoCompileApi`, SQL surface
+// is `SQLCompileApi` — CollectionWrapper picks based on the active adapter.
 
 export interface MongoCompileApi<F = any, R = any> {
   findFirst(args?: any): MongoArtifact;

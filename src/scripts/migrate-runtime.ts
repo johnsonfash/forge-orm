@@ -3,9 +3,9 @@ import * as path from 'path';
 import type { ForgeDb } from '../factory';
 import type { SqlFragment } from '../raw-sql';
 
-// Wave 5c — shared runtime for the migration workflow: a portable
-// `_forge_migrations` history table, timestamped up/down files, and helpers
-// to apply/rollback. Used by diff-apply.ts and rollback.ts.
+// Shared runtime for the migration workflow: a portable `_forge_migrations`
+// history table, timestamped up/down files, and apply/rollback helpers.
+// Used by diff-apply.ts and rollback.ts.
 
 export const MIGRATIONS_DIR = path.resolve(process.cwd(), 'migrations');
 

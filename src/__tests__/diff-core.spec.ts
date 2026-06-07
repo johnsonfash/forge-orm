@@ -2,8 +2,8 @@ import { f, model } from '../schema/core';
 import { diffIntrospection, expectedFromSchema, parseIgnoreList } from '../scripts/diff-core';
 import type { DbIntrospection } from '../adapters/types';
 
-// Wave 5b — drift comparator. Uses a tiny ad-hoc schema (diffIntrospection
-// accepts the schema as a parameter) so the assertions are self-contained.
+// Tiny ad-hoc schema — diffIntrospection takes the schema as a param so
+// the suite is self-contained.
 
 const Widget = model('widgets', {
   id: f.id(),

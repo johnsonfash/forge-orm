@@ -88,10 +88,10 @@ dependency small enough to read and fork, full TypeScript autocomplete with no
 generated client to keep in sync, and the option to drop down to raw SQL at any
 time.
 
-forge is **not** a replacement for Prisma or Drizzle in maturity. It is a young
-library with no long production track record. It has fewer features, a smaller
-ecosystem, and no GUI. If you need those, use Prisma or Drizzle. The
-[honest notes](#limitations-and-honest-notes) at the end spell this out.
+forge is **not** a replacement for Prisma or Drizzle in maturity. It has fewer
+features, a smaller ecosystem, and no GUI. If you need those, use Prisma or
+Drizzle. The [honest notes](#limitations-and-honest-notes) at the end spell
+this out.
 
 ---
 

@@ -4,6 +4,23 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite - one code
 path, no codegen, no external query engine.
 
+## 1.3.2 — comment trim + tightened README intro
+
+Source-side cleanup pass. No public-API changes, no behaviour changes — the
+goal was to delete restated-by-name comments, internal release tags
+("Wave N — …") that meant nothing to library users, and section-banner
+markers in files small enough to scroll.
+
+Kept: docstrings on every export, "why this looks weird" notes on subtle
+correctness paths, and the layered-resolver explainer in `load-consumer-schema.ts`
+(genuinely earns its length).
+
+README intro tightened — dropped the redundant "young library with no long
+production track record" line; the limitations section already covers it
+honestly without prefacing the entire pitch with self-deprecation.
+
+All 210 tests still pass.
+
 ## 1.3.1 — `forge diff --ignore` for noisy meta-collections
 
 `forge diff` already filters the migration ledger (`_forge_migrations`) and

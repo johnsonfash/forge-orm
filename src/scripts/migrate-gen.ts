@@ -5,14 +5,12 @@ import { PostgresDialect } from '../adapters/postgres/dialect';
 import { MysqlDialect } from '../adapters/mysql/dialect';
 import { SqliteDialect } from '../adapters/sqlite/dialect';
 
-// Wave 5c — reconciliation migration generator.
+// Reconciliation migration generator. Compares the declared schema to a
+// DbIntrospection snapshot and emits SQL to bring the DB up to the schema
+// (`up`) plus the inverse (`down`). Covers new tables, new columns, new
+// indexes, new FKs, and drops for DB objects the schema removed.
 //
-// Compares the declared forge schema to a live DbIntrospection snapshot and
-// emits the SQL to bring the DB *up to* the schema (forward / `up`) plus the
-// inverse (`down`). Covers the common evolution cases: new tables, new columns,
-// new indexes, new foreign keys (and dropping DB objects the schema removed).
-//
-// Mongo is index-managed via forge:push, not SQL migrations, so this is SQL-only.
+// Mongo is index-managed via forge push, not SQL migrations — SQL-only here.
 
 export interface MigrationPair { up: string; down: string; note: string; }
 
