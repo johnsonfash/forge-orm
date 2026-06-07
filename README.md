@@ -195,8 +195,25 @@ const Post = model('posts', {
 export const schema = { user: User, post: Post } as const;
 ```
 
-Write `as const` on the schema object. It lets TypeScript read the exact model
-and field names, which is what gives you autocomplete and typed results.
+`as const` on the schema object is **defensive, not required**. For the
+pattern shown above — each model bound to its own `const`, then referenced
+from the schema literal — TypeScript already preserves the model types and
+the literal keys, so `db.user.findFirst({ where: { … } })` autocompletes
+either way.
+
+Why we still suggest writing it:
+
+- It future-proofs the call site if you ever inline a model literal or add a
+  string discriminator next to the models (string literals widen to `string`
+  without `as const`).
+- It keeps the schema readable as a fixed set of keys for downstream tooling
+  that does `keyof typeof schema`.
+- It costs nothing.
+
+The library's `SchemaShape` accepts both mutable and readonly schemas — so
+omitting `as const` won't change what types you get for `db.*` accessors or
+for `Row<typeof User>` / `InferCreate<typeof Post>`. It's a habit, not a
+load-bearing token.
 
 ### Models and automatic values (id, timestamps)
 

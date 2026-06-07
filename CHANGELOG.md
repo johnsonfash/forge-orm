@@ -4,6 +4,27 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite - one code
 path, no codegen, no external query engine.
 
+## 1.3.3 — docs: clarify when `as const` actually matters on the schema
+
+The README previously told readers to write `as const` on the schema object
+"so TypeScript reads the model and field names" — which implied autocomplete
+broke without it. That's not true for the recommended pattern (each model
+bound to its own `const`, then referenced from the schema literal): TypeScript
+already preserves the model types and the literal keys.
+
+The schema-section now spells out the actual situation:
+
+- `SchemaShape = Record<string, TypedModel<…>>` accepts both mutable and
+  readonly maps.
+- Without `as const`, you still get `db.user.findFirst({ where: { … } })`
+  autocomplete, `Row<typeof User>`, `InferCreate<typeof Post>`, all of it.
+- `as const` is worth writing anyway — it future-proofs against inlined
+  models, string discriminators that would otherwise widen to `string`,
+  and downstream `keyof typeof schema` consumers — but it's defensive,
+  not load-bearing.
+
+No code changes.
+
 ## 1.3.2 — comment trim + tightened README intro
 
 Source-side cleanup pass. No public-API changes, no behaviour changes — the
