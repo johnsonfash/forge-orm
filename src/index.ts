@@ -1,5 +1,3 @@
-// Public surface for the forge library.
-
 export { createDb } from './factory';
 export type { ForgeDb, CreateDbOptions, CreateDbOptionsUrl, CreateDbOptionsStructured } from './factory';
 export type { Adapter, AdapterKind, AdapterCapabilities, DoctorReport } from './adapters/types';
@@ -85,11 +83,11 @@ export { buildPostgresCompileApi } from './adapters/postgres/compile';
 export { forgeSql, isSqlFragment, compileSqlFragment } from './raw-sql';
 export type { SqlFragment, CompiledRawSql } from './raw-sql';
 
-// Wave 4 — observability event types. Subscribe via db.$on('query'|'error', cb).
+// Observability event types. Subscribe via db.$on('query'|'error', cb).
 export type { QueryEvent, ErrorEvent, EventListener } from './events';
 export { ForgeEmitter } from './events';
-// Wave 4b — OpenTelemetry helper (structural — works with any tracer that
-// has startSpan; doesn't require @opentelemetry/api as a dependency).
+// OpenTelemetry helper (structural — works with any tracer exposing
+// startSpan; @opentelemetry/api stays optional).
 export { wireOtel } from './observability/otel';
 export type { OtelTracer, OtelSpan, WireOtelOptions } from './observability/otel';
 

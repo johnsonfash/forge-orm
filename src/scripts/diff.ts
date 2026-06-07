@@ -6,23 +6,11 @@ import { createDb } from '../factory';
 import { diffIntrospection, formatDriftReport, parseIgnoreList } from './diff-core';
 import { loadConsumerSchema } from './load-consumer-schema';
 
-// forge:diff — drift detection. Introspects the live database (chosen from
-// DATABASE_URL) and compares it to the declared forge schema, reporting
-// structural drift across all four dialects.
-//
-// Flags:
-//   --json                  machine-readable output (for CI / tooling)
-//   --check                 exit non-zero (3) when drift is found (default: informational, exit 0)
-//   --ignore=<list>         comma-separated tables/collections to skip — exact
-//                           names or regex like `/^_atlas_/i`. Stacks with the
-//                           `FORGE_DIFF_IGNORE` env var.
-//
-// Catches the "someone ALTER'd the DB outside forge" class of bug, and is the
-// read-only sibling of forge:diff:apply (Wave 5c), which reconciles the drift.
+// Read-only drift detection. Read-write sibling is forge:diff:apply.
+// User-facing flag docs live on `forge --help` (./forge-cli.ts).
 
 function readIgnoreFlag(): string | undefined {
-  // Accept both `--ignore=foo,bar` and `--ignore foo,bar` shapes so flag
-  // parsing matches the rest of the CLI surface.
+  // Accept both `--ignore=foo,bar` and `--ignore foo,bar`.
   for (let i = 0; i < process.argv.length; i++) {
     const a = process.argv[i];
     if (a.startsWith('--ignore=')) return a.slice('--ignore='.length);
@@ -39,9 +27,8 @@ async function main() {
   }
   const asJson = process.argv.includes('--json');
   const gate = process.argv.includes('--check');
-  // Merge CLI flag + env var. CLI wins precedence-wise but both contribute
-  // — env covers the CI-fleet case ("ignore Atlas metadata everywhere"),
-  // flag covers ad-hoc local runs.
+  // CLI flag stacks on top of the env var so a fleet-wide ignore can
+  // be extended for a single run without overwriting it.
   const ignore = [
     ...parseIgnoreList(readIgnoreFlag()),
     ...parseIgnoreList(process.env.FORGE_DIFF_IGNORE),

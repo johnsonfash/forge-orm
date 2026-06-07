@@ -5,14 +5,13 @@ import type {
 } from '../adapters/types';
 import type { FieldDef, ModelDef, RelationDef } from '../schema/types';
 
-// Wave 5b — pure (no-IO) drift comparator.
+// Pure (no-IO) drift comparator.
 //
-// `expectedFromSchema` derives what forge:push WOULD create from the schema.
-// `diffIntrospection` compares it to a live DbIntrospection snapshot and
-// reports structural drift: missing/extra tables, columns, indexes, FKs, views.
+// `expectedFromSchema` derives what forge push would create from the schema.
+// `diffIntrospection` compares it to a live DbIntrospection snapshot.
 //
-// Type/default comparison is deliberately coarse (mapped to categories) and
-// skipped on SQLite (dynamic typing) so the report never cries wolf.
+// Type comparison is deliberately coarse (mapped to categories) and skipped
+// on SQLite + Mongo so the report doesn't cry wolf on dynamic typing.
 
 export interface DriftItem {
   kind: 'table' | 'column' | 'index' | 'foreignKey' | 'view' | 'columnType';
@@ -84,8 +83,6 @@ export function parseIgnoreList(raw: string | undefined | null): IgnoreSpec {
   return out;
 }
 
-// ── Expected-shape derivation ──────────────────────────────────────────────
-
 interface ExpectedTable {
   name: string;
   columns: Map<string, FieldDef>;
@@ -150,11 +147,8 @@ export function expectedFromSchema(schema: Record<string, any>): {
   return { tables, views };
 }
 
-// ── Comparator ──────────────────────────────────────────────────────────────
-
-// Map a forge field kind + a DB-reported type token onto a coarse category so
-// type comparison survives dialect differences. Returns undefined when we
-// can't confidently categorise (then we don't flag a mismatch).
+// Coarse categories so type comparison survives dialect quirks. Returns
+// undefined for shapes we can't confidently categorise — then we don't flag.
 function fieldCategory(kind: string): string | undefined {
   switch (kind) {
     case 'id': case 'objectId': case 'string': case 'text': case 'uuid': case 'enum': return 'string';
@@ -246,10 +240,8 @@ export function diffIntrospection(
     }
   }
 
-  // Extra tables in DB not in schema. Built-in skips: the migration
-  // ledger and engine-generated FTS shadows. User-supplied `ignore`
-  // patterns drop noisy meta-collections (Atlas, system.*, cross-
-  // service tables) without inheriting them into the schema.
+  // Extra tables. Built-in skips: migration ledger + FTS shadows.
+  // User patterns suppress noisy meta-collections on top.
   for (const [name] of actualTables) {
     if (expected.tables.has(name)) continue;
     if (expected.views.some((v) => v.name === name)) continue;  // matview-backing table
@@ -275,8 +267,6 @@ export function diffIntrospection(
     ignored: ignored.length > 0 ? ignored : undefined,
   };
 }
-
-// ── Pretty printer ────────────────────────────────────────────────────────
 
 export function formatDriftReport(r: DriftReport): string {
   const ignoredTail =
