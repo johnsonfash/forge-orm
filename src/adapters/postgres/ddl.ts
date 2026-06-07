@@ -161,10 +161,15 @@ function buildCreateTable(d: Dialect, m: ModelDef<any>): DDLStatement {
 function renderColumn(d: Dialect, name: string, field: FieldDef): string {
   const colName = d.quoteIdent(name);
   const type = d.columnType(field);
-  // Wave 5e — generated columns are computed by the DB; they take neither a
-  // default nor an explicit NOT NULL (the expression governs nullability).
+  // Generated columns are computed by the DB; they take neither a default
+  // nor an explicit NOT NULL (the expression governs nullability).
   if (field.dbGenerated) {
     return `${colName} ${type} GENERATED ALWAYS AS (${field.dbGenerated}) STORED`;
+  }
+  // BIGSERIAL on Postgres expands to BIGINT + sequence + DEFAULT nextval(...)
+  // + NOT NULL all in one — appending any of those again is a syntax error.
+  if (field.kind === 'id' && field.idType === 'bigserial') {
+    return `${colName} ${type}`;
   }
   const nullable = field.optional ? '' : ' NOT NULL';
   const def = renderDefault(field);

@@ -87,17 +87,42 @@ const make = <T, K extends FieldKind>(kind: K): Field<T, K> =>
     updatedAt: false,
   });
 
+// Primary-key strategies. `bigserial` is the only one that flips the JS-side
+// row type from string → number; the others stay string-shaped so consumers
+// can still pass UUIDs around as opaque tokens.
+export type IdTypeName = 'auto' | 'uuid' | 'bigserial';
+export type IdJsType<T extends IdTypeName> = T extends 'bigserial' ? number : string;
+export interface IdFactory {
+  (): Field<string, 'id'>;
+  <T extends IdTypeName>(opts: { type: T }): Field<IdJsType<T>, 'id'>;
+}
+
 export const f = {
   // Primary key. Default behaviour: string in app, ObjectId in db, mapped to/from `_id`,
   // auto-generated at create time when no value is supplied.
-  id: () =>
-    new Field<string, 'id'>({
+  //
+  // Passing `{ type: 'uuid' }` switches to a DB-side default (PG
+  // gen_random_uuid(), MySQL UUID(); SQLite + Mongo fall back to the
+  // app-side autogen).
+  //
+  // Passing `{ type: 'bigserial' }` switches to an auto-incrementing
+  // integer key (PG BIGSERIAL, MySQL BIGINT AUTO_INCREMENT, SQLite
+  // INTEGER PRIMARY KEY AUTOINCREMENT). The JS type becomes `number`
+  // and no app-side id is generated — the DB assigns it on insert.
+  // Throws at push time on Mongo (intentional: Mongo has no
+  // auto-incrementing scalar id concept).
+  id: (<T extends IdTypeName = 'auto'>(opts?: { type?: T }) => {
+    const idType: IdTypeName = opts?.type ?? 'auto';
+    return new Field<IdJsType<T>, 'id'>({
       kind: 'id',
       optional: false,
       unique: true,
       updatedAt: false,
-      default: { kind: 'autoId' },
-    }),
+      // bigserial is DB-assigned — no app-side default.
+      ...(idType === 'bigserial' ? {} : { default: { kind: 'autoId' as const } }),
+      idType,
+    });
+  }) as IdFactory,
 
   // Foreign key style — string in app, ObjectId in db.
   objectId: () => make<string, 'objectId'>('objectId'),

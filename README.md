@@ -230,18 +230,54 @@ passing an `id`, forge generates one automatically on **every** database:
 await db.user.create({ data: { email: 'a@x.co', name: 'A' } });  // id is generated
 ```
 
-The generated id is a **string**: an `ObjectId` on Mongo, and a UUID on
-Postgres, MySQL, and SQLite. It is a string (not a sequential number) so the
+The default id is a **string**: an `ObjectId` on Mongo, and a UUID on
+Postgres, MySQL, and SQLite. It's a string (not a sequential number) so the
 same model is portable across all four databases. You can still pass your own
-`id` if you want to control it, and you can let the database generate it instead
-with a UUID default:
+`id` if you want to control it, and you can let the database generate it
+instead with a UUID default:
 
 ```ts
 id: f.uuid({ default: 'gen_random_uuid' })   // Postgres/MySQL fill it in server-side
 ```
 
-(An auto-incrementing integer key is SQL-only and would not work on Mongo, so it
-is not built in.)
+#### Picking a primary-key strategy
+
+If you want something other than the default, pass `f.id({ type })`:
+
+```ts
+id: f.id()                            // default — app-generated string id (string in TS)
+id: f.id({ type: 'auto' })            // same as the default; explicit form
+id: f.id({ type: 'uuid' })            // DB-typed UUID column (PG `uuid`, MySQL `CHAR(36)`)
+id: f.id({ type: 'bigserial' })       // auto-incrementing integer PK — number in TS
+```
+
+What each one emits per dialect:
+
+| Strategy     | Postgres                       | MySQL                              | SQLite                                  | Mongo            | JS type  |
+| ------------ | ------------------------------ | ---------------------------------- | --------------------------------------- | ---------------- | -------- |
+| `auto` (default) | `text`                     | `VARCHAR(64)`                      | `TEXT`                                  | `ObjectId`       | `string` |
+| `uuid`       | `uuid`                         | `CHAR(36)`                         | `TEXT`                                  | (same as `auto`) | `string` |
+| `bigserial`  | `BIGSERIAL`                    | `BIGINT NOT NULL AUTO_INCREMENT`   | `INTEGER PRIMARY KEY AUTOINCREMENT`     | **throws at push** | `number` |
+
+`bigserial` is the SQL-only opt-in. Forge runs `forge push` on Mongo with a
+clear error if you use it (`'bigserial' has no Mongo equivalent`), so a
+schema mistake fails fast instead of half-applying. Use it when you're
+running a SQL-only service and you want classic integer keys; stay on
+`auto` or `uuid` for cross-DB portability.
+
+With `bigserial`, the DB assigns the id — you don't pass one at create time,
+and `Row<typeof Model>['id']` is typed as `number`:
+
+```ts
+const Order = model('orders', {
+  id:     f.id({ type: 'bigserial' }),    // PG fills with nextval, MySQL with AUTO_INCREMENT, SQLite with the rowid alias
+  total:  f.int(),
+});
+
+const o = await db.order.create({ data: { total: 5_000 } });
+o.id;          // ✓ number — TypeScript knows
+await db.order.findFirst({ where: { id: 47 } });
+```
 
 **Created-at (`f.dateTime().default('now')`).** Set to the current time when the
 row is created. You never pass it.
@@ -265,7 +301,7 @@ Mongo it stores an `ObjectId`; on SQL it is plain text.
 
 | Builder                              | Type in your code | Notes                                                                 |
 | ------------------------------------ | ----------------- | --------------------------------------------------------------------- |
-| `f.id()`                             | `string`          | Primary key, auto-generated when omitted (see above).                 |
+| `f.id()`                             | `string`          | Primary key, auto-generated when omitted. Pass `{ type: 'uuid' \| 'bigserial' }` to switch strategy. |
 | `f.objectId()`                       | `string`          | A reference to another row's id (foreign key).                        |
 | `f.string()`                         | `string`          | Short text. On MySQL this is `VARCHAR(255)` so it can be indexed.     |
 | `f.text()`                           | `string`          | Long text. On MySQL this is `TEXT`.                                   |

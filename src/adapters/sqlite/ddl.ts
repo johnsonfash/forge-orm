@@ -139,12 +139,19 @@ function buildCreateTable(m: ModelDef<any>, schema: SchemaMap): DDLStatement {
   const table = m.collection;
   const cols: string[] = [];
   let pkField: string | undefined;
+  let pkInline = false;
   for (const [name, fdef] of Object.entries(m.fields)) {
     const field = fdef as FieldDef;
     cols.push(renderColumn(name, field));
-    if (field.kind === 'id') pkField = name;
+    if (field.kind === 'id') {
+      pkField = name;
+      // SQLite quirk: AUTOINCREMENT only works when PRIMARY KEY is
+      // declared inline on the column. renderColumn does that for
+      // bigserial; suppress the table-level PRIMARY KEY clause here.
+      if (field.idType === 'bigserial') pkInline = true;
+    }
   }
-  if (pkField) cols.push(`PRIMARY KEY (${d.quoteIdent(pkField)})`);
+  if (pkField && !pkInline) cols.push(`PRIMARY KEY (${d.quoteIdent(pkField)})`);
 
   // Enum CHECKs inline
   for (const [name, fdef] of Object.entries(m.fields)) {
@@ -192,10 +199,15 @@ function renderColumn(name: string, field: FieldDef): string {
   const d = SqliteDialect;
   const colName = d.quoteIdent(name);
   const type = d.columnType(field);
-  // Wave 5e — SQLite generated column (3.31+). STORED keeps it on disk so it's
+  // SQLite generated column (3.31+). STORED keeps it on disk so it's
   // introspectable/indexable like the SQL engines.
   if (field.dbGenerated) {
     return `${colName} ${type} GENERATED ALWAYS AS (${field.dbGenerated}) STORED`;
+  }
+  // bigserial — inline PK + AUTOINCREMENT. NOT NULL is implied by PRIMARY
+  // KEY here; adding it explicitly would also be valid but redundant.
+  if (field.kind === 'id' && field.idType === 'bigserial') {
+    return `${colName} ${type} PRIMARY KEY AUTOINCREMENT`;
   }
   const nullable = field.optional ? '' : ' NOT NULL';
   const def = renderDefault(field);

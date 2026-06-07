@@ -29,7 +29,13 @@ export const SqliteDialect: Dialect = {
 
   columnType(field: FieldDef) {
     switch (field.kind) {
-      case 'id':         return 'TEXT';
+      case 'id':
+        // bigserial → INTEGER (rowid-aliased — the ddl builder writes
+        // `PRIMARY KEY AUTOINCREMENT` inline on the column rather than as
+        // a separate clause, because SQLite only honours autoincrement
+        // when the PK is declared on the column itself).
+        if (field.idType === 'bigserial') return 'INTEGER';
+        return 'TEXT';
       case 'objectId':   return 'TEXT';
       case 'string':     return 'TEXT';
       case 'text':       return 'TEXT';

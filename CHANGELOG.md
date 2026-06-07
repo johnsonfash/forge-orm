@@ -4,6 +4,61 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite - one code
 path, no codegen, no external query engine.
 
+## 1.4.0 — primary-key strategy: `f.id({ type: 'auto' | 'uuid' | 'bigserial' })`
+
+`f.id()` has always produced a string — ObjectId on Mongo, UUID on SQL —
+because that was the only thing portable across all four databases. SQL-only
+users who wanted classic auto-incrementing integer keys had to either give up
+that wish or work around forge with raw DDL.
+
+`f.id()` now takes an options bag with a `type` argument that picks the
+underlying strategy:
+
+```ts
+id: f.id()                       // default — string id, ObjectId/UUID per dialect
+id: f.id({ type: 'auto' })       // explicit form of the default
+id: f.id({ type: 'uuid' })       // PG `uuid`, MySQL `CHAR(36)`, SQLite TEXT
+id: f.id({ type: 'bigserial' })  // PG BIGSERIAL, MySQL BIGINT AUTO_INCREMENT,
+                                 // SQLite INTEGER PRIMARY KEY AUTOINCREMENT
+                                 // — JS type becomes `number`
+```
+
+**`bigserial` is the SQL-only opt-in.** Forge throws at `forge push` time on
+Mongo with a clear error rather than half-applying — `bigserial` has no Mongo
+equivalent, and silently falling back would surprise consumers far more than a
+loud failure. Use `auto` or `uuid` if you need cross-DB portability.
+
+Type narrowing:
+
+```ts
+const Order = model('orders', {
+  id:    f.id({ type: 'bigserial' }),
+  total: f.int(),
+});
+type Row = InferRow<typeof Order>;  // { id: number; total: number }
+
+const o = await db.order.create({ data: { total: 5_000 } });
+o.id;          // number — TypeScript knows
+await db.order.findFirst({ where: { id: 47 } });
+```
+
+Implementation notes:
+
+- DDL emission lives in each dialect's `columnType` + the dialect's
+  `renderColumn` for the bigserial-only "no default, no separate NOT NULL"
+  rules. PG and MySQL keep the standard table-level `PRIMARY KEY` clause;
+  SQLite renders the PK inline on the column (SQLite quirk: `AUTOINCREMENT`
+  only works inline).
+- App-side autogen is dropped for `bigserial` — `data` never includes the id
+  on insert, the DB assigns it, and the existing PG/SQLite `RETURNING *` plus
+  MySQL `insertId` paths surface the generated value back to the caller.
+- The Mongo push runs a single pre-flight pass over every model's fields and
+  throws on the first `bigserial` id it sees.
+
+13 new specs across the four dialects + the schema-level type narrowing.
+Total 223 tests pass. Additive non-breaking — the default `f.id()` shape is
+unchanged.
+
 ## 1.3.3 — docs: clarify when `as const` actually matters on the schema
 
 The README previously told readers to write `as const` on the schema object

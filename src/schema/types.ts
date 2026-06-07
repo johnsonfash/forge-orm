@@ -57,6 +57,21 @@ export interface FieldDef {
   //   Mongo → ignored (warned at push). A dbGenerated column is never written by
   //   the client; the wrapper drops it from inbound create/update data.
   dbGenerated?: string;
+  // v1.4.0 — primary-key strategy on `id` fields. Only meaningful when
+  // `kind === 'id'`; ignored on every other field. Drives the DDL emission
+  // (string column vs auto-incrementing integer) and whether the client
+  // generates an app-side id at create time.
+  //
+  //   'auto'      — default. App-generated ObjectId on Mongo / UUID on SQL.
+  //                 Stable across all four dialects. JS type: string.
+  //   'uuid'      — DB-side UUID default (PG gen_random_uuid(), MySQL
+  //                 UUID()). On SQLite + Mongo, equivalent to 'auto'.
+  //                 JS type: string.
+  //   'bigserial' — DB-side auto-incrementing integer. PG BIGSERIAL, MySQL
+  //                 BIGINT AUTO_INCREMENT, SQLite INTEGER PRIMARY KEY
+  //                 AUTOINCREMENT. Throws on Mongo at push time. JS type:
+  //                 number — `where: { id: 47 }` autocompletes accordingly.
+  idType?: 'auto' | 'uuid' | 'bigserial';
 }
 
 export type IndexKey = 1 | -1 | 'text';

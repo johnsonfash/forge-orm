@@ -221,6 +221,23 @@ export async function pushAllIndexes(consumerSchema?: any): Promise<void> {
   const db = dbClient.db;
   const schema = consumerSchema ?? bundledSampleSchema;
 
+  // bigserial is SQL-only by definition (auto-incrementing scalar). Throw
+  // up-front with a clear message rather than letting the schema land
+  // half-pushed.
+  for (const [key, model] of Object.entries(schema)) {
+    const m = model as ModelDef<any>;
+    for (const [fname, fdef] of Object.entries(m.fields ?? {})) {
+      const f = fdef as any;
+      if (f?.kind === 'id' && f?.idType === 'bigserial') {
+        throw new Error(
+          `[forge:push:mongo] model '${key}' (collection '${m.collection}') uses ` +
+          `f.id({ type: 'bigserial' }) on field '${fname}', which has no Mongo ` +
+          `equivalent. Use 'auto' or 'uuid' for Mongo-compatible schemas.`,
+        );
+      }
+    }
+  }
+
   let created = 0,
     skipped = 0,
     rebuilt = 0,
