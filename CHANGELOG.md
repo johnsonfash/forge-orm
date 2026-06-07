@@ -4,6 +4,29 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite - one code
 path, no codegen, no external query engine.
 
+## 1.4.1 — docs: surface 1.4's PK strategies at the top of the README
+
+The strategy table + worked example shipped with 1.4.0 but lived deep in the
+schema section, four scrolls down from the hero. A new user landing on the
+README could easily assume forge was UUID/ObjectId-only and bounce.
+
+Added an explicit "What's new in 1.4" callout right under the pitch:
+
+- All three strategies (`auto`, `uuid`, `bigserial`) shown inline.
+- The three `forge` commands you'd actually run to apply it (`push`, `diff`,
+  `diff apply`).
+- The "Mongo throws — use auto/uuid for portability" caveat surfaced
+  alongside, not buried under it.
+
+The detailed strategy table further down stays unchanged — it now has a deep
+link from the callout for readers who want the full per-dialect breakdown.
+
+The worked `bigserial` example also got a three-step layout so the
+push command appears in context (declare → push → use), making it
+obvious nothing new is needed in the CLI.
+
+No code changes.
+
 ## 1.4.0 — primary-key strategy: `f.id({ type: 'auto' | 'uuid' | 'bigserial' })`
 
 `f.id()` has always produced a string — ObjectId on Mongo, UUID on SQL —

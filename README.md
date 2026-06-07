@@ -37,6 +37,7 @@ Mongo connection string. forge picks the right driver from the URL.
 ## Contents
 
 * [What forge is, and what it is not](#what-forge-is-and-what-it-is-not)
+  * [What's new in 1.4](#whats-new-in-14)
 * [Install and pick your driver](#install-and-pick-your-driver)
 * [Connecting](#connecting)
 * [Defining a schema](#defining-a-schema)
@@ -92,6 +93,36 @@ forge is **not** a replacement for Prisma or Drizzle in maturity. It has fewer
 features, a smaller ecosystem, and no GUI. If you need those, use Prisma or
 Drizzle. The [honest notes](#limitations-and-honest-notes) at the end spell
 this out.
+
+### What's new in 1.4
+
+**Primary-key strategies on `f.id()`.** SQL-only services can now pick the
+classic auto-incrementing integer PK without writing raw DDL. UUIDs and
+ObjectIds still work the same way; everything else is unchanged.
+
+```ts
+id: f.id()                            // default — string id, ObjectId on Mongo, UUID on SQL
+id: f.id({ type: 'uuid' })            // DB-typed UUID (PG `uuid`, MySQL `CHAR(36)`)
+id: f.id({ type: 'bigserial' })       // PG BIGSERIAL / MySQL BIGINT AUTO_INCREMENT
+                                      // / SQLite INTEGER PRIMARY KEY AUTOINCREMENT
+                                      // — JS type narrows to `number`
+```
+
+Apply the change with the same migration commands you already use — nothing
+new to learn:
+
+```sh
+npx forge push                # creates / alters the column with the right dialect-specific DDL
+npx forge diff                # shows the schema → DB difference before pushing (optional pre-flight)
+npx forge diff apply          # generates a reconciliation migration if you prefer migrations files
+```
+
+`bigserial` is **SQL-only** by definition. Forge throws at `forge push` time
+on Mongo with a clear error — there's no Mongo equivalent and silent fallback
+would surprise more than loud failure. Use `auto` or `uuid` if you need
+cross-DB portability.
+
+Full table + worked example: [Picking a primary-key strategy](#picking-a-primary-key-strategy).
 
 ---
 
@@ -269,15 +300,29 @@ With `bigserial`, the DB assigns the id — you don't pass one at create time,
 and `Row<typeof Model>['id']` is typed as `number`:
 
 ```ts
+// 1. declare it in your schema
 const Order = model('orders', {
   id:     f.id({ type: 'bigserial' }),    // PG fills with nextval, MySQL with AUTO_INCREMENT, SQLite with the rowid alias
   total:  f.int(),
 });
+```
 
+```sh
+# 2. push the schema to your database
+npx forge push
+# emits the right DDL per dialect; on Mongo this errors with a clear message
+```
+
+```ts
+// 3. use it from the typed client
 const o = await db.order.create({ data: { total: 5_000 } });
 o.id;          // ✓ number — TypeScript knows
 await db.order.findFirst({ where: { id: 47 } });
 ```
+
+Adding `bigserial` to an existing table? `forge diff` shows you the column
+change before you push, and `forge diff apply` writes a timestamped
+reconciliation migration if you'd rather review the SQL first.
 
 **Created-at (`f.dateTime().default('now')`).** Set to the current time when the
 row is created. You never pass it.
