@@ -4,6 +4,38 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite - one code
 path, no codegen, no external query engine.
 
+## 1.3.1 — `forge diff --ignore` for noisy meta-collections
+
+`forge diff` already filters the migration ledger (`_forge_migrations`) and
+engine-generated FTS shadows (`*_fts`). Every project also accumulates a few
+collections it doesn't want diff to flag forever — Atlas metadata, cross-service
+tables, change-stream tokens — and there was no way to suppress them without
+inheriting them into your schema. This release adds a user-supplied ignore list.
+
+**New CLI flag + env var on `forge diff`:**
+
+```sh
+# exact names + regex (/.../flags), comma-separated
+npx forge diff --ignore=sessions,logs,/^_atlas_/i
+
+# env var works the same; CLI flag stacks on top
+export FORGE_DIFF_IGNORE='/^_/i,external_events'
+npx forge diff
+```
+
+Ignored tables surface at the end of the report (`ignored 2 tables: logs,
+sessions`) so silent filtering can't hide real drift. When everything that
+*would* be drift is in the ignore list, the report goes back to `✓ no drift`
+and exits 0 under `--check`.
+
+**Programmatic API:** `diffIntrospection(schema, introspection, ignore?)`
+accepts an `IgnoreSpec` (`Array<string | RegExp>`). `parseIgnoreList(str)`
+parses the same comma-separated form the CLI/env take, so callers can mix both.
+
+7 new specs cover literal/regex matching, the ignored-as-only-drift → in-sync
+case, malformed-regex fallback, and the report's `ignored` summary. Existing
+191 unit + 163 integration tests untouched.
+
 ## 1.3.0 — direct-from-model type inference (`Infer*` family)
 
 Take a `typeof MyModel` and pull out any input/output shape you need —

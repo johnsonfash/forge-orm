@@ -27,6 +27,8 @@ Usage:
   forge diff                  Show drift between the live DB and your schema
   forge diff --json           Same, machine-readable
   forge diff --check          Exit non-zero (3) if drift is found (for CI)
+  forge diff --ignore=<list>  Skip noisy tables (exact names or /regex/ — env
+                              var FORGE_DIFF_IGNORE works the same way)
   forge diff apply            Generate + run a reconciliation migration
   forge rollback              Roll back the most-recent applied migration
   forge doctor                Pre-flight adapter checks

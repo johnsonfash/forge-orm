@@ -699,17 +699,38 @@ forge can create your tables from the schema and reconcile changes later. After
 installing `forge-orm`, the `forge` binary is on your `PATH` via `npx`:
 
 ```sh
-npx forge push           # create or update tables, indexes, and constraints to match the schema
-npx forge diff           # report differences between the live database and the schema
-npx forge diff --json    # the same as machine-readable JSON
-npx forge diff --check   # exit non-zero if there is drift (useful in CI)
-npx forge diff apply     # generate and run a migration that reconciles the difference
-npx forge rollback       # undo the most recent applied migration
-npx forge doctor         # adapter pre-flight checks
+npx forge push                              # create or update tables, indexes, and constraints to match the schema
+npx forge diff                              # report differences between the live database and the schema
+npx forge diff --json                       # the same as machine-readable JSON
+npx forge diff --check                      # exit non-zero if there is drift (useful in CI)
+npx forge diff --ignore=logs,/^_atlas_/i    # skip noisy meta-collections (see "Ignoring drift" below)
+npx forge diff apply                        # generate and run a migration that reconciles the difference
+npx forge rollback                          # undo the most recent applied migration
+npx forge doctor                            # adapter pre-flight checks
 npx forge --help
 ```
 
 `DATABASE_URL` is read from your `.env` or environment.
+
+### Ignoring drift on `forge diff`
+
+The migration ledger (`_forge_migrations`) and engine-generated FTS shadows
+(`*_fts`) are always skipped. Anything else you want hidden from the report —
+Atlas metadata, system collections, tables managed by a sibling service — goes
+through `--ignore=` or the `FORGE_DIFF_IGNORE` env var:
+
+```sh
+# exact names + a regex pattern, comma-separated
+npx forge diff --ignore=sessions,logs,/^_atlas_/i
+
+# env var works the same way; CLI flag stacks on top
+export FORGE_DIFF_IGNORE='/^_/i,external_events'
+npx forge diff
+```
+
+Patterns wrapped in `/.../flags` are treated as regex; everything else is an
+exact-match string. Ignored tables are summarised at the end of the report
+(`ignored 2 tables: logs, sessions`) so silent filtering can't hide real drift.
 
 ### Pointing the CLI at your schema
 

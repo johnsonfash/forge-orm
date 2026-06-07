@@ -137,6 +137,21 @@ export type { Row } from './schema/core';
 // ─── Errors ─────────────────────────────────────────────────────────────────
 export { DbKnownError } from './adapters/mongo/errors';
 
+// ─── Drift detection (programmatic API behind `forge diff`) ─────────────────
+// Re-exported so tooling that wraps forge diff (CI gates, dashboards,
+// custom remediation scripts) doesn't have to fork the comparator.
+export {
+  diffIntrospection,
+  expectedFromSchema,
+  formatDriftReport,
+  parseIgnoreList,
+} from './scripts/diff-core';
+export type {
+  DriftItem,
+  DriftReport,
+  IgnoreSpec,
+} from './scripts/diff-core';
+
 // Convenience alias: re-export ForgeModels under the Forge name for users who
 // prefer that. (ForgeModels is the real thing, derived from schema, no codegen.)
 export type { ForgeModels as Forge } from './forge-types';
