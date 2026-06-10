@@ -883,20 +883,34 @@ export function parseDuration(spec: string | undefined): number | undefined {
 }
 
 // Internal: stringify ObjectId leaks in aggregation output.
+// Dates and other BSON scalar types (Decimal128, Binary, …) pass through
+// untouched — recursing into them would flatten them to `{}` since they
+// have no enumerable keys.
 function stringifyObjectIds(doc: any): any {
   if (doc == null || typeof doc !== 'object') return doc;
+  if (doc instanceof Date) return doc;
+  if (doc._bsontype === 'ObjectId') return doc.toString();
+  if (doc._bsontype) return doc;
   const out: any = Array.isArray(doc) ? [] : {};
   for (const k of Object.keys(doc)) {
     const v = (doc as any)[k];
+    const key = k === '_id' ? 'id' : k;
     if (v && typeof v === 'object' && v._bsontype === 'ObjectId') {
-      out[k === '_id' ? 'id' : k] = v.toString();
+      out[key] = v.toString();
+    } else if (v instanceof Date) {
+      out[key] = v;
+    } else if (v && typeof v === 'object' && v._bsontype) {
+      out[key] = v;
     } else if (v && typeof v === 'object') {
-      out[k === '_id' ? 'id' : k] = stringifyObjectIds(v);
+      out[key] = stringifyObjectIds(v);
     } else {
-      out[k === '_id' ? 'id' : k] = v;
+      out[key] = v;
     }
   }
   return out;
 }
 
 export { DbKnownError };
+
+// Exported for unit tests only — not part of the public API.
+export { stringifyObjectIds as __stringifyObjectIds };
