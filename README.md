@@ -40,6 +40,7 @@ Mongo connection string. forge picks the right driver from the URL.
   * [What's new](#whats-new)
 * [Install and pick your driver](#install-and-pick-your-driver)
 * [Connecting](#connecting)
+  * [Alternative drivers (React Native, edge)](#alternative-drivers-react-native-edge)
 * [Defining a schema](#defining-a-schema)
   * [Models and automatic values (id, timestamps)](#models-and-automatic-values-id-timestamps)
   * [Field types](#field-types)
@@ -99,6 +100,11 @@ this out.
 
 Full release history is in [CHANGELOG.md](./CHANGELOG.md). Recent highlights:
 
+- **1.7 — pluggable SQLite drivers.** Run forge in React Native (`expo-sqlite`,
+  `op-sqlite`), on the edge / Turso (`libsql`), or over any driver you wrap —
+  not just Node's `better-sqlite3`. Pass `createDb({ driver })`; everything
+  routes through one normalized async port. See
+  [Alternative drivers](#alternative-drivers-react-native-edge).
 - **1.6 — richer aggregates.** `groupBy`'s `having` now accepts both Prisma's
   field-first shape (`{ total: { _sum: { gte: 1 } } }`) **and** the bucket-first
   shape (`{ _sum: { total: { gte: 1 } } }`), and `count({ distinct: [...] })` is
@@ -183,6 +189,46 @@ You can also pass connection parts instead of a URL:
 ```ts
 await createDb({ type: 'postgres', host: 'localhost', database: 'app', user: 'me', schema });
 ```
+
+### Alternative drivers (React Native, edge)
+
+By default the SQLite adapter uses `better-sqlite3` — a native Node module that
+doesn't run in React Native or edge runtimes. For those, hand forge a **driver**
+instead of a URL: you open the underlying driver (you own its config and
+lifecycle), wrap it with one of forge's adapters, and pass it as `driver`. forge
+talks to every SQLite driver through one normalized async port, so the query
+API is identical regardless of which you use.
+
+```ts
+import { createDb, expoSqliteDriver } from 'forge-orm';
+import * as SQLite from 'expo-sqlite';
+
+const db = await createDb({
+  schema,
+  driver: expoSqliteDriver(SQLite.openDatabaseSync('app.db')),   // no url needed
+});
+```
+
+Built-in SQLite drivers:
+
+| Runtime                  | Wrapper                  | Underlying package              |
+| ------------------------ | ------------------------ | ------------------------------- |
+| Node (default)           | `betterSqlite3Driver`    | `better-sqlite3`                |
+| Expo / React Native      | `expoSqliteDriver`       | `expo-sqlite`                   |
+| Bare React Native        | `opSqliteDriver`         | `@op-engineering/op-sqlite`     |
+| Edge / serverless / Turso| `libsqlDriver`           | `@libsql/client`                |
+
+```ts
+import { createClient } from '@libsql/client';
+import { createDb, libsqlDriver } from 'forge-orm';
+
+const db = await createDb({ schema, driver: libsqlDriver(createClient({ url: process.env.TURSO_URL! })) });
+```
+
+Anything that isn't covered fits the same `SqliteDriver` interface (`all`, `get`,
+`run`, `exec`, `close`, optional `iterate`) — implement those five methods and
+forge will drive it. Schema creation works the same way: pass the adapter's
+`.db` (the wrapped driver) to the SQLite migrator.
 
 ---
 

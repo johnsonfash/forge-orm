@@ -47,7 +47,17 @@ export interface CreateDbOptionsStructured {
   schema?: SchemaShape;
 }
 
-export type CreateDbOptions = CreateDbOptionsUrl | CreateDbOptionsStructured;
+// Bring-your-own-driver: hand forge a pre-wrapped driver port (expo-sqlite,
+// op-sqlite, libsql, …) instead of a URL. The driver's `kind` selects the
+// adapter; `url` is optional and only used as a label.
+export interface CreateDbOptionsDriver {
+  driver: import('./adapters/sqlite/driver').SqliteDriver;
+  url?: string;
+  strict?: boolean;
+  schema?: SchemaShape;
+}
+
+export type CreateDbOptions = CreateDbOptionsUrl | CreateDbOptionsStructured | CreateDbOptionsDriver;
 
 // CollectionFor resolves a model to its wrapper, threading the whole schema
 // map S so nested include/select on this model's relations resolve against the
@@ -110,7 +120,15 @@ export async function createDb<S extends SchemaShape = SchemaMap>(
 }
 
 async function pickAndConnect(opts: CreateDbOptions): Promise<{ adapter: Adapter; url: string }> {
-  const url = 'url' in opts ? opts.url : buildUrlFromStructured(opts);
+  // Injected driver path — kind comes from the driver, no URL detection.
+  if ('driver' in opts && opts.driver) {
+    const kind = opts.driver.kind;
+    const label = opts.url ?? `${kind}:injected`;
+    const adapter = instantiateAdapter(kind, opts.driver);
+    await adapter.connect(label);
+    return { adapter, url: label };
+  }
+  const url = 'url' in opts && opts.url ? opts.url : buildUrlFromStructured(opts as CreateDbOptionsStructured);
   const kind = ('type' in opts && opts.type) || detectAdapterKind(url);
   if (!kind) {
     throw new Error(
@@ -132,7 +150,10 @@ async function pickAndConnect(opts: CreateDbOptions): Promise<{ adapter: Adapter
   return { adapter, url };
 }
 
-function instantiateAdapter(kind: AdapterKind): Adapter {
+function instantiateAdapter(
+  kind: AdapterKind,
+  driver?: import('./adapters/sqlite/driver').SqliteDriver,
+): Adapter {
   switch (kind) {
     case 'mongo':
       return new MongoAdapter();
@@ -141,7 +162,7 @@ function instantiateAdapter(kind: AdapterKind): Adapter {
     case 'mysql':
       return new MysqlAdapter();
     case 'sqlite':
-      return new SqliteAdapter();
+      return new SqliteAdapter(driver);
   }
 }
 

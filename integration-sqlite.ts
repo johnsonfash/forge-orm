@@ -356,9 +356,9 @@ async function main() {
     console.log('\n[wave-4b]');
 
     await scenario('.searchable() body field auto-emits FTS5 virtual table', async () => {
-      const r: any = sqliteDb.prepare(
-        `SELECT name FROM sqlite_master WHERE name = 'posts_fts' AND type IN ('table','virtual')`,
-      ).all();
+      const r: any = await sqliteDb.all(
+        `SELECT name FROM sqlite_master WHERE name = 'posts_fts' AND type IN ('table','virtual')`, [],
+      );
       assert(r.length >= 1, `expected posts_fts virtual table, got: ${JSON.stringify(r)}`);
     });
 
@@ -367,7 +367,7 @@ async function main() {
       await db.auditLog.delete({ where: { id: log.id } });
       const visible = await db.auditLog.findFirst({ where: { id: log.id } });
       assert(visible === null, `expected hidden after soft-delete`);
-      const raw: any = sqliteDb.prepare('SELECT deleted_at FROM audit_logs WHERE id = ?').get(log.id);
+      const raw: any = await sqliteDb.get('SELECT deleted_at FROM audit_logs WHERE id = ?', [log.id]);
       assert(raw?.deleted_at != null, `expected deleted_at set on raw row`);
     });
 
@@ -401,9 +401,9 @@ async function main() {
     console.log('\n[wave-4c]');
 
     await scenario('CREATE VIEW emitted for publishedPosts', async () => {
-      const r: any = sqliteDb.prepare(
-        `SELECT name FROM sqlite_master WHERE type = 'view' AND name = 'published_posts'`,
-      ).all();
+      const r: any = await sqliteDb.all(
+        `SELECT name FROM sqlite_master WHERE type = 'view' AND name = 'published_posts'`, [],
+      );
       assert(r.length === 1, `expected published_posts view`);
     });
 

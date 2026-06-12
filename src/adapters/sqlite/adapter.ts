@@ -8,30 +8,28 @@ import {
   executeSqliteInsert,
   executeSqliteSelect,
   executeSqliteUpdate,
-  type SqliteDb,
   type SqliteExecOpts,
 } from './execute';
 import { withSqliteErrors } from './errors';
 import { SqliteDialect } from './dialect';
+import { betterSqlite3Driver, type SqliteDriver } from './driver';
 
-// SQLiteAdapter — wraps better-sqlite3 (sync driver) in forge's async contract.
+// SQLiteAdapter — drives a SqliteDriver port (driver.ts). By default it opens
+// better-sqlite3 from the connection URL; a pre-wrapped driver (expo-sqlite,
+// op-sqlite, libsql, …) can be injected via createDb({ driver }) instead, in
+// which case the URL is ignored.
 //
-// Connection-string forms accepted:
-//   sqlite:./app.db                   → ./app.db relative to cwd
-//   sqlite:/abs/path/app.db           → absolute path
-//   sqlite::memory:                    → in-process, gone on close
-//   file:./app.db                      → same as sqlite:
-//   ./app.db (bare path ending .db)   → also recognised by detectAdapterKind
+// Connection-string forms (default driver): sqlite:./app.db | sqlite:/abs.db |
+// sqlite::memory: | file:./app.db | ./app.db
 //
-// Cascade gotcha: ON DELETE CASCADE is only honoured when
-// `PRAGMA foreign_keys = ON` is set per-connection. Set at connect();
-// the migrator re-sets it for safety.
+// Cascade gotcha: ON DELETE CASCADE only fires with `PRAGMA foreign_keys = ON`,
+// set per-connection at connect() and re-set by the migrator.
 
 const CAPS: AdapterCapabilities = {
-  nativeCascades: true,            // via FK ON DELETE clauses, with pragma
-  nativeUpsert: true,              // ON CONFLICT (col) DO UPDATE (3.24+)
-  nullsOrdering: true,             // NULLS FIRST/LAST (3.30+)
-  jsonPath: true,                  // json_*() functions
+  nativeCascades: true,
+  nativeUpsert: true,
+  nullsOrdering: true,
+  jsonPath: true,
   transactionsRequireReplicaSet: false,
 };
 
@@ -39,48 +37,57 @@ export class SqliteAdapter implements Adapter {
   readonly kind = 'sqlite' as const;
   readonly capabilities = CAPS;
   readonly emitter: ForgeEmitter = new ForgeEmitter();
-  private _db?: SqliteDb;
+  private _db?: SqliteDriver;
   private _url?: string;
+
+  // An injected driver bypasses better-sqlite3 entirely (React Native / edge).
+  constructor(private _injected?: SqliteDriver) {}
 
   async connect(url: string): Promise<void> {
     this._url = url;
-    const filename = this._urlToFilename(url);
-    const sqlite = loadDriver('sqlite', url);
-    const Database = (sqlite as any).default ?? sqlite;
-    this._db = new Database(filename) as SqliteDb;
-    this._db.pragma('foreign_keys = ON');   // required for cascades to fire
-    this._db.pragma('journal_mode = WAL');  // better concurrent read perf
+    if (this._injected) {
+      this._db = this._injected;
+    } else {
+      const filename = this._urlToFilename(url);
+      const sqlite = loadDriver('sqlite', url);
+      const Database = (sqlite as any).default ?? sqlite;
+      this._db = betterSqlite3Driver(new Database(filename));
+      await this._db.exec('PRAGMA journal_mode = WAL');  // file driver only
+    }
+    await this._db.exec('PRAGMA foreign_keys = ON');      // required for cascades
   }
 
   async close(): Promise<void> {
-    if (this._db && (this._db as any).close) (this._db as any).close();
+    if (this._db) await this._db.close();
     this._db = undefined;
   }
 
   async doctor(): Promise<DoctorReport> {
-    const driver = isDriverInstalled('sqlite');
+    const injected = !!this._injected;
+    const driver = injected ? { installed: true, version: undefined } : isDriverInstalled('sqlite');
     return {
       kind: 'sqlite',
-      driverPackage: 'better-sqlite3',
+      driverPackage: injected ? '(injected driver)' : 'better-sqlite3',
       driverInstalled: driver.installed,
       driverVersion: driver.version,
       connectionString: this._url,
       capabilities: CAPS,
       notes: [
-        'Embedded — no server, no port. "Database" is the file you point at.',
-        'Synchronous driver: forge wraps each call in Promise.resolve() to match the async Adapter contract.',
-        'Concurrent writers serialise via SQLite\'s file lock; reads are concurrent under WAL mode.',
+        injected
+          ? 'Custom driver injected via createDb({ driver }) — e.g. expo-sqlite, op-sqlite, libsql.'
+          : 'Embedded — no server, no port. "Database" is the file you point at.',
+        'Queries route through a normalized async driver port, so sync (better-sqlite3) and async (RN/edge) drivers share one code path.',
       ],
     };
   }
 
-  get db(): SqliteDb {
+  get db(): SqliteDriver {
     if (!this._db) throw new Error('[forge:sqlite] db accessed before connect() resolved');
     return this._db;
   }
 
   private sqliteOpts(opts?: ExecOpts): SqliteExecOpts {
-    return opts?.session ? { db: opts.session as SqliteDb } : {};
+    return opts?.session ? { db: opts.session as SqliteDriver } : {};
   }
 
   private async _track<T>(
@@ -134,15 +141,18 @@ export class SqliteAdapter implements Adapter {
       (r) => r.length);
   }
 
-  // Streaming via better-sqlite3's stmt.iterate() — yields rows without
-  // materialising the result set.
+  // Stream via the driver's native cursor when it exposes one (better-sqlite3
+  // stmt.iterate()); otherwise materialise via all() — still one yield per row.
   async *streamSelect(node: any, model: any, _opts?: ExecOpts): AsyncIterable<any> {
     const { compileSelect } = await import('./compile-from-ir');
-    const a = compileSelect(node, model);
-    const stmt = this.db.prepare(a.sql);
-    const iter = (stmt as any).iterate(...a.params);
     const { decodeRow } = await import('./execute');
-    for (const row of iter) yield decodeRow(model, row);
+    const a = compileSelect(node, model);
+    if (this.db.iterate) {
+      for await (const row of this.db.iterate(a.sql, a.params)) yield decodeRow(model, row);
+    } else {
+      const rows = await this.db.all(a.sql, a.params);
+      for (const row of rows) yield decodeRow(model, row);
+    }
   }
 
   async applyProjectionAndHydration(): Promise<void> { /* no-op; executor does it */ }
@@ -150,29 +160,28 @@ export class SqliteAdapter implements Adapter {
   async $queryRaw(fragment: import('../../raw-sql').SqlFragment, opts?: ExecOpts): Promise<any[]> {
     const { compileSqlFragment } = await import('../../raw-sql');
     const { sql, params } = compileSqlFragment(fragment, 'sqlite');
-    const exec = (opts?.session as SqliteDb | undefined) ?? this.db;
-    return withSqliteErrors(() => exec.prepare(sql).all(...params));
+    const exec = (opts?.session as SqliteDriver | undefined) ?? this.db;
+    return withSqliteErrors(() => exec.all(sql, params));
   }
 
   async $executeRaw(fragment: import('../../raw-sql').SqlFragment, opts?: ExecOpts): Promise<number> {
     const { compileSqlFragment } = await import('../../raw-sql');
     const { sql, params } = compileSqlFragment(fragment, 'sqlite');
-    const exec = (opts?.session as SqliteDb | undefined) ?? this.db;
-    const r = await withSqliteErrors(() => exec.prepare(sql).run(...params));
+    const exec = (opts?.session as SqliteDriver | undefined) ?? this.db;
+    const r = await withSqliteErrors(() => exec.run(sql, params));
     return r.changes;
   }
 
-  // better-sqlite3's .transaction() helper only takes sync callbacks, so we
-  // drive BEGIN/COMMIT/ROLLBACK directly to support async ones. The db handle
-  // is passed back via ExecOpts.session so nested calls share the txn state.
+  // Drive BEGIN/COMMIT/ROLLBACK explicitly (portable across drivers). The driver
+  // handle is passed back via ExecOpts.session so nested calls share the txn.
   async $transaction<T>(fn: (session: unknown) => Promise<T>): Promise<T> {
-    this.db.exec('BEGIN');
+    await this.db.exec('BEGIN');
     try {
       const result = await fn(this.db);
-      this.db.exec('COMMIT');
+      await this.db.exec('COMMIT');
       return result;
     } catch (err) {
-      try { this.db.exec('ROLLBACK'); } catch { /* swallow */ }
+      try { await this.db.exec('ROLLBACK'); } catch { /* swallow */ }
       throw err;
     }
   }
@@ -207,18 +216,22 @@ export class SqliteAdapter implements Adapter {
     // PRAGMA foreign_keys = ON is set at connect; cascades happen in-engine.
   }
 
-  // Table-backed materialised view refresh: clear + re-populate from the
-  // view's SELECT body, in a transaction.
+  // Table-backed materialised view refresh: clear + re-populate from the view's
+  // SELECT body, in a transaction (portable BEGIN/COMMIT, no driver helper).
   async refreshView(model: any, opts?: ExecOpts): Promise<void> {
     const sql = model?.view?.sql;
     if (!sql) throw new Error(`[forge:sqlite] '${model?.collection}' has no view SQL to refresh`);
-    const db = (opts?.session as SqliteDb | undefined) ?? this.db;
+    const db = (opts?.session as SqliteDriver | undefined) ?? this.db;
     const q = `"${String(model.collection).replace(/"/g, '""')}"`;
-    const tx = (db as any).transaction(() => {
-      db.exec(`DELETE FROM ${q}`);
-      db.exec(`INSERT INTO ${q} ${sql}`);
-    });
-    tx();
+    await db.exec('BEGIN');
+    try {
+      await db.exec(`DELETE FROM ${q}`);
+      await db.exec(`INSERT INTO ${q} ${sql}`);
+      await db.exec('COMMIT');
+    } catch (err) {
+      try { await db.exec('ROLLBACK'); } catch { /* swallow */ }
+      throw err;
+    }
   }
 
   async introspect(): Promise<import('../types').DbIntrospection> {
@@ -236,7 +249,6 @@ export class SqliteAdapter implements Adapter {
   }
 }
 
-// Lazily-built singleton for callers who don't construct via createDb().
 let _default: SqliteAdapter | undefined;
 export function getDefaultSqliteAdapter(): SqliteAdapter {
   if (!_default) _default = new SqliteAdapter();
