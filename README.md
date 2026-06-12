@@ -100,6 +100,9 @@ this out.
 
 Full release history is in [CHANGELOG.md](./CHANGELOG.md). Recent highlights:
 
+- **1.8 — pluggable Postgres drivers.** Use `postgres.js` (porsager) instead of
+  `node-postgres`, or any client you wrap, via `createDb({ driver: postgresJsDriver(...) })`.
+  Same port idea as 1.7. See [Alternative drivers](#alternative-drivers-react-native-edge).
 - **1.7 — pluggable SQLite drivers.** Run forge in React Native (`expo-sqlite`,
   `op-sqlite`), on the edge / Turso (`libsql`), or over any driver you wrap —
   not just Node's `better-sqlite3`. Pass `createDb({ driver })`; everything
@@ -229,6 +232,22 @@ Anything that isn't covered fits the same `SqliteDriver` interface (`all`, `get`
 `run`, `exec`, `close`, optional `iterate`) — implement those five methods and
 forge will drive it. Schema creation works the same way: pass the adapter's
 `.db` (the wrapped driver) to the SQLite migrator.
+
+**Postgres** is pluggable the same way. The default is `node-postgres` (`pg`);
+to use [`postgres.js`](https://github.com/porsager/postgres) instead, wrap it
+with `postgresJsDriver`:
+
+```ts
+import postgres from 'postgres';
+import { createDb, postgresJsDriver } from 'forge-orm';
+
+const db = await createDb({ schema, driver: postgresJsDriver(postgres(process.env.DATABASE_URL!)) });
+```
+
+The `PostgresDriver` port is `query` + `transaction` + `close` (optional
+`stream`). Note: `forge push` / `applyMigration` currently assume the default
+`pg` pool; with an injected Postgres driver, run your runtime queries through
+forge and manage DDL separately (or with `pg`).
 
 ---
 

@@ -8,6 +8,10 @@ export {
   betterSqlite3Driver, expoSqliteDriver, opSqliteDriver, libsqlDriver, isSqliteDriver,
 } from './adapters/sqlite/driver';
 export type { SqliteDriver } from './adapters/sqlite/driver';
+// Pluggable Postgres drivers — pg (default) or postgres.js.
+//   createDb({ schema, driver: postgresJsDriver(postgres(url)) })
+export { pgDriver, postgresJsDriver, isPostgresDriver } from './adapters/postgres/driver';
+export type { PostgresDriver, PgQueryable } from './adapters/postgres/driver';
 export type { Adapter, AdapterKind, AdapterCapabilities, DoctorReport } from './adapters/types';
 export { ForgeMissingDriverError } from './adapters/missing-driver';
 export { detectAdapterKind } from './adapters/detect';

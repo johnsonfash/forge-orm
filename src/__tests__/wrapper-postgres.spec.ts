@@ -2,6 +2,7 @@ import { f, model, rel } from '../schema/core';
 import type { ModelDef } from '../schema/types';
 import { CollectionWrapper } from '../builder/collection';
 import { PostgresAdapter } from '../adapters/postgres/adapter';
+import { pgDriver } from '../adapters/postgres/driver';
 
 // Wave 2c-2 end-to-end check: drive a CollectionWrapper through the Postgres
 // adapter (via a fake pg pool) and assert the queries that flow through.
@@ -34,10 +35,12 @@ function mkFakePool(scripts: Array<{ rows: any[]; rowCount?: number | null }>) {
 }
 
 // Wire a PostgresAdapter to the fake pool without going through connect()
-// (which would try to load the real `pg` driver).
+// (which would try to load the real `pg` driver). Inject through the driver
+// port — the same path createDb({ driver }) uses.
 function adapterWithPool(pool: any): PostgresAdapter {
   const ad = new PostgresAdapter();
-  (ad as any)._pool = pool;
+  (ad as any)._driver = pgDriver(pool);
+  (ad as any)._rawPool = pool;
   return ad;
 }
 

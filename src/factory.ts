@@ -51,7 +51,9 @@ export interface CreateDbOptionsStructured {
 // op-sqlite, libsql, …) instead of a URL. The driver's `kind` selects the
 // adapter; `url` is optional and only used as a label.
 export interface CreateDbOptionsDriver {
-  driver: import('./adapters/sqlite/driver').SqliteDriver;
+  driver:
+    | import('./adapters/sqlite/driver').SqliteDriver
+    | import('./adapters/postgres/driver').PostgresDriver;
   url?: string;
   strict?: boolean;
   schema?: SchemaShape;
@@ -152,17 +154,19 @@ async function pickAndConnect(opts: CreateDbOptions): Promise<{ adapter: Adapter
 
 function instantiateAdapter(
   kind: AdapterKind,
-  driver?: import('./adapters/sqlite/driver').SqliteDriver,
+  driver?:
+    | import('./adapters/sqlite/driver').SqliteDriver
+    | import('./adapters/postgres/driver').PostgresDriver,
 ): Adapter {
   switch (kind) {
     case 'mongo':
       return new MongoAdapter();
     case 'postgres':
-      return new PostgresAdapter();
+      return new PostgresAdapter(driver as import('./adapters/postgres/driver').PostgresDriver | undefined);
     case 'mysql':
       return new MysqlAdapter();
     case 'sqlite':
-      return new SqliteAdapter(driver);
+      return new SqliteAdapter(driver as import('./adapters/sqlite/driver').SqliteDriver | undefined);
   }
 }
 
