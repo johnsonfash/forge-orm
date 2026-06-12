@@ -1,5 +1,5 @@
 import type { DDLStatement } from '../postgres/ddl';
-import type { SqliteDb } from './execute';
+import type { SqliteDriver } from './driver';
 
 // SQLite migration runner.
 //
@@ -14,7 +14,7 @@ export interface ApplyReport {
 }
 
 export async function applyMigration(
-  db: SqliteDb,
+  db: SqliteDriver,
   ddl: DDLStatement[],
   opts: { logger?: (line: string) => void } = {},
 ): Promise<ApplyReport> {
@@ -22,22 +22,20 @@ export async function applyMigration(
 
   // foreign_keys pragma is session-scoped; re-set here so a freshly-opened DB
   // during migration still enforces ON DELETE CASCADE etc.
-  db.pragma('foreign_keys = ON');
+  await db.exec('PRAGMA foreign_keys = ON');
 
   const applied: string[] = [];
   const skipped: string[] = [];
   const failures: ApplyReport['failures'] = [];
 
   const existingTables = new Set<string>(
-    (db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as any[])
-      .map((r) => r.name),
+    (await db.all(`SELECT name FROM sqlite_master WHERE type = 'table'`, [])).map((r) => r.name),
   );
   const existingIndexes = new Set<string>(
-    (db.prepare(`SELECT name FROM sqlite_master WHERE type = 'index'`).all() as any[])
-      .map((r) => r.name),
+    (await db.all(`SELECT name FROM sqlite_master WHERE type = 'index'`, [])).map((r) => r.name),
   );
 
-  db.exec('BEGIN');
+  await db.exec('BEGIN');
   try {
     for (const stmt of ddl) {
       const present = stmt.kind === 'table'
@@ -48,7 +46,7 @@ export async function applyMigration(
         continue;
       }
       try {
-        db.exec(stmt.sql);
+        await db.exec(stmt.sql);
         applied.push(stmt.name);
         log(`  ✓ ${stmt.kind.padEnd(11)} ${stmt.name}`);
       } catch (err: any) {
@@ -58,9 +56,9 @@ export async function applyMigration(
         // conservative default as PG's apply).
       }
     }
-    db.exec('COMMIT');
+    await db.exec('COMMIT');
   } catch (err) {
-    try { db.exec('ROLLBACK'); } catch { /* ignore */ }
+    try { await db.exec('ROLLBACK'); } catch { /* ignore */ }
     throw err;
   }
 

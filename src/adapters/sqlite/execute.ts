@@ -18,31 +18,18 @@ import {
   compileUpdate,
 } from './compile-from-ir';
 import { withSqliteErrors } from './errors';
+import type { SqliteDriver } from './driver';
 
-// SQLite IR executor.
-//
-// `better-sqlite3` is SYNCHRONOUS — no Promises, no mid-query yield. We wrap
-// calls to satisfy forge's async executor surface; it isn't truly concurrent.
-// The sync driver is the fast path for a local file (no I/O to overlap).
+// SQLite IR executor. Talks to a SqliteDriver port (see driver.ts), so it works
+// over a synchronous driver (better-sqlite3) or an async one (expo-sqlite,
+// op-sqlite, libsql) without change — every call is awaited.
 
-// Minimal shape of better-sqlite3.Database the executor uses (stubbable in tests).
-export interface SqliteDb {
-  prepare(sql: string): SqliteStatement;
-  pragma(name: string): unknown;
-  exec(sql: string): unknown;
-  inTransaction?: boolean;
-}
-
-export interface SqliteStatement {
-  all(...params: unknown[]): any[];
-  get(...params: unknown[]): any;
-  run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint };
-}
+// Retained as an alias: callers still refer to `SqliteDb` as the handle type.
+export type SqliteDb = SqliteDriver;
 
 export interface SqliteExecOpts {
-  // Inside a $transaction the same db handle is passed back here — better-sqlite3
-  // has no per-call sessions; transactions are implicit via BEGIN/COMMIT.
-  db?: SqliteDb;
+  // Inside a $transaction the same driver handle is passed back here.
+  db?: SqliteDriver;
 }
 
 // SQLite returns bools as 0/1, dates as ISO strings, JSON columns as strings;
@@ -76,8 +63,8 @@ function safeParse(s: string): any {
 }
 
 // Encode params for the driver: dates → ISO strings, bools → 0/1, JSON-ish
-// values → JSON.stringify. Mostly a safety net for raw queries; the compiler
-// already coerces known schema fields.
+// values → JSON.stringify. The compiler already coerces known schema fields;
+// this is the safety net for raw queries.
 function encodeParams(params: unknown[]): unknown[] {
   return params.map((v) => {
     if (v == null) return v;
@@ -92,16 +79,14 @@ function encodeParams(params: unknown[]): unknown[] {
 }
 
 export async function executeSqliteSelect(
-  db: SqliteDb,
+  db: SqliteDriver,
   node: SelectNode,
   model: ModelDef<any>,
   opts: SqliteExecOpts = {},
 ): Promise<any[]> {
   const exec = opts.db ?? db;
   const artifact = compileSelect(node, model);
-  const raw = await withSqliteErrors(() =>
-    exec.prepare(artifact.sql).all(...encodeParams(artifact.params)),
-  );
+  const raw = await withSqliteErrors(() => exec.all(artifact.sql, encodeParams(artifact.params)));
   let rows = raw.map((r) => decodeRow(model, r));
   if (node.distinct?.length) rows = dedupeBy(rows, node.distinct);
   if (node.projection?.counts?.length) await applyRelationCounts(exec, rows, model, node.projection.counts);
@@ -110,30 +95,26 @@ export async function executeSqliteSelect(
 }
 
 export async function executeSqliteCount(
-  db: SqliteDb,
+  db: SqliteDriver,
   node: CountNode,
   model: ModelDef<any>,
   opts: SqliteExecOpts = {},
 ): Promise<number> {
   const exec = opts.db ?? db;
   const artifact = compileCount(node, model);
-  const r = await withSqliteErrors(() =>
-    exec.prepare(artifact.sql).get(...encodeParams(artifact.params)),
-  );
+  const r = await withSqliteErrors(() => exec.get(artifact.sql, encodeParams(artifact.params)));
   return Number(r?.count ?? 0);
 }
 
 export async function executeSqliteGroupBy(
-  db: SqliteDb,
+  db: SqliteDriver,
   node: GroupByNode,
   model: ModelDef<any>,
   opts: SqliteExecOpts = {},
 ): Promise<any[]> {
   const exec = opts.db ?? db;
   const artifact = compileGroupBy(node, model);
-  const rows = await withSqliteErrors(() =>
-    exec.prepare(artifact.sql).all(...encodeParams(artifact.params)),
-  );
+  const rows = await withSqliteErrors(() => exec.all(artifact.sql, encodeParams(artifact.params)));
   return rows.map((r) => reshapeGroupByRow(r, node.by));
 }
 
@@ -152,54 +133,48 @@ function reshapeGroupByRow(row: any, byCols: string[]): any {
 // Writes use RETURNING * (SQLite 3.35+, 2021).
 
 export async function executeSqliteInsert(
-  db: SqliteDb,
+  db: SqliteDriver,
   node: InsertNode,
   model: ModelDef<any>,
   opts: SqliteExecOpts = {},
 ): Promise<{ docs: any[]; count: number }> {
   const exec = opts.db ?? db;
   const artifact = compileInsert(node, model);
-  const raw = await withSqliteErrors(() =>
-    exec.prepare(artifact.sql).all(...encodeParams(artifact.params)),
-  );
+  const raw = await withSqliteErrors(() => exec.all(artifact.sql, encodeParams(artifact.params)));
   const docs = raw.map((r) => decodeRow(model, r));
   return { docs, count: docs.length };
 }
 
 export async function executeSqliteUpdate(
-  db: SqliteDb,
+  db: SqliteDriver,
   node: UpdateNode,
   model: ModelDef<any>,
   opts: SqliteExecOpts = {},
 ): Promise<{ doc?: any; count: number }> {
   const exec = opts.db ?? db;
   const artifact = compileUpdate(node, model);
-  const raw = await withSqliteErrors(() =>
-    exec.prepare(artifact.sql).all(...encodeParams(artifact.params)),
-  );
+  const raw = await withSqliteErrors(() => exec.all(artifact.sql, encodeParams(artifact.params)));
   const decoded = raw.map((r) => decodeRow(model, r));
   if (node.many) return { count: decoded.length };
   return { doc: decoded[0], count: decoded.length };
 }
 
 export async function executeSqliteDelete(
-  db: SqliteDb,
+  db: SqliteDriver,
   node: DeleteNode,
   model: ModelDef<any>,
   opts: SqliteExecOpts = {},
 ): Promise<{ doc?: any; count: number }> {
   const exec = opts.db ?? db;
   const artifact = compileDelete(node, model);
-  const raw = await withSqliteErrors(() =>
-    exec.prepare(artifact.sql).all(...encodeParams(artifact.params)),
-  );
+  const raw = await withSqliteErrors(() => exec.all(artifact.sql, encodeParams(artifact.params)));
   const decoded = raw.map((r) => decodeRow(model, r));
   if (node.many) return { count: decoded.length };
   return { doc: decoded[0], count: decoded.length };
 }
 
 async function hydrate(
-  db: SqliteDb,
+  db: SqliteDriver,
   rows: any[],
   parentModel: ModelDef<any>,
   hydration: RelationPlan[],
@@ -216,7 +191,7 @@ async function hydrate(
 }
 
 async function hydrateOne(
-  db: SqliteDb,
+  db: SqliteDriver,
   rows: any[],
   rel: RelationPlan,
   targetModel: ModelDef<any>,
@@ -241,7 +216,7 @@ async function hydrateOne(
 }
 
 async function hydrateMany(
-  db: SqliteDb,
+  db: SqliteDriver,
   rows: any[],
   rel: RelationPlan,
   targetModel: ModelDef<any>,
@@ -270,7 +245,7 @@ async function hydrateMany(
 }
 
 async function applyRelationCounts(
-  db: SqliteDb,
+  db: SqliteDriver,
   rows: any[],
   parentModel: ModelDef<any>,
   counts: string[],
@@ -288,7 +263,7 @@ async function applyRelationCounts(
     // SQLite supports IN (?, ?, ?, …) but not ANY($1) array syntax.
     const placeholders = refs.map(() => '?').join(', ');
     const sql = `SELECT "${rel.on}" AS fk, COUNT(*) AS c FROM "${targetModel.collection}" WHERE "${rel.on}" IN (${placeholders}) GROUP BY "${rel.on}"`;
-    const groups = await withSqliteErrors(() => db.prepare(sql).all(...encodeParams(refs)));
+    const groups = await withSqliteErrors(() => db.all(sql, encodeParams(refs)));
     const byFk = new Map<string, number>();
     for (const g of groups) byFk.set(String(g.fk), Number(g.c));
     for (const r of rows) r._count[relName] = byFk.get(String(r[rel.refs])) ?? 0;

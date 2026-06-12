@@ -4,6 +4,36 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite - one code
 path, no codegen, no external query engine.
 
+## 1.7.0 — pluggable SQLite drivers (React Native, edge, Turso)
+
+The SQLite adapter no longer hard-depends on `better-sqlite3` (a native Node
+module that can't run in React Native or edge runtimes). All SQLite access now
+goes through a normalized async **driver port** (`SqliteDriver`), and you can
+hand forge any driver that implements it:
+
+```ts
+import { createDb, libsqlDriver } from 'forge-orm';
+import { createClient } from '@libsql/client';
+
+const db = await createDb({ schema, driver: libsqlDriver(createClient({ url })) });
+```
+
+Built-in wrappers: `betterSqlite3Driver` (default, Node), `expoSqliteDriver`
+(Expo/RN), `opSqliteDriver` (bare RN), `libsqlDriver` (libsql/Turso/edge). The
+port is five methods (`all`, `get`, `run`, `exec`, `close`, optional `iterate`),
+so any other driver fits too. Pass the driver via `createDb({ driver })` — no
+URL needed; you own the driver's lifecycle.
+
+- The synchronous `better-sqlite3` path is unchanged and fully backward
+  compatible (all 37 SQLite integration scenarios pass through the port).
+- The async path is verified end-to-end against real libsql
+  (`regression-libsql-driver.ts`): DDL, RETURNING writes, `col()` guards,
+  groupBy/having, `count({ distinct })`, and transactions.
+- Note: `adapters/sqlite` `.db` now exposes the `SqliteDriver` port rather than
+  the raw `better-sqlite3` handle — pass it to `applyMigration` as before.
+
+(PostgreSQL alternative drivers like `postgres.js` are a planned follow-up.)
+
 ## 1.6.1 — housekeeping: trim comments, remove dead legacy code
 
 No behaviour change. A pass over every source file to cut redundant comments

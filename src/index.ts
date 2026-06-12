@@ -1,5 +1,13 @@
 export { createDb } from './factory';
-export type { ForgeDb, CreateDbOptions, CreateDbOptionsUrl, CreateDbOptionsStructured } from './factory';
+export type { ForgeDb, CreateDbOptions, CreateDbOptionsUrl, CreateDbOptionsStructured, CreateDbOptionsDriver } from './factory';
+
+// Pluggable SQLite drivers — wrap your raw driver and pass it as createDb({ driver }).
+//   createDb({ schema, driver: libsqlDriver(client) })          // Turso / edge
+//   createDb({ schema, driver: expoSqliteDriver(SQLite.openDatabaseSync('app.db')) })  // Expo/RN
+export {
+  betterSqlite3Driver, expoSqliteDriver, opSqliteDriver, libsqlDriver, isSqliteDriver,
+} from './adapters/sqlite/driver';
+export type { SqliteDriver } from './adapters/sqlite/driver';
 export type { Adapter, AdapterKind, AdapterCapabilities, DoctorReport } from './adapters/types';
 export { ForgeMissingDriverError } from './adapters/missing-driver';
 export { detectAdapterKind } from './adapters/detect';
