@@ -4,6 +4,13 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite - one code
 path, no codegen, no external query engine.
 
+## 1.9.1 — docs: unify the pluggable-drivers README section
+
+No code change. The README's driver docs grew one release at a time and read as
+"SQLite plus bolt-ons"; they're now a single **Pluggable drivers** section that
+presents all four databases together — one table of every built-in driver, a
+per-database example, and the small port interface each one implements.
+
 ## 1.9.0 — pluggable MySQL + Mongo drivers (and a MySQL guard fix)
 
 All four databases are now pluggable.
