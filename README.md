@@ -40,7 +40,7 @@ Mongo connection string. forge picks the right driver from the URL.
   * [What's new](#whats-new)
 * [Install and pick your driver](#install-and-pick-your-driver)
 * [Connecting](#connecting)
-  * [Alternative drivers (React Native, edge)](#alternative-drivers-react-native-edge)
+  * [Pluggable drivers](#pluggable-drivers)
 * [Defining a schema](#defining-a-schema)
   * [Models and automatic values (id, timestamps)](#models-and-automatic-values-id-timestamps)
   * [Field types](#field-types)
@@ -105,15 +105,15 @@ Full release history is in [CHANGELOG.md](./CHANGELOG.md). Recent highlights:
   own `MongoClient` (`mongoDriver`) for DocumentDB / Cosmos / FerretDB / custom
   options. All four databases are now pluggable. (Also fixed a latent bug: a
   `col()`/non-eq guard on a MySQL `update`/`delete` referenced IR internals as
-  columns.) See [Alternative drivers](#alternative-drivers-react-native-edge).
+  columns.) See [Pluggable drivers](#pluggable-drivers).
 - **1.8 — pluggable Postgres drivers.** Use `postgres.js` (porsager) instead of
   `node-postgres`, or any client you wrap, via `createDb({ driver: postgresJsDriver(...) })`.
-  Same port idea as 1.7. See [Alternative drivers](#alternative-drivers-react-native-edge).
+  Same port idea as 1.7. See [Pluggable drivers](#pluggable-drivers).
 - **1.7 — pluggable SQLite drivers.** Run forge in React Native (`expo-sqlite`,
   `op-sqlite`), on the edge / Turso (`libsql`), or over any driver you wrap —
   not just Node's `better-sqlite3`. Pass `createDb({ driver })`; everything
   routes through one normalized async port. See
-  [Alternative drivers](#alternative-drivers-react-native-edge).
+  [Pluggable drivers](#pluggable-drivers).
 - **1.6 — richer aggregates.** `groupBy`'s `having` now accepts both Prisma's
   field-first shape (`{ total: { _sum: { gte: 1 } } }`) **and** the bucket-first
   shape (`{ _sum: { total: { gte: 1 } } }`), and `count({ distinct: [...] })` is
@@ -199,86 +199,65 @@ You can also pass connection parts instead of a URL:
 await createDb({ type: 'postgres', host: 'localhost', database: 'app', user: 'me', schema });
 ```
 
-### Alternative drivers (React Native, edge)
+### Pluggable drivers
 
-By default the SQLite adapter uses `better-sqlite3` — a native Node module that
-doesn't run in React Native or edge runtimes. For those, hand forge a **driver**
-instead of a URL: you open the underlying driver (you own its config and
-lifecycle), wrap it with one of forge's adapters, and pass it as `driver`. forge
-talks to every SQLite driver through one normalized async port, so the query
-API is identical regardless of which you use.
+All four databases ship a sensible default driver, and all four let you swap in
+another client — for React Native, edge/serverless runtimes, or a managed /
+API-compatible backend. Instead of a URL you open the client yourself (you own
+its config and lifecycle), wrap it with one of forge's driver factories, and
+pass it as `driver`. The query API is identical whichever client backs it.
 
 ```ts
-import { createDb, expoSqliteDriver } from 'forge-orm';
-import * as SQLite from 'expo-sqlite';
-
-const db = await createDb({
-  schema,
-  driver: expoSqliteDriver(SQLite.openDatabaseSync('app.db')),   // no url needed
-});
+const db = await createDb({ schema, driver: someDriver(client) });   // no url needed
 ```
 
-Built-in SQLite drivers:
+Built-in drivers:
 
-| Runtime                  | Wrapper                  | Underlying package              |
-| ------------------------ | ------------------------ | ------------------------------- |
-| Node (default)           | `betterSqlite3Driver`    | `better-sqlite3`                |
-| Expo / React Native      | `expoSqliteDriver`       | `expo-sqlite`                   |
-| Bare React Native        | `opSqliteDriver`         | `@op-engineering/op-sqlite`     |
-| Edge / serverless / Turso| `libsqlDriver`           | `@libsql/client`                |
+| Database  | Default driver                            | Built-in alternatives                                                                 |
+| --------- | ----------------------------------------- | ------------------------------------------------------------------------------------- |
+| SQLite    | `betterSqlite3Driver` (`better-sqlite3`)  | `expoSqliteDriver` (Expo/RN), `opSqliteDriver` (bare RN), `libsqlDriver` (libsql/Turso/edge) |
+| Postgres  | `pgDriver` (`pg`)                          | `postgresJsDriver` (`postgres.js`)                                                     |
+| MySQL     | `mysql2Driver` (`mysql2`)                  | `mariadbDriver` (MariaDB connector), `planetscaleDriver` (`@planetscale/database`)     |
+| MongoDB   | built-in `mongodb` client                 | `mongoDriver(client)` — your own `MongoClient` (DocumentDB, Cosmos, FerretDB, custom)  |
 
 ```ts
+// SQLite on Expo / React Native
+import * as SQLite from 'expo-sqlite';
+import { createDb, expoSqliteDriver } from 'forge-orm';
+const db = await createDb({ schema, driver: expoSqliteDriver(SQLite.openDatabaseSync('app.db')) });
+
+// SQLite on the edge / Turso
 import { createClient } from '@libsql/client';
 import { createDb, libsqlDriver } from 'forge-orm';
-
 const db = await createDb({ schema, driver: libsqlDriver(createClient({ url: process.env.TURSO_URL! })) });
-```
 
-Anything that isn't covered fits the same `SqliteDriver` interface (`all`, `get`,
-`run`, `exec`, `close`, optional `iterate`) — implement those five methods and
-forge will drive it. Schema creation works the same way: pass the adapter's
-`.db` (the wrapped driver) to the SQLite migrator.
-
-**Postgres** is pluggable the same way. The default is `node-postgres` (`pg`);
-to use [`postgres.js`](https://github.com/porsager/postgres) instead, wrap it
-with `postgresJsDriver`:
-
-```ts
+// Postgres via postgres.js
 import postgres from 'postgres';
 import { createDb, postgresJsDriver } from 'forge-orm';
-
 const db = await createDb({ schema, driver: postgresJsDriver(postgres(process.env.DATABASE_URL!)) });
-```
 
-The `PostgresDriver` port is `query` + `transaction` + `close` (optional
-`stream`). Note: `forge push` / `applyMigration` currently assume the default
-`pg` pool; with an injected Postgres driver, run your runtime queries through
-forge and manage DDL separately (or with `pg`).
-
-**MySQL** is pluggable the same way — default is `mysql2`, with `mariadbDriver`
-(MariaDB connector) and `planetscaleDriver` (`@planetscale/database`, serverless)
-built in:
-
-```ts
+// MySQL via the MariaDB connector (pass bigIntAsNumber/insertIdAsNumber for mysql2 parity)
 import mariadb from 'mariadb';
 import { createDb, mariadbDriver } from 'forge-orm';
-
-// Pass bigIntAsNumber/insertIdAsNumber for type parity with mysql2.
 const pool = mariadb.createPool({ host, user, database, bigIntAsNumber: true, insertIdAsNumber: true });
 const db = await createDb({ schema, driver: mariadbDriver(pool) });
-```
 
-**MongoDB** has one canonical driver (`mongodb`), so "pluggable" means bringing
-your own `MongoClient` — for custom options, a shared client, or a Mongo-API
-backend (Amazon DocumentDB, Azure Cosmos DB, FerretDB):
-
-```ts
+// MongoDB with your own client (custom TLS/auth/pool options, a shared client,
+// or a Mongo-API backend: Amazon DocumentDB, Azure Cosmos DB, FerretDB)
 import { MongoClient } from 'mongodb';
 import { createDb, mongoDriver } from 'forge-orm';
-
-const client = new MongoClient(uri, { tls: true, appName: 'svc' });
-const db = await createDb({ schema, driver: mongoDriver(client, 'mydb') });
+const db = await createDb({ schema, driver: mongoDriver(new MongoClient(uri, { tls: true }), 'mydb') });
 ```
+
+Each port is a small interface, so any other client fits too:
+
+* **SQLite** (`SqliteDriver`) — `all`, `get`, `run`, `exec`, `close`, optional `iterate`.
+* **Postgres** (`PostgresDriver`) / **MySQL** (`MysqlDriver`) — `query` + `transaction` + `close`, optional `stream`.
+* **MongoDB** (`MongoDriver`) — a pre-built `MongoClient` (plus an optional database name).
+
+One caveat: `forge push` / `applyMigration` (DDL) still assume each database's
+**default** driver. With an injected driver, run runtime queries through forge
+and manage schema/DDL with the default client (or separately).
 
 ---
 
