@@ -1,30 +1,14 @@
 import type { ModelDef } from '../../schema/types';
 import type { WhereTree, WhereOp } from '../types';
+import { isColRef, colRefField } from '../../col';
 
-// Optional schema map for relation recursion. When provided, buildWhereTree
-// resolves `rel.target` and recurses with the target model so deep relation
-// where (`posts: { some: { author: { is: { ... } } } }`) builds a full tree.
-// When omitted (back-compat with Wave 1a call sites), relation filters are
-// captured but their `nested` tree is built against the parent model — which
-// works for single-level relation filters and degrades gracefully for deeper
-// ones.
+// When provided, buildWhereTree resolves `rel.target` and recurses with the
+// target model so deep relation filters build a full tree. When omitted,
+// relation filters recurse against the parent (works for single-level filters).
 export type SchemaContext = Record<string, ModelDef<any>>;
 
-// Build a WhereTree from a Prisma-shape where object.
-//
-// Rules:
-//   • Bare equality `{ field: value }` → leaf `eq`
-//   • Operator object `{ field: { equals, lt, gte, in, ... } }` → leaf per op
-//   • String mode `{ field: { contains: 'x', mode: 'insensitive' } }` → caseInsensitive flag
-//   • Array ops `{ tags: { has, hasSome, hasEvery, isEmpty } }` → leaf
-//   • Logical `AND/OR/NOT` → child trees
-//   • Relation `{ profile: { is: {...} } | isNot | some | every | none }` → relation node
-//
-// The IR is dialect-agnostic; per-adapter compilers apply field-name mapping
-// (e.g. `id` → `_id` for Mongo, `id` → `"users"."id"` for SQL).
-//
-// Coercion (string id → ObjectId, ISO → Date) happens at compile time, NOT
-// here. The IR carries values verbatim so a SQL adapter can keep them as-is.
+// Build a dialect-agnostic WhereTree from a Prisma-shape where object. Value
+// coercion (string id → ObjectId, ISO → Date) happens at compile time, not here.
 
 const SCALAR_OPS: Record<string, WhereOp> = {
   equals: 'eq',
@@ -45,6 +29,38 @@ const SCALAR_OPS: Record<string, WhereOp> = {
   search: 'search',
 };
 
+// Ops with a portable field-to-field meaning (Mongo `$expr`, SQL `a <op> b`).
+const COL_REF_OPS: ReadonlySet<WhereOp> = new Set<WhereOp>([
+  'eq', 'ne', 'lt', 'lte', 'gt', 'gte',
+]);
+
+// Resolve a `col()` reference. Requiring a declared scalar field gives a clear
+// error on typos and closes the only identifier-injection surface (the value
+// becomes a SQL identifier / Mongo `$field` path downstream).
+function resolveColRef(model: ModelDef<any>, op: WhereOp, ref: unknown): string {
+  if (!COL_REF_OPS.has(op)) {
+    throw new Error(
+      `[forge] col() can only be used with equals/not/lt/lte/gt/gte ` +
+        `(got operator '${op}' on '${model.collection}').`,
+    );
+  }
+  const field = colRefField(ref as any);
+  const fieldDef = model.fields?.[field];
+  if (!fieldDef) {
+    throw new Error(
+      `[forge] col('${field}') references a field that does not exist on ` +
+        `'${model.collection}'.`,
+    );
+  }
+  if ((fieldDef as any).kind === 'relation') {
+    throw new Error(
+      `[forge] col('${field}') must reference a scalar field, not a relation, ` +
+        `on '${model.collection}'.`,
+    );
+  }
+  return field;
+}
+
 export function buildWhereTree(
   model: ModelDef<any>,
   where: any,
@@ -59,7 +75,6 @@ export function buildWhereTree(
     const value = where[key];
     if (value === undefined) continue;
 
-    // ─── Logical ───────────────────────────────────────────────
     if (key === 'AND') {
       const arr = Array.isArray(value) ? value : [value];
       const inner = arr.map((v) => buildWhereTree(model, v, schema)).filter(notUndef);
@@ -80,12 +95,8 @@ export function buildWhereTree(
       continue;
     }
 
-    // ─── Relation filter ───────────────────────────────────────
     const rel = relations[key];
     if (rel && value && typeof value === 'object') {
-      // Resolve the target model when a schema is supplied so nested filters
-      // descend correctly. Otherwise recurse against the parent (Wave 1a
-      // shape — works for single-level filters).
       const targetModel = schema?.[rel.target] ?? model;
       for (const mode of ['is', 'isNot', 'some', 'every', 'none'] as const) {
         if (mode in value) {
@@ -96,24 +107,43 @@ export function buildWhereTree(
       continue;
     }
 
-    // ─── Field condition ───────────────────────────────────────
-    if (value && typeof value === 'object' && !Array.isArray(value) && !isDate(value)) {
-      // Operator object form: { field: { equals, gte, contains, ... } }
+    // Bare col() form `{ field: col('other') }` must be checked before the
+    // operator-object branch: the marker is an object whose Symbol key is
+    // invisible to Object.keys, so it would otherwise parse to an empty filter.
+    if (isColRef(value)) {
+      children.push({
+        kind: 'leaf',
+        field: key,
+        op: 'eq',
+        value: undefined,
+        rhsField: resolveColRef(model, 'eq', value),
+      });
+    } else if (value && typeof value === 'object' && !Array.isArray(value) && !isDate(value)) {
       const insensitive = value.mode === 'insensitive';
       for (const op of Object.keys(value)) {
         if (op === 'mode') continue;
         const irOp = SCALAR_OPS[op];
         if (!irOp) continue;
+        const operand = value[op];
+        if (isColRef(operand)) {
+          children.push({
+            kind: 'leaf',
+            field: key,
+            op: irOp,
+            value: undefined,
+            rhsField: resolveColRef(model, irOp, operand),
+          });
+          continue;
+        }
         children.push({
           kind: 'leaf',
           field: key,
           op: irOp,
-          value: value[op],
+          value: operand,
           caseInsensitive: insensitive || undefined,
         });
       }
     } else {
-      // Bare equality form: { field: value }
       children.push({ kind: 'leaf', field: key, op: 'eq', value });
     }
   }

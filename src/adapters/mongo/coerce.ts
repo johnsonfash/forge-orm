@@ -2,20 +2,16 @@ import type { ObjectId } from 'mongodb';
 import { mongo } from './bson';
 import { FieldDef, ModelDef } from '../../schema/types';
 
-// ============================================================================
 // Coercion: bridges Prisma's app-side shape with Mongo's wire shape.
 //
 // Inbound  (app → db):  string ids → ObjectId, ISO/string dates → Date,
 //                       `id` → `_id`, embedded subdocs recursed, defaults
 //                       applied for create.
-//
 // Outbound (db → app):  ObjectId → string, `_id` → `id`, embedded subdocs
 //                       recursed.
 //
 // The schema (per-model FieldDef map) drives every decision — no global
-// hardcoded field-name lists. A typo in a schema field name is a TS error
-// at the call site; here we just trust the shape.
-// ============================================================================
+// hardcoded field-name lists.
 
 const idStringToObjectId = (v: any): any => {
   if (v == null) return v;
@@ -34,12 +30,9 @@ const dateInToDate = (v: any): any => {
   return v;
 };
 
-// ─── Inbound: filter/data path ──────────────────────────────────────────────
-//
 // Walks a value alongside its target FieldDef (when known) and coerces leaf
 // scalars. For nested operator objects ($in/$gte/etc.) the same field's
 // target type applies to the operator's payload.
-
 export function coerceFieldValue(field: FieldDef | undefined, value: any): any {
   if (value == null || field == null) return value;
 
@@ -101,12 +94,8 @@ function coerceEmbed(value: any, fields: Record<string, FieldDef>): any {
   return out;
 }
 
-// ─── Inbound: top-level helpers ─────────────────────────────────────────────
-//
-// `id` is the public name of `_id`. Everywhere we accept `id` we also need
-// to accept `_id` defensively, but everywhere we *emit* downstream we use
-// `_id` because that's the Mongo on-disk name.
-
+// `id` is the public name of `_id`. We accept `_id` defensively on input but
+// always emit `_id` downstream, since that's the Mongo on-disk name.
 export function appKeyToDbKey(key: string): string {
   return key === 'id' ? '_id' : key;
 }
@@ -122,8 +111,6 @@ export function getFieldDef(
   if (appKey === '_id') return model.fields['id'];
   return model.fields[appKey];
 }
-
-// ─── Defaults & timestamps for create/update ────────────────────────────────
 
 export function applyCreateDefaults(model: ModelDef<any>, data: any): any {
   const out = { ...data };
@@ -151,10 +138,7 @@ export function applyUpdateTimestamps(model: ModelDef<any>, data: any): any {
   return out;
 }
 
-// ─── Inbound coercion of a full data payload ────────────────────────────────
-//
 // Coerces every recognised field to its db-side type and renames `id` → `_id`.
-
 export function coerceCreatePayload(model: ModelDef<any>, data: any): any {
   const withDefaults = applyCreateDefaults(model, data);
   const out: any = {};
@@ -165,8 +149,6 @@ export function coerceCreatePayload(model: ModelDef<any>, data: any): any {
   }
   return out;
 }
-
-// ─── Outbound: db doc → app row ────────────────────────────────────────────
 
 export function decodeRow(model: ModelDef<any>, doc: any): any {
   if (doc == null) return doc;
@@ -191,7 +173,6 @@ function decodeValue(field: FieldDef | undefined, value: any): any {
     }
     return decodeEmbed(value, embed.fields);
   }
-  // Date stays Date; primitives stay as-is.
   return value;
 }
 
@@ -205,7 +186,7 @@ function decodeEmbed(value: any, fields: Record<string, FieldDef>): any {
   return out;
 }
 
-// ─── Extended-JSON coercion for aggregation pipelines + raw commands ───────
+// Extended-JSON coercion for aggregation pipelines + raw commands.
 //
 // Prisma's `aggregateRaw` and `$runCommandRaw` auto-converted MongoDB
 // extended-JSON markers in the call payload — `{ $oid: '...' }` → ObjectId,

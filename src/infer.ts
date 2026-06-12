@@ -1,27 +1,16 @@
-// Direct-from-model inference helpers.
+// Direct-from-model inference helpers. Unlike `ForgeOf` / `ForgeModels`
+// (forge-types.ts), which resolve against the active SchemaMap, these `Infer*`
+// aliases take a `typeof MyModel` directly — useful for service signatures, DTOs,
+// or before a model is wired into a map. Pass an optional schema map as the
+// second arg for relation autocomplete in `Select` / `Include`; omit it for
+// scalar fields only.
 //
-// `ForgeOf<'key'>` / `ForgeModels['Name']` (forge-types.ts) resolve against
-// the active SchemaMap. They work great when your project registers its
-// schema via `setActiveSchema`, but you often want to derive types from
-// a single model definition standalone — for service signatures, DTOs,
-// validation layers, or before you've wired the model into a map.
-//
-// These `Infer*` aliases take a `typeof MyModel` directly. Pass an optional
-// schema map as the second argument when you want relation autocomplete in
-// `Select` / `Include` to walk the relation graph; omit it to get just the
-// scalar fields.
-//
-//   const User = model('users', { id: f.id(), email: f.string() });
 //   type UserRow    = InferRow<typeof User>;
-//   type UserWhere  = InferWhere<typeof User>;
 //   type UserCreate = InferCreate<typeof User>;
-//   type UserUpdate = InferUpdate<typeof User>;
-//   type UserAll    = Infer<typeof User>;          // bundled
+//   type UserAll    = Infer<typeof User>;
 //
-// With a schema map:
 //   const schema = { user: User, post: Post } as const;
-//   type Types   = InferSchema<typeof schema>;
-//   type Article = Types['post']['Create'];
+//   type Article = InferSchema<typeof schema>['post']['Create'];
 
 import type { TypedModel } from './schema/core';
 import type {

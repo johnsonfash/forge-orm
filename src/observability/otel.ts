@@ -1,18 +1,9 @@
-// OpenTelemetry helper — subscribes to forge's $on('query'/'error') events
-// and emits spans following the OTel database semantic conventions.
+// OpenTelemetry helper — subscribes to forge's $on('query'/'error') events and
+// emits spans following the OTel database semantic conventions.
 //
-// Usage:
-//   import { tracer } from '@opentelemetry/api';
-//   import { wireOtel } from '@guide/forge';
-//
-//   const db = await createDb({ url: process.env.DATABASE_URL! });
-//   wireOtel(db, { tracer: trace.getTracer('myapp') });
-//
-// Why a separate helper (and not built into the adapter): @opentelemetry/api
-// is an optional peer — most users don't have it installed, and forge's
-// core has no OTel dep. Users who want tracing import this module
-// explicitly (which doesn't require the OTel package — we accept any
-// object with a `startSpan` method, so it's structurally typed).
+// Separate helper (not built into the adapter) because @opentelemetry/api is an
+// optional peer and forge's core has no OTel dep. We accept any object with a
+// `startSpan` method (structurally typed), so importing this needs no OTel package.
 
 import type { ForgeDb } from '../factory';
 import type { QueryEvent, ErrorEvent } from '../events';

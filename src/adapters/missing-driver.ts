@@ -1,9 +1,8 @@
 import type { AdapterKind } from './types';
 import { DRIVER_PACKAGE_FOR } from './detect';
 
-// Builds the actionable error message shown when a consumer tries to use an
-// adapter whose underlying driver isn't installed. The message is the single
-// biggest UX win in a wrapper like this — better than `Cannot find module 'pg'`.
+// Actionable error shown when a consumer uses an adapter whose underlying driver
+// isn't installed — far clearer than a bare `Cannot find module 'pg'`.
 
 export class ForgeMissingDriverError extends Error {
   readonly code = 'FORGE_MISSING_DRIVER' as const;

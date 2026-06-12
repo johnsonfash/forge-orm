@@ -1,11 +1,8 @@
 import { DbKnownError } from '../mongo/errors';
 
-// SQLite error codes — mapped to forge / Prisma-style P-codes.
+// SQLite error codes mapped to forge / Prisma-style P-codes.
 // Reference: https://www.sqlite.org/rescode.html
-//
-// better-sqlite3 surfaces these as `err.code` on SqliteError. The numeric
-// extended code is also available as `err.code` on some errors. We match on
-// the string code primarily.
+// better-sqlite3 surfaces these as the string `err.code` on SqliteError.
 
 interface SqliteError {
   code?: string;

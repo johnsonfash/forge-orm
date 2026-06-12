@@ -7,8 +7,8 @@ import type { OrderByEntry } from '../types';
 //   • [{ a: 'asc' }, { b: 'desc' }]                      — multi-sort
 //   • { field: { sort: 'asc', nulls: 'first' | 'last' } } — SQL-style (Mongo ignores nulls)
 //
-// Relation-scoped order (`{ profile: { name: 'asc' } }`) is Wave 2 SQL territory;
-// for now those entries are silently dropped.
+// Relation-scoped order (`{ profile: { name: 'asc' } }`) is not yet supported;
+// those entries are silently dropped.
 
 export function buildOrderBy(orderBy: any): OrderByEntry[] | undefined {
   if (orderBy == null) return undefined;
@@ -19,12 +19,11 @@ export function buildOrderBy(orderBy: any): OrderByEntry[] | undefined {
     for (const key of Object.keys(entry)) {
       const v = (entry as any)[key];
       if (v == null) continue;
-      // Plain direction string
       if (typeof v === 'string') {
         out.push({ field: key, direction: v === 'desc' ? 'desc' : 'asc' });
         continue;
       }
-      // Object form: { sort, nulls } — or relation order (Wave 2)
+      // Object form: { sort, nulls } — or relation-scoped order.
       if (typeof v === 'object') {
         if (typeof v.sort === 'string') {
           const entry: OrderByEntry = {
@@ -34,7 +33,7 @@ export function buildOrderBy(orderBy: any): OrderByEntry[] | undefined {
           if (v.nulls === 'first' || v.nulls === 'last') entry.nulls = v.nulls;
           out.push(entry);
         }
-        // else: relation-scoped order — defer to Wave 2
+        // else: relation-scoped order — dropped (see header).
       }
     }
   }

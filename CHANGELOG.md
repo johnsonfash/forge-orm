@@ -4,6 +4,101 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite - one code
 path, no codegen, no external query engine.
 
+## 1.6.1 — housekeeping: trim comments, remove dead legacy code
+
+No behaviour change. A pass over every source file to cut redundant comments
+down to the ones that carry real intent (the "why", dialect gotchas, invariants),
+plus removal of confirmed-dead code:
+
+- Deleted the legacy pre-IR Mongo query path — `adapters/mongo/relations.ts` and
+  `adapters/mongo/translate/{where,orderby,select-include}.ts` (zero importers;
+  the IR `compile-from-ir.ts` + `execute.ts` path superseded it) and their two
+  unit specs.
+- Dropped small dead bits: an unused `REGEX_ESCAPE` const, an unused
+  `actualNames` set, and a no-op `.replace('T', 'T')`.
+
+Known gap surfaced by the audit: relation filters inside `where`
+(`{ rel: { is: {…} } }`) are not yet supported on Mongo (no `$lookup`) — they
+compile to match-all rather than erroring.
+
+## 1.6.0 — groupBy `having` accepts Prisma's field-first shape; fix Mongo `count({ distinct })`
+
+Two correctness items around aggregation, both caught by running groupBy +
+distinct against real SQLite and Mongo:
+
+- **`having` now accepts the Prisma field-first shape** in addition to the
+  bucket-first shape it already took. Both of these now mean the same thing:
+
+  ```ts
+  having: { total: { _sum: { gte: 120 } } }   // field-first (Prisma)
+  having: { _sum: { total: { gte: 120 } } }   // bucket-first
+  ```
+
+  Normalisation happens once in `buildGroupBy`, so every dialect benefits.
+
+- **Fixed `count({ distinct: [...] })` on MongoDB**, which previously ignored
+  `distinct` and returned the total document count. It now groups on the
+  distinct field-combination and counts the groups, matching the SQL dialects'
+  `COUNT(DISTINCT …)`.
+
+Locked in with `regression-groupby-distinct.ts` (wired into
+`forge:integration:mongo`) and a `groupby-having` unit spec.
+
+## 1.5.1 — fix: `update()` false not-found on models with a `value` field
+
+The MongoDB driver v6/v7 returns the bare document from `findOneAndUpdate`,
+where v5 returned a `{ value, ok }` envelope. The result-unwrap guessed the
+shape with `raw.value` — which collides with any document field literally named
+`value`. The effect on `update()` / `upsert()` against such a model:
+
+- when the doc's `value` was falsy (e.g. `0`), a **successful** update was
+  reported as a not-found (`P2025`);
+- when truthy, the field was returned instead of the document.
+
+No model in the bundled sample schema has a `value` field, so the unit and
+integration suites never hit it — promo/discount-style models do. Fixed by
+forcing `includeResultMetadata: true` so the envelope is deterministic across
+driver versions. Added `regression-mongo-value-field.ts` (wired into
+`forge:integration:mongo`) to lock it in.
+
+## 1.5.0 — `col()`: field-to-field comparison in `where`
+
+A new exported helper, `col('otherField')`, lets a `where` condition compare one
+column against another column of the same row instead of against a literal:
+
+```ts
+import { col } from 'forge-orm';
+
+await db.promo.update({
+  where: { id, currentUsage: { lt: col('globalLimit') } },
+  data:  { currentUsage: { increment: 1 } },
+});
+```
+
+Portable across every dialect — one IR, four compilers:
+
+- **Mongo** → `{ $expr: { $lt: ['$currentUsage', '$globalLimit'] } }`
+- **Postgres / MySQL / SQLite** → `"t"."currentUsage" < "t"."globalLimit"`
+
+This removes the most common reason callers dropped to the raw driver: an
+atomic, race-safe guarded counter (`findOneAndUpdate` with a `$expr` filter) is
+now expressible through the portable `update()` API.
+
+Details:
+
+- Accepts only the six comparison operators (`equals`, `not`, `lt`, `lte`,
+  `gt`, `gte`); any other operator throws at build time.
+- The referenced field is validated against the model — a typo or a relation
+  name throws, which also closes the only identifier-injection surface (the
+  reference becomes a SQL identifier / Mongo `$field` path downstream).
+- The marker is branded with a registered `Symbol`, so it can never collide
+  with a real field name or be smuggled in through a JSON request body.
+- Both forms work: `{ field: { lt: col('x') } }` and the bare
+  `{ field: col('x') }` (equality). Mixed literal + `col()` conditions never
+  collide (each `$expr` lands in its own `$and` entry on Mongo).
+- Not yet supported inside relation filters — that path throws a clear error
+  rather than emitting a wrong query.
+
 ## 1.4.1 — docs: surface 1.4's PK strategies at the top of the README
 
 The strategy table + worked example shipped with 1.4.0 but lived deep in the

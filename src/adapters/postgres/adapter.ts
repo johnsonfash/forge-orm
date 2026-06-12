@@ -12,12 +12,6 @@ import {
   type PgPoolHandle,
 } from './execute';
 
-// PostgresAdapter — Wave 2a shell.
-//
-// Lifecycle hooks (connect / close / doctor) work; the IR executor for
-// Postgres lives in adapters/postgres/execute.ts (Wave 2b). Tests today
-// exercise the SQL compiler directly via compile-from-ir.ts.
-//
 // The driver (`pg`) is lazy-required on connect; if it isn't installed we
 // throw a ForgeMissingDriverError with the install command.
 
@@ -43,8 +37,6 @@ export class PostgresAdapter implements Adapter {
   async connect(url: string): Promise<void> {
     this._url = url;
     const pg = loadDriver('postgres', url);
-    // Construct the pool. We do this lazily so the import of forge never
-    // pulls pg into memory when the consumer is on a different adapter.
     this._pool = new pg.Pool({
       connectionString: url,
       max: 50,
@@ -79,18 +71,12 @@ export class PostgresAdapter implements Adapter {
     };
   }
 
-  // Internal accessor used by the Postgres executor (Wave 2b).
   get pool(): PgPoolHandleWithEnd {
     if (!this._pool) {
       throw new Error('[forge:postgres] pool accessed before connect() resolved');
     }
     return this._pool;
   }
-
-  // ─── Executor surface ─────────────────────────────────────────────────
-  // Delegates to the free functions in execute.ts. Same shape as MongoAdapter's
-  // methods — both implement the Adapter interface so CollectionWrapper can
-  // dispatch without caring which dialect is active.
 
   private pgOpts(opts?: ExecOpts): PgExecOpts {
     return opts?.session ? { client: opts.session as PgPoolHandle } : {};
@@ -154,17 +140,13 @@ export class PostgresAdapter implements Adapter {
       (r) => r.length);
   }
 
-  // Wave 4b — native streaming. `pg-cursor` is the idiomatic path but optional
-  // peer; fall back to a server-side cursor declared via SQL (DECLARE/FETCH)
-  // when the helper isn't installed. The wrapper falls back to OFFSET/LIMIT
-  // chunking if we return nothing.
+  // Server-side cursor (DECLARE/FETCH) for back-pressure-friendly streaming.
   async *streamSelect(node: any, model: any, opts?: ExecOpts): AsyncIterable<any> {
     const { compileSelect } = await import('./compile-from-ir');
     const a = compileSelect(node, model);
     const client = await (this.pool as any).connect();
     try {
       await client.query('BEGIN');
-      // Use a server-side cursor for back-pressure-friendly streaming.
       const cursorName = `forge_stream_${Date.now().toString(36)}`;
       await client.query(`DECLARE ${cursorName} CURSOR FOR ${a.sql}`, a.params);
       const FETCH_BATCH = 200;
@@ -188,23 +170,13 @@ export class PostgresAdapter implements Adapter {
     _node: { projection?: any; hydration?: any },
     _opts?: ExecOpts,
   ): Promise<void> {
-    // PG's executePgSelect already applies projection/hydration inline (rows
-    // come out of the SQL with the right columns; hydration happens after).
-    // For write paths, the executor returns RETURNING * with all columns —
-    // shaping happens in CollectionWrapper._returnOne via buildProjection.
-    // No-op here; the wrapper layers projection/omit pruning client-side.
+    // No-op: executePgSelect already applies projection/hydration inline. Write
+    // paths return RETURNING *; the wrapper layers projection/omit client-side.
   }
 
-  // ─── coerce / decode / cascade ────────────────────────────────────────
-  //
-  // PG semantics differ from Mongo enough to warrant per-field handling:
-  //   • No id↔_id remap — PG columns map 1:1 with schema field names.
-  //   • jsonb / embed / json columns: pg expects a string for parameterised
-  //     inserts; we stringify on the way in.
-  //   • Dates: pg accepts JS Date or ISO strings; we pass through.
-  //   • Outbound: pg's type parsers already give us proper JS types
-  //     (Date for timestamptz, boolean, number, arrays). Identity on the
-  //     way out keeps the hot path branch-free.
+  // jsonb / embed / json columns: pg expects a string for parameterised
+  // inserts, so we stringify on the way in. Outbound, pg's type parsers
+  // already give proper JS types — decodeOutbound is identity.
 
   coerceInbound(model: any, data: any, _opts?: { forCreate?: boolean }) {
     if (!data || typeof data !== 'object') return data;
@@ -222,21 +194,18 @@ export class PostgresAdapter implements Adapter {
   }
 
   decodeOutbound(_model: any, row: any) {
-    // pg's type coercion already turns timestamptz → Date, bool → boolean,
-    // jsonb → parsed object, arrays → JS arrays. No-op here keeps the
-    // hot path branch-free. Wave 2d may add `@db.Decimal(p,s)` decoding
-    // (pg returns numeric as string for precision; we'd parse to BigDecimal).
+    // pg's type parsers already give proper JS types; identity keeps the hot
+    // path branch-free. Note: pg returns numeric as string for precision.
     return row;
   }
 
   async applyCascadesForDelete(_model: any, _docs: any[], _opts?: ExecOpts): Promise<void> {
-    // PG enforces ON DELETE CASCADE / SET NULL natively via FK constraints
-    // generated by buildSchemaDDL. The wrapper still calls this on delete,
-    // but for PG it's a no-op — the DB engine has already done the work.
+    // No-op: PG enforces ON DELETE CASCADE / SET NULL natively via FK
+    // constraints generated by buildSchemaDDL. The wrapper still calls this.
   }
 
-  // Wave 5d — REFRESH MATERIALIZED VIEW. CONCURRENTLY needs a unique index on
-  // the matview, so it's opt-in; default is a plain (locking) refresh.
+  // CONCURRENTLY needs a unique index on the matview, so it's opt-in; default
+  // is a plain (locking) refresh.
   async refreshView(model: any, opts?: ExecOpts & { concurrently?: boolean }): Promise<void> {
     const q = `"${String(model.collection).replace(/"/g, '""')}"`;
     const client = (opts?.session as PgPoolHandle | undefined) ?? this.pool;
@@ -244,13 +213,10 @@ export class PostgresAdapter implements Adapter {
     await client.query(`REFRESH MATERIALIZED VIEW ${concurrently}${q}`);
   }
 
-  // Wave 5b — introspect live PG schema (information_schema + pg_catalog).
   async introspect(): Promise<import('../types').DbIntrospection> {
     const { introspectPg } = await import('./introspect');
     return introspectPg(this.pool);
   }
-
-  // ─── Raw SQL escape hatches ───────────────────────────────────────────
 
   async $queryRaw(fragment: import('../../raw-sql').SqlFragment, opts?: ExecOpts): Promise<any[]> {
     const { compileSqlFragment } = await import('../../raw-sql');
@@ -270,14 +236,10 @@ export class PostgresAdapter implements Adapter {
     return rowCount ?? 0;
   }
 
-  // ─── $transaction (BEGIN/COMMIT/ROLLBACK) ─────────────────────────────
-  // Borrows a client from the pool, opens a transaction, runs `fn`, commits
-  // on success or rolls back on throw, and always returns the client to the
-  // pool. Caller threads the client back through ExecOpts.session so every
-  // executor call inside `fn` lands on the same connection.
+  // Caller threads the client back through ExecOpts.session so every executor
+  // call inside `fn` lands on the same connection.
   async $transaction<T>(fn: (session: unknown) => Promise<T>): Promise<T> {
     if (!this._pool) throw new Error('[forge:postgres] $transaction before connect()');
-    // pg's Pool exposes connect() returning a PoolClient with release().
     const pool = this._pool as any;
     const client = await pool.connect();
     try {

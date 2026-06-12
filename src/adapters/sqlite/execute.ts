@@ -21,17 +21,11 @@ import { withSqliteErrors } from './errors';
 
 // SQLite IR executor.
 //
-// `better-sqlite3` is a SYNCHRONOUS driver — every call returns immediately,
-// no Promises. To keep forge's executor surface async, we wrap each call in
-// Promise.resolve(). This isn't actually concurrent — Node won't yield mid-
-// query — but it preserves the contract callers expect.
-//
-// Why no async driver? `better-sqlite3` is dramatically faster than
-// alternatives for typical use cases precisely because it doesn't pay the
-// async overhead. SQLite is a local file; there's no I/O to overlap.
+// `better-sqlite3` is SYNCHRONOUS — no Promises, no mid-query yield. We wrap
+// calls to satisfy forge's async executor surface; it isn't truly concurrent.
+// The sync driver is the fast path for a local file (no I/O to overlap).
 
-// Minimal shape of better-sqlite3.Database that the executor uses. Lets us
-// stub it in tests.
+// Minimal shape of better-sqlite3.Database the executor uses (stubbable in tests).
 export interface SqliteDb {
   prepare(sql: string): SqliteStatement;
   pragma(name: string): unknown;
@@ -46,18 +40,13 @@ export interface SqliteStatement {
 }
 
 export interface SqliteExecOpts {
-  // When inside a $transaction, the same db handle is passed back through
-  // here (better-sqlite3 doesn't have per-call sessions — transactions are
-  // implicit via BEGIN/COMMIT statements).
+  // Inside a $transaction the same db handle is passed back here — better-sqlite3
+  // has no per-call sessions; transactions are implicit via BEGIN/COMMIT.
   db?: SqliteDb;
 }
 
-// ─── Decode rows ─────────────────────────────────────────────────────────
-//
-// SQLite returns booleans as 0/1, dates as ISO strings, JSON columns as
-// strings. We re-hydrate at the executor edge so callers see proper JS
-// types matching the schema.
-
+// SQLite returns bools as 0/1, dates as ISO strings, JSON columns as strings;
+// re-hydrate at the executor edge to the schema's JS types.
 export function decodeRow(model: ModelDef<any>, row: any): any {
   if (!row || typeof row !== 'object') return row;
   const out: any = {};
@@ -87,24 +76,20 @@ function safeParse(s: string): any {
 }
 
 // Encode params for the driver: dates → ISO strings, bools → 0/1, JSON-ish
-// values → JSON.stringify. The compiler already did some of this for known
-// fields; this is a safety net for raw queries.
+// values → JSON.stringify. Mostly a safety net for raw queries; the compiler
+// already coerces known schema fields.
 function encodeParams(params: unknown[]): unknown[] {
   return params.map((v) => {
     if (v == null) return v;
     if (v instanceof Date) return v.toISOString();
     if (typeof v === 'boolean') return v ? 1 : 0;
     if (typeof v === 'object' && !Buffer.isBuffer(v) && !Array.isArray(v)) {
-      // structuredClone-ish — most plain objects get JSON-stringified by the
-      // schema field type at row build time; this catches stragglers.
       return JSON.stringify(v);
     }
     if (Array.isArray(v)) return JSON.stringify(v);
     return v;
   });
 }
-
-// ─── Reads ──────────────────────────────────────────────────────────────────
 
 export async function executeSqliteSelect(
   db: SqliteDb,
@@ -164,7 +149,7 @@ function reshapeGroupByRow(row: any, byCols: string[]): any {
   return out;
 }
 
-// ─── Writes — RETURNING * works since SQLite 3.35 (2021) ────────────────────
+// Writes use RETURNING * (SQLite 3.35+, 2021).
 
 export async function executeSqliteInsert(
   db: SqliteDb,
@@ -212,8 +197,6 @@ export async function executeSqliteDelete(
   if (node.many) return { count: decoded.length };
   return { doc: decoded[0], count: decoded.length };
 }
-
-// ─── Hydration / counts (same pattern as PG, sync wrapped) ──────────────────
 
 async function hydrate(
   db: SqliteDb,
@@ -311,8 +294,6 @@ async function applyRelationCounts(
     for (const r of rows) r._count[relName] = byFk.get(String(r[rel.refs])) ?? 0;
   }
 }
-
-// ─── Utils ──────────────────────────────────────────────────────────────────
 
 function unique<T>(arr: T[]): T[] {
   const seen = new Set<string>();

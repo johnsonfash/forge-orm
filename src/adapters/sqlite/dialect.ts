@@ -1,16 +1,11 @@
 import type { FieldDef } from '../../schema/types';
 import type { Dialect } from '../postgres/dialect';
 
-// SQLite dialect. Mostly Postgres-compatible since SQLite borrows liberally
-// from the SQL standard, but:
-//   • Placeholders are `?` (positional), not `$1, $2, …`.
-//   • No native `bigserial` / `uuid` types — fall back to TEXT or INTEGER.
-//   • No `bool` type — store 0 / 1 in INTEGER (we coerce values at insert).
-//   • No `text[]` — store JSON in TEXT. Array operators map to json_each(),
-//     json_array_length(), etc. in the compiler.
-//   • `NULLS FIRST/LAST` supported since 3.30 (2019).
-//   • Identifiers are double-quoted (same as PG).
-//   • Upsert syntax: `ON CONFLICT (col) DO UPDATE SET ...` (same as PG since 3.24, 2018).
+// SQLite dialect. Mostly Postgres-compatible (double-quoted idents, ON CONFLICT
+// upsert, NULLS FIRST/LAST since 3.30), but:
+//   • `?` positional placeholders, not `$1, $2, …`.
+//   • No native bigserial/uuid (→ TEXT/INTEGER), no bool (→ 0/1 INTEGER),
+//     no text[] (→ JSON in TEXT; array ops map to json_each / json_array_length).
 
 export const SqliteDialect: Dialect = {
   name: 'sqlite',
@@ -67,12 +62,9 @@ export const SqliteDialect: Dialect = {
   },
 
   searchClause(_quotedColumn, paramExpr, ctx) {
-    // Wave 4c — route through the FTS5 virtual table emitted by .searchable().
-    // The FTS table is named `<base>_fts` and uses content_rowid=rowid, so we
-    // rewrite the predicate to: `<base>.rowid IN (SELECT rowid FROM <base>_fts WHERE <base>_fts MATCH ?)`.
-    // If the FTS table doesn't exist (field wasn't marked .searchable()),
-    // SQLite returns "no such table" — that's the actionable error the user
-    // gets, pointing them at the schema marker.
+    // Route through the `<base>_fts` FTS5 table (content_rowid=rowid) emitted by
+    // .searchable(). If the field wasn't marked .searchable() the table is
+    // absent and SQLite's "no such table" is the actionable error.
     const ftsTable = ctx.quoteIdent(`${ctx.baseTable}_fts`);
     const baseTable = ctx.quoteIdent(ctx.baseTable);
     return `${baseTable}.rowid IN (SELECT rowid FROM ${ftsTable} WHERE ${ftsTable} MATCH ${paramExpr})`;

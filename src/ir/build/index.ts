@@ -17,9 +17,9 @@ import { buildWhereTree, type SchemaContext } from './where';
 // High-level entrypoints used by CollectionWrapper (and `compile.*` paths) to
 // turn user args into IR nodes. Each builder is pure — no driver imports.
 //
-// Pass `schema` to enable schema-aware recursion: deep relation where, nested
-// relation include with where/orderBy/take, etc. Without schema, builders
-// degrade to single-level (Wave 1a back-compat).
+// Pass `schema` to enable schema-aware recursion (deep relation where, nested
+// relation include with where/orderBy/take). Without schema, builders degrade
+// to single-level.
 
 export interface BuildSelectArgs {
   where?: any;
@@ -77,8 +77,8 @@ function materialiseHydration(
     const targetModel = schema[target];
     if (!targetModel) return rp;
     const sub = buildSelect(target, targetModel, raw, rp.kind === 'one' ? 'one' : 'many', schema);
-    // Strip kind/model from the embedded SelectNode (RelationPlan's nested is
-    // typed as a SelectNode minus those fields plus a cardinality override).
+    // RelationPlan's nested is a SelectNode minus kind/model, plus a cardinality
+    // override — strip the former.
     const { kind: _k, model: _m, cardinality, ...rest } = sub;
     return {
       ...rp,
@@ -185,8 +185,6 @@ export function buildDelete(
   };
 }
 
-// ─── groupBy ────────────────────────────────────────────────────────────────
-
 export interface BuildGroupByArgs {
   by: string[];
   where?: any;
@@ -203,6 +201,31 @@ export interface BuildGroupByArgs {
   offset?: number;
 }
 
+// Aggregate buckets recognised in a `having` clause.
+const AGG_BUCKETS = new Set(['_count', '_avg', '_sum', '_min', '_max']);
+
+// Normalise `having` to the canonical bucket-first shape the compilers expect
+// (`{ _sum: { total: { gte: 1 } } }`). Prisma's real surface is field-first
+// (`{ total: { _sum: { gte: 1 } } }`), so we accept BOTH and flip field-first
+// into bucket-first here — one place, both the Mongo and SQL compilers benefit.
+function normalizeHaving(having: any): any {
+  if (!having || typeof having !== 'object') return having;
+  const out: Record<string, any> = {};
+  for (const [key, val] of Object.entries(having)) {
+    if (!val || typeof val !== 'object') continue;
+    if (AGG_BUCKETS.has(key)) {
+      out[key] = { ...(out[key] ?? {}), ...(val as Record<string, any>) };
+    } else {
+      // Field-first `{ field: { _sum: {op} } }` → `{ _sum: { field: {op} } }`.
+      for (const [bucket, opObj] of Object.entries(val as Record<string, any>)) {
+        if (!AGG_BUCKETS.has(bucket)) continue;
+        (out[bucket] ??= {})[key] = opObj;
+      }
+    }
+  }
+  return out;
+}
+
 export function buildGroupBy(
   modelKey: string,
   model: ModelDef<any>,
@@ -214,7 +237,7 @@ export function buildGroupBy(
     model: modelKey,
     by: args.by,
     where: buildWhereTree(model, args.where, schema),
-    having: args.having,
+    having: normalizeHaving(args.having),
     _count: args._count,
     _avg: args._avg,
     _sum: args._sum,

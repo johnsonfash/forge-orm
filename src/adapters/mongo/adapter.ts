@@ -15,10 +15,9 @@ import { coerceCreatePayload, decodeRow } from './coerce';
 import { applyCascadesForDelete as mongoCascade } from './cascade';
 import type { ClientSession } from 'mongodb';
 
-// MongoAdapter — concrete Adapter wrapping the existing dbClient + executor
-// free functions + coerce/cascade helpers. Implements the full Adapter
-// contract so CollectionWrapper can dispatch through `this.adapter`
-// uniformly across Mongo and Postgres.
+// Concrete Adapter wrapping dbClient + executor free functions + coerce/cascade
+// helpers, so CollectionWrapper can dispatch through `this.adapter` uniformly
+// across Mongo and Postgres.
 
 const CAPS: AdapterCapabilities = {
   nativeCascades: false,
@@ -59,8 +58,6 @@ export class MongoAdapter implements Adapter {
       ],
     };
   }
-
-  // ─── Executor surface ─────────────────────────────────────────────────
 
   private mongoOpts(opts?: ExecOpts): { session?: ClientSession } {
     return opts?.session ? { session: opts.session as ClientSession } : {};
@@ -112,9 +109,8 @@ export class MongoAdapter implements Adapter {
       (r) => r.length);
   }
 
-  // Wave 4b — native streaming via Mongo's cursor.stream(). We compile the IR
-  // SelectNode into a Mongo cursor and yield each document, decoded via the
-  // mongo adapter's row decoder.
+  // Native streaming via Mongo's cursor.stream(): compile the IR SelectNode
+  // into a cursor and yield each document, decoded via the row decoder.
   async *streamSelect(node: any, model: any, opts?: ExecOpts): AsyncIterable<any> {
     const { compileSelect } = await import('./compile-from-ir');
     const a: any = compileSelect(node, model);
@@ -139,8 +135,6 @@ export class MongoAdapter implements Adapter {
     return dbClient.transaction(async (session) => fn(session));
   }
 
-  // ─── coerce / decode / cascade ────────────────────────────────────────
-
   coerceInbound(model: any, data: any, _opts?: { forCreate?: boolean }) {
     // The Mongo helper applies create defaults (now() / autoId) and does
     // id↔_id remap. Update paths pre-filter to scalar-only data; in either
@@ -157,9 +151,9 @@ export class MongoAdapter implements Adapter {
     return mongoCascade(model, docs);
   }
 
-  // Wave 5d — materialised view refresh. A Mongo "matview" is a normal
-  // collection populated by an aggregation pipeline whose final stage is
-  // $merge or $out into that collection. refresh() re-runs the pipeline.
+  // A Mongo "matview" is a normal collection populated by an aggregation
+  // pipeline whose final stage is $merge or $out into that collection.
+  // refresh() re-runs the pipeline.
   async refreshView(model: any, _opts?: ExecOpts): Promise<void> {
     const view = model?.view;
     const pipeline: any[] = Array.isArray(view?.pipeline) ? view.pipeline : [];
@@ -172,8 +166,8 @@ export class MongoAdapter implements Adapter {
     await dbClient.db.collection(source).aggregate(full).toArray();
   }
 
-  // Wave 5b — introspection: collections + their indexes (Mongo is schemaless,
-  // so there are no columns/FKs to diff — collection + index level only).
+  // Introspection: collections + their indexes. Mongo is schemaless, so there
+  // are no columns/FKs to diff — collection + index level only.
   async introspect(): Promise<import('../types').DbIntrospection> {
     const colls = await dbClient.db.listCollections().toArray();
     const tables = [] as import('../types').IntrospectedTable[];
@@ -195,11 +189,9 @@ export class MongoAdapter implements Adapter {
     return { kind: 'mongo', tables, views };
   }
 
-  // ─── Raw escape hatches — Mongo doesn't speak SQL ─────────────────────
-  // Mongo's raw channel is the aggregation pipeline (db.<model>.aggregate)
-  // or $runCommandRaw on the ForgeDb handle. Throwing here matches Prisma's
-  // behavior on its Mongo connector.
-
+  // Mongo doesn't speak SQL — its raw channel is the aggregation pipeline
+  // (db.<model>.aggregate) or $runCommandRaw on the ForgeDb handle. Throwing
+  // here matches Prisma's behavior on its Mongo connector.
   $queryRaw(_fragment: import('../../raw-sql').SqlFragment, _opts?: ExecOpts): Promise<any[]> {
     return Promise.reject(new Error(
       '[forge] $queryRaw is SQL-only. For Mongo, use db.<model>.aggregate({ pipeline }) ' +
@@ -215,9 +207,7 @@ export class MongoAdapter implements Adapter {
 }
 
 // Lazily-built singleton used by CollectionWrapper when no explicit adapter
-// is passed. Keeps the default Mongo path working without
-// surgery — every wrapper falls back to this if nothing else routes a
-// different adapter in.
+// is passed.
 let _defaultMongoAdapter: MongoAdapter | undefined;
 export function getDefaultMongoAdapter(): MongoAdapter {
   if (!_defaultMongoAdapter) _defaultMongoAdapter = new MongoAdapter();

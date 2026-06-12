@@ -1,9 +1,6 @@
-// Postgres dialect details — quoting, placeholders, type names.
-//
-// Kept in one file so the compiler stays dialect-neutral and we can fork
-// MySQL / SQLite by swapping just this. The MySQL adapter (Wave 3) will
-// export the same shape with `?` placeholders and backtick quoting; SQLite
-// with `?` placeholders and double-quote identifiers.
+// Postgres dialect details — quoting, placeholders, type names. Kept in one
+// file so the compiler stays dialect-neutral and MySQL / SQLite can fork by
+// swapping just this.
 
 import type { FieldDef } from '../../schema/types';
 
@@ -15,15 +12,14 @@ export interface Dialect {
   // Make a placeholder for a parameterised query. Returns the placeholder
   // string and pushes the value onto `params`. Postgres: $1, $2, $3, ...
   placeholder(params: unknown[], value: unknown): string;
-  // Map a FieldDef to the column's SQL type for DDL generation. Wave 2c uses
-  // this in CREATE TABLE; the compiler doesn't need it for queries.
+  // Map a FieldDef to the column's SQL type for DDL generation.
   columnType(field: FieldDef): string;
   // ORDER BY direction with optional NULLS FIRST/LAST.
   orderClause(column: string, direction: 'asc' | 'desc', nulls?: 'first' | 'last'): string;
   // ON CONFLICT helper for upsert. PG: ON CONFLICT (cols) DO UPDATE SET ...
   // MySQL: ON DUPLICATE KEY UPDATE ...
   upsertConflictClause(conflictCols: string[], setAssignments: string): string;
-  // Wave 4 — full-text search clause. Per-dialect:
+  // Full-text search clause. Per-dialect:
   //   PG:     to_tsvector('simple', col) @@ plainto_tsquery('simple', ?)
   //   MySQL:  MATCH(col) AGAINST (? IN NATURAL LANGUAGE MODE)
   //   SQLite: id IN (SELECT rowid FROM <table>_fts WHERE <table>_fts MATCH ?)

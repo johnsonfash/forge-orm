@@ -2,30 +2,12 @@
 //
 // Load the CONSUMER's schema for forge:push / forge:diff / forge:diff:apply.
 //
-// Layered resolver (cheap things first, scan as fallback, hard-fail on miss):
-//
-//   1. --schema=<path>                  CLI flag
-//   2. FORGE_SCHEMA_PATH=<path>         env var
-//   3. package.json → forge.schema      consumer config
-//   4. node_modules/.cache/forge/       cached scan result (instant)
-//        schema-cache.json
-//   5. Filesystem scan                  ~150ms cold, ~30ms warm OS cache
-//        → on success, write cache so the next run hits layer 4
-//   6. Hard fail                         no silent fallback
-//
-// The scan looks for a file that BOTH imports from `forge-orm` AND exports a
-// `schema` const (or default), skipping node_modules / dist / build / .git /
-// .next / coverage / .cache / .turbo / test fixtures. On a 10k-file project
-// the whole walk is sub-300ms because 99% of files are eliminated by a raw
-// byte-search for the string "forge-orm" before we look any deeper.
-//
-// On multi-match the resolver fails with the full candidate list and asks
-// the consumer to disambiguate via package.json or --schema=.
-//
-// The loaded module is expected to either:
-//   • Export `schema` — the typical `export const schema = { Users, Posts… } as const`
-//   • Export `default` — fallback for module authors who prefer default exports
-//
+// Layered resolver, cheap things first, scan as fallback, hard-fail on miss:
+// flag → env → package.json → cache → filesystem scan → fail. The scan looks
+// for a file that BOTH imports from `forge-orm` AND exports a `schema` const
+// (or default); the raw "forge-orm" byte-search up front eliminates 99% of
+// files so a 10k-file walk stays sub-300ms. Multi-match hard-fails with the
+// candidate list rather than guessing.
 
 import path from 'node:path';
 import fs from 'node:fs';
@@ -70,12 +52,9 @@ function resolveAbsolute(candidate: string): string {
 }
 
 let tsNodeRegistered = false;
-/**
- * Register ts-node in transpile-only mode so loading a TypeScript schema is
- * fast (milliseconds) instead of slow (~30-60s) due to full type-checking.
- * Type errors at this layer are not the migrator's concern — the consumer's
- * own TypeScript build catches those. Idempotent.
- */
+// transpile-only so loading a TS schema is fast (ms) not slow (~30-60s of
+// type-checking). Type errors here aren't the migrator's concern — the
+// consumer's own build catches those. Idempotent.
 function ensureTsNodeRegistered(): void {
   if (tsNodeRegistered) return;
   tsNodeRegistered = true;
@@ -115,8 +94,6 @@ function importSchemaModule(absPath: string): any {
   );
 }
 
-// ─── Layer 3: package.json ──────────────────────────────────────────────────
-
 function readPackageJsonSchema(): string | undefined {
   const pkgPath = path.join(process.cwd(), 'package.json');
   if (!fs.existsSync(pkgPath)) return undefined;
@@ -127,8 +104,6 @@ function readPackageJsonSchema(): string | undefined {
     return undefined;
   }
 }
-
-// ─── Layer 4: cache ─────────────────────────────────────────────────────────
 
 function cacheDir(): string {
   return path.join(process.cwd(), 'node_modules', '.cache', 'forge');
@@ -162,8 +137,6 @@ function writeCachedPath(absPath: string): void {
     );
   } catch { /* cache write is best-effort; not a hard failure */ }
 }
-
-// ─── Layer 5: filesystem scan ───────────────────────────────────────────────
 
 function scanForSchemas(root: string): string[] {
   const found: string[] = [];
@@ -203,8 +176,6 @@ function scanForSchemas(root: string): string[] {
   walk(root);
   return found;
 }
-
-// ─── Failure modes ──────────────────────────────────────────────────────────
 
 function failNotFound(): never {
   console.error(`
@@ -251,10 +222,7 @@ To resolve, pick ONE and either:
   process.exit(1);
 }
 
-// ─── Resolver ───────────────────────────────────────────────────────────────
-
 export function loadConsumerSchema(argv: string[] = process.argv): LoadedSchema {
-  // 1. Flag
   const flagPath = parseFlag(argv);
   if (flagPath) {
     const abs = resolveAbsolute(flagPath);
@@ -267,7 +235,6 @@ export function loadConsumerSchema(argv: string[] = process.argv): LoadedSchema 
     return { schema, source: abs, origin: 'flag' };
   }
 
-  // 2. Env var
   const envPath = process.env.FORGE_SCHEMA_PATH;
   if (envPath) {
     const abs = resolveAbsolute(envPath);
@@ -280,7 +247,6 @@ export function loadConsumerSchema(argv: string[] = process.argv): LoadedSchema 
     return { schema, source: abs, origin: 'env' };
   }
 
-  // 3. package.json
   const pkgSchema = readPackageJsonSchema();
   if (pkgSchema) {
     const abs = resolveAbsolute(pkgSchema);
@@ -293,7 +259,6 @@ export function loadConsumerSchema(argv: string[] = process.argv): LoadedSchema 
     return { schema, source: abs, origin: 'package.json' };
   }
 
-  // 4. Cache
   const cached = readCachedPath();
   if (cached) {
     try {
@@ -305,7 +270,6 @@ export function loadConsumerSchema(argv: string[] = process.argv): LoadedSchema 
     }
   }
 
-  // 5. Scan
   const candidates = scanForSchemas(process.cwd());
   if (candidates.length === 1) {
     const abs = candidates[0];

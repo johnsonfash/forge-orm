@@ -1,13 +1,12 @@
 import type { ModelDef } from '../../schema/types';
 import type { UpdateNode } from '../types';
 
-// Build the UPDATE half of an UpdateNode IR — i.e. the set/increment/multiply/
-// push/unset fragments — from a Prisma-shape `data` object.
+// Build the UPDATE half of an UpdateNode IR (set/increment/multiply/push/unset
+// fragments) from a Prisma-shape `data` object.
 //
-// Owning-side relation FK rewrites (`{ rel: { connect: { id } } }` → set FK)
-// are NOT done here; the wrapper splits nested writes BEFORE the IR is built,
-// so by the time we see `data` it should contain only scalar fields and
-// owning-side FK assignments.
+// INVARIANT: the wrapper splits nested writes BEFORE the IR is built, so by the
+// time we see `data` it contains only scalar fields and owning-side FK
+// assignments — relation FK rewrites are NOT done here.
 
 export interface UpdateDataFragment {
   set?: Record<string, any>;

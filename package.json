@@ -1,6 +1,6 @@
 {
   "name": "forge-orm",
-  "version": "1.4.2",
+  "version": "1.6.1",
   "description": "Prisma-shape multi-database ORM/wrapper for MongoDB, PostgreSQL, MySQL & SQLite from one codebase — no codegen, no query engine. Bring your own schema.",
   "license": "MIT",
   "author": "johnsonfash",
@@ -58,7 +58,8 @@
     "forge:rollback": "ts-node src/scripts/rollback.ts",
     "forge:test": "jest",
     "forge:integration:pg": "ts-node --transpile-only --project tsconfig.json integration-pg.ts",
-    "forge:integration:mongo": "ts-node --transpile-only --project tsconfig.json integration-mongo.ts",
+    "forge:integration:mongo": "ts-node --transpile-only --project tsconfig.json integration-mongo.ts && npm run forge:regression:mongo",
+    "forge:regression:mongo": "ts-node --transpile-only --project tsconfig.json regression-mongo-value-field.ts && ts-node --transpile-only --project tsconfig.json regression-groupby-distinct.ts",
     "forge:integration:mysql": "ts-node --transpile-only --project tsconfig.json integration-mysql.ts",
     "forge:integration:sqlite": "ts-node --transpile-only --project tsconfig.json integration-sqlite.ts",
     "forge:integration:sqlite:file": "SMOKE_SQLITE_URL=sqlite:./forge_smoke.db ts-node --transpile-only --project tsconfig.json integration-sqlite.ts",

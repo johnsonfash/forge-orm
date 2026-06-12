@@ -14,21 +14,11 @@ import type { ModelDef } from '../../schema/types';
 import { schema } from '../../schema';
 import { PostgresDialect, type Dialect } from './dialect';
 
-// Postgres IR consumer — takes adapter-agnostic IR nodes and emits a
-// parameterised SQL string + params array, ready to hand to `pg`'s
-// `pool.query(sql, params)` or any compatible driver.
-//
 // Hard rules:
 //   • Never interpolate values into the SQL string — always via params.
 //   • Quote every identifier so case + reserved words don't bite.
-//   • Reject regex metacharacter injection: escape on the value, not the SQL.
-//
-// Schema mapping (Wave 2a):
-//   • model.collection → table name
-//   • field name → column name (1:1 for SQL; no id↔_id remap)
-//   • Wave 2d: `@map('col_name')` for divergent column names
+//   • Escape LIKE metacharacters on the value, not the SQL.
 
-const REGEX_ESCAPE = /[.*+?^${}()|[\]\\]/g;
 const escapeForLike = (s: string) => String(s).replace(/[%_\\]/g, (m) => '\\' + m);
 
 function modelDef(modelKey: string, override?: ModelDef<any>): ModelDef<any> {
@@ -41,16 +31,13 @@ function modelDef(modelKey: string, override?: ModelDef<any>): ModelDef<any> {
 interface CompileCtx {
   d: Dialect;
   table: string;          // quoted identifier of the current row source
-  model: ModelDef<any>;   // for resolving relation metadata + FK columns
+  model: ModelDef<any>;
   params: unknown[];
   // Alias counter so nested EXISTS subqueries get unique table aliases.
   aliasCount: { n: number };
-  // Optional schema override — lets tests with ad-hoc models drive relation
-  // EXISTS without registering models into the project schema map.
+  // Lets tests drive relation EXISTS with ad-hoc models not in the schema map.
   schemaOverride?: Record<string, ModelDef<any>>;
 }
-
-// ─── Where ──────────────────────────────────────────────────────────────────
 
 function compileWhere(ctx: CompileCtx, tree: WhereTree | undefined): string {
   if (!tree) return '';
@@ -76,17 +63,31 @@ function compileWhereNode(ctx: CompileCtx, tree: WhereTree): string {
       return inner ? `NOT (${inner})` : '';
     }
     case 'relation':
-      // Wave 2a: emit an EXISTS subquery against the target table by FK.
-      // This is the SQL-natural form for `some/every/none` and `is/isNot`.
       return compileRelationFilter(ctx, tree);
     case 'leaf':
       return compileLeaf(ctx, tree);
   }
 }
 
+const SQL_CMP_OPS: Partial<Record<string, string>> = {
+  eq: '=', ne: '<>', lt: '<', lte: '<=', gt: '>', gte: '>=',
+};
+
 function compileLeaf(ctx: CompileCtx, leaf: Extract<WhereTree, { kind: 'leaf' }>): string {
   const col = `${ctx.table}.${ctx.d.quoteIdent(leaf.field)}`;
   const ph = (v: unknown) => ctx.d.placeholder(ctx.params, v);
+
+  // Field-to-field comparison (`col('rhsField')`) → `lhsCol <op> rhsCol`. No
+  // placeholder: the right-hand side is a column, not a bound parameter.
+  if (leaf.rhsField !== undefined) {
+    const sqlOp = SQL_CMP_OPS[leaf.op];
+    if (!sqlOp) {
+      throw new Error(`[forge] col() comparison not supported for op '${leaf.op}'`);
+    }
+    const rhsCol = `${ctx.table}.${ctx.d.quoteIdent(leaf.rhsField)}`;
+    return `${col} ${sqlOp} ${rhsCol}`;
+  }
+
   switch (leaf.op) {
     case 'eq':       return leaf.value === null ? `${col} IS NULL`      : `${col} = ${ph(leaf.value)}`;
     case 'ne':       return leaf.value === null ? `${col} IS NOT NULL`  : `${col} <> ${ph(leaf.value)}`;
@@ -111,12 +112,8 @@ function compileLeaf(ctx: CompileCtx, leaf: Extract<WhereTree, { kind: 'leaf' }>
     case 'endsWith':
       return likeOp(ctx, col, `%${escapeForLike(String(leaf.value))}`, !!leaf.caseInsensitive);
     case 'has':
-      // text[] / integer[] containment: `column @> ARRAY[value]::col_type`.
-      // We don't know the column type at compile time (would need schema); use
-      // `?` (text[] only) when string, `@>` with array literal otherwise.
       return `${ph(leaf.value)} = ANY(${col})`;
     case 'hasSome': {
-      // ARRAY column overlap with values.
       const arr = leaf.value as unknown[];
       if (!arr.length) return 'FALSE';
       return `${col} && ARRAY[${arr.map(ph).join(', ')}]`;
@@ -136,7 +133,7 @@ function compileLeaf(ctx: CompileCtx, leaf: Extract<WhereTree, { kind: 'leaf' }>
         quoteIdent: (s: string) => ctx.d.quoteIdent(s),
       });
     case 'jsonPath':
-      // Still Wave 5 territory — placeholder so compiler doesn't error.
+      // Not yet implemented — placeholder so the compiler doesn't error.
       return 'TRUE';
   }
 }
@@ -150,7 +147,6 @@ function compileRelationFilter(
   ctx: CompileCtx,
   tree: Extract<WhereTree, { kind: 'relation' }>,
 ): string {
-  // Resolve the relation def on the parent model.
   const relations = ctx.model.relations();
   const rel = relations[tree.relation];
   if (!rel) return 'TRUE';
@@ -174,7 +170,6 @@ function compileRelationFilter(
   const joinCondition =
     `${aliasQ}.${ctx.d.quoteIdent(targetCol)} = ${ctx.table}.${ctx.d.quoteIdent(parentCol)}`;
 
-  // Recurse to compile the nested where against the target model's columns.
   const inner = tree.nested
     ? compileWhereNode(
         {
@@ -209,8 +204,6 @@ function notEmpty(s: string): boolean {
   return s.length > 0;
 }
 
-// ─── Projection ─────────────────────────────────────────────────────────────
-
 function compileProjectionCols(
   d: Dialect,
   table: string,
@@ -218,7 +211,7 @@ function compileProjectionCols(
   plan: ProjectionPlan | undefined,
 ): string {
   if (!plan) {
-    // All scalar fields on the table. Stable-ordered by schema declaration.
+    // Stable-ordered by schema declaration.
     const cols = Object.keys(model.fields).map((f) => `${table}.${d.quoteIdent(f)}`);
     return cols.join(', ');
   }
@@ -235,8 +228,6 @@ function compileProjectionCols(
   return Object.keys(model.fields).map((f) => `${table}.${d.quoteIdent(f)}`).join(', ');
 }
 
-// ─── Order ──────────────────────────────────────────────────────────────────
-
 function compileOrder(d: Dialect, table: string, orderBy: OrderByEntry[] | undefined): string {
   if (!orderBy?.length) return '';
   const parts = orderBy.map((e) =>
@@ -244,8 +235,6 @@ function compileOrder(d: Dialect, table: string, orderBy: OrderByEntry[] | undef
   );
   return `ORDER BY ${parts.join(', ')}`;
 }
-
-// ─── Cursor ─────────────────────────────────────────────────────────────────
 
 function compileCursor(
   d: Dialect,
@@ -265,8 +254,6 @@ function compileCursor(
   const vals = keys.map((k) => d.placeholder(params, cursor.fields[k])).join(', ');
   return `(${cols}) > (${vals})`;
 }
-
-// ─── Top-level compilers ────────────────────────────────────────────────────
 
 export function compileSelect(
   node: SelectNode,
@@ -340,7 +327,6 @@ export function compileInsert(
   const allKeys = new Set<string>();
   for (const r of node.rows) for (const k of Object.keys(r)) allKeys.add(k);
   const cols = Object.keys(m.fields).filter((f) => allKeys.has(f));
-  // Append any keys that aren't in schema (defensive — IR rows are post-coerce).
   for (const k of allKeys) if (!cols.includes(k)) cols.push(k);
 
   const colList = cols.map((c) => dialect.quoteIdent(c)).join(', ');
@@ -380,7 +366,7 @@ export function compileUpdate(
     }
     if (node.increment) {
       for (const [k, v] of Object.entries(node.increment)) {
-        // `SET col = col + $n` — atomic at PG's row-lock level.
+        // SET col = col + $n — atomic at PG's row-lock level.
         parts.push(`${dialect.quoteIdent(k)} = ${table}.${dialect.quoteIdent(k)} + ${dialect.placeholder(params, v)}`);
       }
     }
@@ -391,7 +377,6 @@ export function compileUpdate(
     }
     if (node.push) {
       for (const [k, v] of Object.entries(node.push)) {
-        // For text[]/integer[]: append. PG: array_append(col, val).
         parts.push(`${dialect.quoteIdent(k)} = array_append(${table}.${dialect.quoteIdent(k)}, ${dialect.placeholder(params, v)})`);
       }
     }
@@ -464,14 +449,9 @@ function whereLeafColumns(tree: WhereTree | undefined): string[] {
   return [];
 }
 
-// ─── GroupBy ────────────────────────────────────────────────────────────────
-//
-// Emits `SELECT <by-cols>, <aggs> FROM <table> WHERE … GROUP BY <by-cols>
-// HAVING … ORDER BY … LIMIT/OFFSET`. Aggregation SELECT-list entries are
-// aliased with a wire-stable name (`__agg_count_all`, `__agg_avg_age`, …) so
-// the executor can reshape rows back into Prisma's nested `{ _count, _avg, … }`
-// payload on the way out.
-
+// Aggregation SELECT-list entries are aliased with a wire-stable name
+// (`__agg_count_all`, `__agg_avg_age`, …) so the executor can reshape rows back
+// into Prisma's nested `{ _count, _avg, … }` payload on the way out.
 export function compileGroupBy(
   node: GroupByNode,
   modelOverride?: ModelDef<any>,

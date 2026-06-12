@@ -5,8 +5,7 @@ import type {
 } from '../types';
 import type { MysqlPool } from './execute';
 
-// Wave 5b — live-schema introspection for MySQL via INFORMATION_SCHEMA,
-// scoped to the current database (DATABASE()).
+// Live-schema introspection via INFORMATION_SCHEMA, scoped to DATABASE().
 
 export async function introspectMysql(pool: MysqlPool): Promise<DbIntrospection> {
   const [tables] = await pool.query(

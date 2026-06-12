@@ -1,12 +1,10 @@
 import type { FieldDef } from '../../schema/types';
 import type { Dialect } from '../postgres/dialect';
 
-// MySQL dialect. Diverges from PG/SQLite in three meaningful ways:
-//   • Identifier quoting uses backticks (` ` `name` `).
-//   • Placeholders are `?` (positional).
-//   • Upsert syntax is `ON DUPLICATE KEY UPDATE`, not `ON CONFLICT (col) DO UPDATE`.
-//   • No `text[]` — use JSON.
-//   • No `NULLS FIRST/LAST` — sort behaviour follows the collation.
+// MySQL dialect. Diverges from PG/SQLite:
+//   • Backtick identifier quoting; `?` positional placeholders.
+//   • Upsert is `ON DUPLICATE KEY UPDATE`, not `ON CONFLICT (col) DO UPDATE`.
+//   • No `text[]` (use JSON); no `NULLS FIRST/LAST` (follows collation).
 //   • Bools stored as TINYINT(1).
 
 export const MysqlDialect: Dialect = {

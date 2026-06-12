@@ -1,10 +1,6 @@
-// MySQL IR consumer — emits MySQL SQL + ? placeholders.
-//
-// Forks the PG compiler's dialect, then patches the upsert path (MySQL's
-// `INSERT … ON DUPLICATE KEY UPDATE col = VALUES(col)` looks different
-// from PG's `ON CONFLICT (col) DO UPDATE SET col = ?`), and drops PG-only
-// idioms (`ctid` → emulated with subquery on PK; `RETURNING *` not emitted
-// because MySQL doesn't support it — the executor does a follow-up SELECT).
+// MySQL IR consumer — runs the PG compiler with MysqlDialect, then patches the
+// output: rewrites upsert (ON CONFLICT → ON DUPLICATE KEY UPDATE col=VALUES),
+// the ctid single-row idiom → LIMIT 1, and strips RETURNING (unsupported).
 
 import type {
   CountNode,
@@ -65,9 +61,7 @@ export function compileCount(node: CountNode, modelOverride?: ModelDef<any>): SQ
 }
 
 export function compileInsert(node: InsertNode, modelOverride?: ModelDef<any>): SQLArtifact {
-  // PG compiler appends ` RETURNING *` (or `RETURNING col, col`). MySQL
-  // doesn't support RETURNING — strip it. The executor follows up with a
-  // SELECT to recover the inserted rows.
+  // Strip the PG compiler's RETURNING — unsupported; executor re-SELECTs.
   const a = pgCompileInsert(node, modelOverride, MysqlDialect);
   const sql = strip(a.sql, / RETURNING (?:\*|"[^"]+"(?:,\s*"[^"]+")*)\s*$/);
   return post({ ...a, sql });
@@ -83,27 +77,20 @@ export function compileUpdate(node: UpdateNode, modelOverride?: ModelDef<any>): 
   let a = pgCompileUpdate(node, modelOverride, MysqlDialect);
   let sql = a.sql;
 
-  // RETURNING * is unsupported — drop it; executor does follow-up SELECT.
+  // RETURNING unsupported — strip; executor re-SELECTs.
   sql = strip(sql, / RETURNING (?:\*|`[^`]+`(?:,\s*`[^`]+`)*)\s*$/);
 
-  // ctid (PG hidden row id) → no equivalent in MySQL; use `LIMIT 1` on the
-  // OUTER update for single-row writes. The PG compiler's ctid subquery
-  // technique doesn't translate cleanly, so rewrite single-row updates to
-  // a plain `UPDATE … WHERE … LIMIT 1` form.
+  // MySQL has no ctid. PG's ctid-subquery single-row idiom → `UPDATE … LIMIT 1`.
   sql = sql.replace(
     /UPDATE (`[^`]+`) SET (.+?) WHERE ctid = \(SELECT ctid FROM \1 WHERE (.+?) LIMIT 1\)/,
     'UPDATE $1 SET $2 WHERE $3 LIMIT 1',
   );
 
-  // For upsert: rewrite `ON DUPLICATE KEY UPDATE col = ?` (with leftover ?
-  // placeholders from PG's SET clause) to `ON DUPLICATE KEY UPDATE col =
-  // VALUES(col)`. We use VALUES() instead of repeating placeholders since
-  // the VALUES already supplied the new values.
+  // Upsert: rewrite each `col = ?` after ON DUPLICATE KEY UPDATE to
+  // `col = VALUES(col)`, reusing the values already supplied in VALUES(...).
   if (node.upsertCreate && sql.includes('ON DUPLICATE KEY UPDATE')) {
-    // Find the SET assignments after ON DUPLICATE KEY UPDATE.
     const m = sql.match(/ON DUPLICATE KEY UPDATE (.+?)$/);
     if (m) {
-      // Replace each `col = <expression>` with `col = VALUES(col)`.
       const rewritten = m[1].split(',').map((assign) => {
         const eq = assign.indexOf('=');
         if (eq < 0) return assign;
@@ -112,13 +99,8 @@ export function compileUpdate(node: UpdateNode, modelOverride?: ModelDef<any>): 
       }).join(',').trim();
       sql = sql.replace(/ON DUPLICATE KEY UPDATE .+$/, `ON DUPLICATE KEY UPDATE ${rewritten}`);
 
-      // Strip the now-unused placeholders from the params array: PG's
-      // compiler pushed VALUES params + SET-clause params. The SET params
-      // are now embedded as VALUES(col) — drop them.
-      // The params at this point: [values_params..., set_clause_params...].
-      // We assume node.set's keys count + node.increment/multiply count
-      // matched the SET clause length. Simplest: keep only the first
-      // Object.keys(node.upsertCreate).length params.
+      // Params are [values_params..., set_clause_params...]. The SET params are
+      // now embedded as VALUES(col), so drop them — keep only the VALUES params.
       const keep = Object.keys(node.upsertCreate).length;
       return post({ ...a, sql, params: a.params.slice(0, keep) });
     }
@@ -130,7 +112,6 @@ export function compileUpdate(node: UpdateNode, modelOverride?: ModelDef<any>): 
 export function compileDelete(node: DeleteNode, modelOverride?: ModelDef<any>): SQLArtifact {
   const a = pgCompileDelete(node, modelOverride, MysqlDialect);
   let sql = a.sql;
-  // RETURNING unsupported.
   sql = strip(sql, / RETURNING (?:\*|`[^`]+`(?:,\s*`[^`]+`)*)\s*$/);
   // Single-row DELETE — rewrite ctid idiom to `LIMIT 1`.
   sql = sql.replace(
@@ -144,5 +125,4 @@ export function compileGroupBy(node: GroupByNode, modelOverride?: ModelDef<any>)
   return post(pgCompileGroupBy(node, modelOverride, MysqlDialect));
 }
 
-// expose modelDef for the executor's follow-up SELECT
 export { modelDef };

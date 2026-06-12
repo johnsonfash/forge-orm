@@ -29,27 +29,7 @@ type ResolvedRow<F extends Record<string, Field<any, any>>> = {
   [K in keyof F]: F[K] extends Field<infer T, any> ? T : never;
 };
 
-// ============================================================================
 // CollectionWrapper — Prisma-shape API over a Mongo collection.
-//
-// Methods mirrored:
-//   findFirst, findUnique, findFirstOrThrow, findUniqueOrThrow, findMany,
-//   create, createMany, update, updateMany, upsert, delete, deleteMany,
-//   count, aggregate.
-//
-// Cross-cutting features:
-//   • _id ↔ id remap, ObjectId/Date coercion driven by the schema (no
-//     hardcoded field-name lists).
-//   • Default values: f.id() → ObjectId; .default('now') → Date; literals
-//     applied at create time. .updatedAt() applied automatically on update.
-//   • Relation hydration via post-fetch batched queries (see relations.ts).
-//   • Nested writes: { rel: { create, createMany, connect } } on inverse-
-//     side many relations, and { rel: { connect } } on owning one-side.
-//   • Cascade deletes mirroring the schema's onDelete: Cascade / SetNull.
-//   • Session binding for $transaction — every operation accepts the tx
-//     session via withSession(session).
-// ============================================================================
-
 interface NestedSpec {
   rel: RelationDef;
   op:
@@ -58,10 +38,9 @@ interface NestedSpec {
   data: any;
 }
 
-// Schema-bound aliases — resolved against the schema-map type `SM` (the
-// consumer's schema, or the bundled sample by default). Threading SM lets
-// include/select resolve relation TARGETS against whichever schema this wrapper
-// belongs to, so a custom consumer schema gets full nested typing.
+// Threading the schema-map type `SM` lets include/select resolve relation
+// TARGETS against whichever schema this wrapper belongs to, so a custom consumer
+// schema gets full nested typing.
 type Find1<
   F extends Record<string, Field<any, any>>,
   R extends Record<string, RelationInfo>,
@@ -87,10 +66,9 @@ export class CollectionWrapper<
 > {
   private _collection?: Collection<Document>;
   private _compileApi?: MongoCompileApi;
-  // Adapter that drives execute / coerce / decode / cascade. Defaults to the
-  // lazily-built Mongo singleton so the default Mongo path and other Mongo
-  // consumers work without surgery. createDb() in factory.ts injects the
-  // active adapter explicitly when the user picked Postgres / MySQL / SQLite.
+  // Defaults to the lazily-built Mongo singleton so the default Mongo path works
+  // without surgery. createDb() injects the active adapter explicitly for
+  // Postgres / MySQL / SQLite.
   constructor(
     public model: ModelDef<any>,
     private _session?: unknown,
@@ -102,11 +80,10 @@ export class CollectionWrapper<
     return this._adapter ?? getDefaultMongoAdapter();
   }
 
-  // Wave 5e — strict mode. When createDb({ strict: true }) is set, reject any
-  // `where` key that isn't a real field, a known synthetic composite-unique
-  // key, a relation name, or a recognised logical/structural operator. This
-  // closes the `[key: string]: any` escape hatch on WhereInput so typos surface
-  // instead of silently matching nothing.
+  // Strict mode rejects any `where` key that isn't a real field, a known
+  // synthetic composite-unique key, a relation name, or a recognised
+  // logical/structural operator — closing the `[key: string]: any` escape hatch
+  // on WhereInput so typos surface instead of silently matching nothing.
   private static readonly _whereOps = new Set([
     'AND', 'OR', 'NOT', '_withDeleted',
   ]);
@@ -134,19 +111,16 @@ export class CollectionWrapper<
     }
   }
 
-  // Returns a session-bound wrapper for use inside $transaction(callback).
-  // The wrapper shares the same model definition + adapter; only the session
-  // differs. The adapter's session type (Mongo: ClientSession, PG: PoolClient)
-  // flows through opaquely via _session.
+  // Returns a session-bound wrapper for use inside $transaction(callback). The
+  // adapter's session type (Mongo: ClientSession, PG: PoolClient) flows through
+  // opaquely via _session.
   withSession(session: unknown): CollectionWrapper<F, R, SM> {
     return new CollectionWrapper<F, R, SM>(this.model, session, this._adapter, this._strict);
   }
 
   // Compile namespace — same arg shape as the execute methods, but returns a
-  // typed artifact instead of executing. Useful for: forwarding to a manually
-  // managed driver, generating migration/seed scripts, debugging, replay/audit.
-  //   const c = db.user.compile.findMany({ where: { active: true }, take: 20 });
-  //   await client.db().collection(c.collection)[c.op](c.args.filter, c.args.options).toArray();
+  // typed artifact instead of executing (for forwarding to a manually managed
+  // driver, generating migration/seed scripts, debugging, replay/audit).
   get compile(): MongoCompileApi {
     if (!this._compileApi) this._compileApi = buildMongoCompileApi(this.model);
     return this._compileApi;
@@ -162,8 +136,6 @@ export class CollectionWrapper<
   private get sessOpt() {
     return this._session ? { session: this._session } : {};
   }
-
-  // ─── Reads ────────────────────────────────────────────────────────────
 
   async findFirst<A extends {
     where?: WhereInput<F>;
@@ -236,32 +208,18 @@ export class CollectionWrapper<
     return this._find(args, undefined) as Promise<Find1<F, R, A, SM>[]>;
   }
 
-  // Wave 4 — streaming reads.
+  // Streaming reads. Yields rows one-by-one (or in driver-sized batches) without
+  // buffering the full result set — for large exports/batch jobs.
   //
-  // Returns an AsyncIterable that yields rows one-by-one (or in driver-sized
-  // batches) without buffering the full result set. Use for large exports,
-  // batch jobs, anything where the result set could exceed available memory.
-  //
-  // Per-adapter strategy:
-  //   • Postgres: pg's pool query with rowMode=array isn't easy to stream from
-  //     a pool without `pg-cursor`. Fallback: chunked OFFSET/LIMIT loop with
-  //     `chunkSize` (default 1000). Cursor-based streaming will be the Wave 5
-  //     polish.
-  //   • MySQL: mysql2 supports `connection.query(sql).stream()` natively.
-  //   • SQLite: better-sqlite3's `stmt.iterate()` is the canonical stream API.
-  //   • Mongo: native cursor — `collection.find().stream()`.
-  //
-  // Hydration / include / select inside streams: only the leaf rows are
-  // streamed; relation hydration is not batched across the stream. If you
-  // need include, materialise the chunk first (findMany on each chunk).
+  // WARNING: only leaf rows are streamed; relation hydration is NOT batched
+  // across the stream. If you need include, materialise the chunk first
+  // (findMany on each chunk).
   async *findManyStream<A extends {
     where?: WhereInput<F>;
     orderBy?: OrderByInput<F> | OrderByInput<F>[];
     chunkSize?: number;
   }>(args: A = {} as A): AsyncIterable<ResolvedRow<F>> {
-    // Wave 4b — prefer adapter-native streaming (PG cursor, MySQL stream,
-    // SQLite iterate, Mongo cursor) when implemented. Falls back to
-    // OFFSET/LIMIT chunking otherwise.
+    // Prefer adapter-native streaming; fall back to OFFSET/LIMIT chunking.
     if (typeof (this.adapter as any).streamSelect === 'function') {
       const mk = this._modelKey();
       const filtered = this._withSoftDeleteFilter(args);
@@ -270,7 +228,6 @@ export class CollectionWrapper<
       for await (const row of iter) yield row as ResolvedRow<F>;
       return;
     }
-    // Fallback (kept for any future adapter without streamSelect).
     const chunkSize = args.chunkSize ?? 1000;
     let offset = 0;
     while (true) {
@@ -312,9 +269,8 @@ export class CollectionWrapper<
     return this.adapter.executeGroupBy(node, this.model, { session: this._session });
   }
 
-  // Lazily resolve the schema-side key for this model — needed by IR builders
-  // (which want a portable string key, not a collection name) and the
-  // executor (for schema-aware hydration recursion).
+  // Lazily resolve the schema-side key for this model — IR builders and the
+  // executor want a portable string key, not a collection name.
   private _modelKey(): string {
     if (this._cachedKey) return this._cachedKey;
     for (const key of Object.keys(schema as any)) {
@@ -329,8 +285,6 @@ export class CollectionWrapper<
   }
   private _cachedKey?: string;
 
-  // ─── Writes ───────────────────────────────────────────────────────────
-
   // Block writes on read-only view models.
   private _assertWritable(op: string): void {
     if ((this.model as any).view) {
@@ -341,11 +295,10 @@ export class CollectionWrapper<
     }
   }
 
-  // Auto-generate the primary key when the caller didn't supply one, so you
-  // never have to assign an id on create. Mongo mints an ObjectId in
-  // coerceInbound; SQL dialects have no server default for forge's string id,
-  // so we generate a UUID here. Only fills when the id field has an autoId
-  // default (the f.id() default) and no value was provided.
+  // Auto-generate the primary key when the caller didn't supply one. Mongo mints
+  // an ObjectId in coerceInbound; SQL dialects have no server default for forge's
+  // string id, so we generate a UUID here. Only fills when the id field has an
+  // autoId default and no value was provided.
   private _autoIdName?: string | null;
   private _fillAutoId(data: any): any {
     if (this.adapter.kind === 'mongo' || !data || typeof data !== 'object') return data;
@@ -389,8 +342,8 @@ export class CollectionWrapper<
     this._assertWritable('create');
     const mk = this._modelKey();
     const { scalar, nested } = this._splitNestedWrites(args.data, /*forCreate*/ true);
-    // Resolve owning-side connectOrCreate first — sets the FK on `scalar` so
-    // the parent insert satisfies the FK constraint.
+    // Resolve owning-side connectOrCreate first — sets the FK on `scalar` so the
+    // parent insert satisfies the FK constraint.
     const resolvedScalar = await this._resolveOwningConnectOrCreate(scalar, nested);
     const row = this.adapter.coerceInbound(this.model, this._fillAutoId(resolvedScalar));
     const node = buildInsert(mk, this.model, { rows: [row] }, schema as any);
@@ -547,10 +500,8 @@ export class CollectionWrapper<
     return { count: r.count };
   }
 
-  // ─── Aggregation ─────────────────────────────────────────────────────
   // Replaces Prisma's aggregateRaw — same signature, returns plain documents
   // with stringified ObjectIds for ergonomic parity.
-
   async aggregate(args: { pipeline: any[]; options?: any }): Promise<any[]> {
     // Coerce MongoDB extended-JSON markers in the pipeline ({$oid, $date})
     // to native ObjectId/Date — Prisma's aggregateRaw did this transparently.
@@ -561,8 +512,6 @@ export class CollectionWrapper<
       .toArray();
     return docs.map(stringifyObjectIds);
   }
-
-  // ─── Wave 5d — materialised views ────────────────────────────────────
 
   // Recompute a materialised view's contents from its source definition.
   //   PG     → REFRESH MATERIALIZED VIEW [CONCURRENTLY]
@@ -585,9 +534,9 @@ export class CollectionWrapper<
     await (this.adapter as any).refreshView(this.model, { ...opts, session: this._session });
   }
 
-  // Wave 5d — auto-refresh on an interval. Returns a stop() that clears the
-  // timer (the caller owns the lifecycle — no hidden leaked timers). Use the
-  // model's declared `.asView({ refreshEvery })` value, or pass one explicitly.
+  // Auto-refresh on an interval. Returns a stop() that clears the timer — the
+  // caller owns the lifecycle (no hidden leaked timers). Uses the model's
+  // declared `.asView({ refreshEvery })` value, or pass one explicitly.
   scheduleRefresh(every?: string): () => void {
     const spec = every ?? (this.model as any).view?.refreshEvery;
     const ms = parseDuration(spec);
@@ -597,9 +546,7 @@ export class CollectionWrapper<
     return () => clearInterval(timer);
   }
 
-  // ─── Internal: read pipeline ─────────────────────────────────────────
-
-  // Wave 4b — return the soft-delete field name if the model has one.
+  // Return the soft-delete field name if the model has one.
   private _softDeleteField(): string | undefined {
     for (const [name, f] of Object.entries(this.model.fields)) {
       if ((f as any).softDeleteAt) return name;
@@ -623,9 +570,8 @@ export class CollectionWrapper<
   }
 
   private async _find(args: any, hardLimit: number | undefined): Promise<any[]> {
-    // Build an IR SelectNode and hand it to the Mongo executor. This is the
-    // adapter-agnostic boundary: SQL adapters consume the same node shape
-    // in Wave 2+.
+    // Build an IR SelectNode and hand it to the executor — the
+    // adapter-agnostic boundary; SQL adapters consume the same node shape.
     this._assertStrictWhere(args?.where);
     const mk = this._modelKey();
     args = this._withSoftDeleteFilter(args);
@@ -637,9 +583,6 @@ export class CollectionWrapper<
       node.limit = hardLimit;
     }
     const rows = await this.adapter.executeSelect(node, this.model, { session: this._session });
-    // The IR-driven pipeline already applies projection / distinct /
-    // hydration. The legacy `select`-side row pruning happens too via
-    // ProjectionPlan.exclusive in compile-from-ir. Nothing else to do.
     return rows;
   }
 
@@ -650,8 +593,8 @@ export class CollectionWrapper<
     if (!rawDoc) return rawDoc;
     const decoded = this.adapter.decodeOutbound(this.model, rawDoc);
     const rows = [decoded];
-    // Use the IR's projection plan + the executor's shared hydration helper
-    // so writes get the exact same select/include/omit semantics as reads.
+    // Reuse the IR's projection plan + the executor's hydration helper so writes
+    // get the exact same select/include/omit semantics as reads.
     const { projection, hydration } = buildProjection(this.model, args, schema as any);
     await this.adapter.applyProjectionAndHydration(
       rows, this.model, { projection, hydration }, { session: this._session },
@@ -661,7 +604,6 @@ export class CollectionWrapper<
     // controls what Mongo returns; for writes we already hold a full doc.
     if (projection?.exclusive && projection.fields.length) {
       const kept = new Set(projection.fields);
-      // Keep hydrated relation keys + _count too.
       if (hydration) for (const h of hydration) kept.add(h.name);
       if (projection.counts.length) kept.add('_count');
       const pruned: any = {};
@@ -678,14 +620,11 @@ export class CollectionWrapper<
     return rows[0];
   }
 
-  // ─── Internal: nested-write split + apply ────────────────────────────
-  //
   // Prisma lets you write `parent.create({ data: { ..., rel: { create: {...} } } })`.
   // We split this into a scalar payload (passed to insertOne/updateOne) and a
-  // list of nested operations to apply post-write. Inverse-side many
-  // relations get FK-injected child writes; owning one-side `connect` rewrites
-  // the FK on the parent's scalar payload.
-
+  // list of nested operations to apply post-write. Inverse-side many relations
+  // get FK-injected child writes; owning one-side `connect` rewrites the FK on
+  // the parent's scalar payload.
   private _splitNestedWrites(data: any, forCreate: boolean): {
     scalar: any;
     nested: NestedSpec[];
@@ -722,8 +661,7 @@ export class CollectionWrapper<
           scalar[rel.on] = null;
         } else if ('create' in value && value.create) {
           // Nested create on owning side: create the parent target first,
-          // then connect by id. Implemented as a NestedSpec.create with a
-          // synthetic targetCollection direction.
+          // then connect by id.
           nested.push({ rel, op: 'create', data: value.create });
         }
         continue;
@@ -788,7 +726,6 @@ export class CollectionWrapper<
         continue;
       }
       if (op === 'connect') {
-        // Set the FK on each connected child to point at this parent.
         const targets = Array.isArray(spec.data) ? spec.data : [spec.data];
         for (const t of targets) {
           const tId = t[rel.refs] ?? t.id ?? t._id;
@@ -829,7 +766,6 @@ export class CollectionWrapper<
         const items: any[] = Array.isArray(spec.data) ? spec.data : [spec.data];
         for (const it of items) {
           if (!it?.where) continue;
-          // Try to find by where; if missing, create.
           let existing: any = await targetWrapper.findFirst({ where: it.where });
           if (!existing) {
             // For inverse-many side, attach FK pointing back at parent.
@@ -852,11 +788,9 @@ export class CollectionWrapper<
             parentDoc[rel.on] = tId;
           }
         }
-        // If we mutated parentDoc[rel.on] for owning-one connectOrCreate,
-        // persist the change.
+        // Persist the FK mutated for owning-one connectOrCreate. Use the
+        // wrapper's own update so it flows through the adapter.
         if (!rel.inverse && parentDoc._id && parentDoc[rel.on] != null) {
-          // Issue a follow-up update so the new FK lands on the parent row.
-          // We use the wrapper's own update to flow through the adapter.
           await this.update({
             where: { id: parentDoc._id ?? parentDoc.id } as any,
             data: { [rel.on]: parentDoc[rel.on] } as any,
@@ -870,8 +804,8 @@ export class CollectionWrapper<
   }
 }
 
-// Wave 5d — parse a simple duration string ('30s', '5m', '1h', '2d') to ms.
-// Returns undefined for unparseable input so callers can give a clear error.
+// Parse a simple duration string ('30s', '5m', '1h', '2d') to ms. Returns
+// undefined for unparseable input so callers can give a clear error.
 export function parseDuration(spec: string | undefined): number | undefined {
   if (!spec || typeof spec !== 'string') return undefined;
   const m = /^(\d+)\s*(ms|s|m|h|d)$/.exec(spec.trim());

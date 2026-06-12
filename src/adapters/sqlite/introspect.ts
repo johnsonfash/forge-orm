@@ -1,9 +1,8 @@
 import type { DbIntrospection, IntrospectedTable } from '../types';
 import type { SqliteDb } from './execute';
 
-// Wave 5b — live-schema introspection for SQLite via sqlite_master + PRAGMA.
-// better-sqlite3 is synchronous; we resolve into a Promise to satisfy the
-// async Adapter contract.
+// Live-schema introspection via sqlite_master + PRAGMA. Sync driver resolved
+// into a Promise to satisfy the async Adapter contract.
 
 export async function introspectSqlite(db: SqliteDb): Promise<DbIntrospection> {
   const q = (s: string) => `"${s.replace(/"/g, '""')}"`;

@@ -16,7 +16,7 @@ export function buildCursor(cursor: any): CursorSpec | undefined {
   for (const key of Object.keys(cursor)) {
     const v = (cursor as any)[key];
     if (v == null) continue;
-    // Composite form: key is a synthetic name, value is the object map.
+    // Composite form: key is a synthetic @@unique name, value is the field map.
     if (typeof v === 'object' && !(v instanceof Date) && !Array.isArray(v)) {
       for (const inner of Object.keys(v)) fields[inner] = v[inner];
     } else {

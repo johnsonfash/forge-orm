@@ -7,30 +7,18 @@ import { dbClient } from '../client';
 import { schema as bundledSampleSchema } from '../../../schema';
 import { FieldDef, ModelDef } from '../../../schema/types';
 
-// ============================================================================
-// db:u — pushes every index declared in the schema to MongoDB.
+// db:u — pushes every index declared in the schema to MongoDB. Drop-in
+// replacement for `prisma db push`. Notable behaviour:
 //
-// Drop-in replacement for `prisma db push`. Differences worth knowing:
+//   1. Pre-fetch existing indexes with listIndexes() ONCE per collection, diff
+//      against the desired set, and only createIndex for new/changed specs.
+//      Re-running against an in-sync DB does ~N RTTs (one per collection).
+//   2. When key spec OR options drifted (Mongo error 85/86), drop and recreate.
+//      Old data violating a newly-added unique constraint is logged, not crashed.
+//   3. Output grouped per collection: ✓ created, ↻ rebuilt, ⚡ skipped, ⚠ warning.
 //
-//   1. Pre-fetch existing indexes with listIndexes() ONCE per collection,
-//      diff against the desired set, and only call createIndex for new or
-//      changed specs. The hot path is now a single index list per collection
-//      and zero server-side work for indexes that match — re-running this
-//      against an in-sync DB does ~N RTTs (one per collection), nothing more.
-//
-//   2. When key spec OR options drifted (Mongo error 85/86), drop and
-//      recreate so the new definition lands. Old data that violates a
-//      newly-added unique constraint is logged, not crashed.
-//
-//   3. Output is grouped per collection and tagged so you can tell at a
-//      glance what changed: ✓ created, ↻ rebuilt, ⚡ skipped, ⚠ warning.
-//
-// Walks the schema:
-//   • _id (always present, automatic by Mongo) — never re-pushed.
-//   • Single-field uniques  — every field with `.unique()`.
-//   • Composite uniques     — every entry in model.uniques (@@unique).
-//   • Plain compound idxs   — every entry in model.indexes (@@index).
-// ============================================================================
+// Index sources: single-field uniques (.unique()), composite uniques
+// (model.uniques), plain compound indexes (model.indexes). _id is never pushed.
 
 interface IndexSpec {
   keys: Record<string, 1 | -1 | 'text'>;
@@ -48,9 +36,7 @@ interface IndexInfo {
   expireAfterSeconds?: number;
 }
 
-// ─── Existing-index diff ────────────────────────────────────────────────────
-
-// Stable JSON for spec comparison: preserves key insertion order.
+// Stable string for spec comparison: preserves key insertion order.
 function fingerprint(keys: Record<string, any>, unique?: boolean, sparse?: boolean, expireAfterSeconds?: number): string {
   const keyStr = Object.keys(keys)
     .map((k) => `${k}:${keys[k]}`)
@@ -80,8 +66,6 @@ async function listExisting(collection: Collection): Promise<Map<string, IndexIn
   }
 }
 
-// ─── Per-spec push with conflict recovery ───────────────────────────────────
-
 async function ensureIndex(
   collection: Collection,
   spec: IndexSpec,
@@ -102,7 +86,7 @@ async function ensureIndex(
     if (haveFp === want) {
       return 'skipped';
     }
-    // Drift — drop and recreate.
+    // Spec drifted — drop and recreate.
     try {
       await collection.dropIndex(spec.name);
       await collection.createIndex(spec.keys, opts);
@@ -113,16 +97,14 @@ async function ensureIndex(
     }
   }
 
-  // Not present — create.
   try {
     await collection.createIndex(spec.keys, opts);
     return 'created';
   } catch (err: any) {
     const code = err?.code;
     const msg = err?.message || '';
-    // Race / pre-existing on a different name (rare): try to recover by
-    // dropping the named one if it now exists (e.g. created by a concurrent
-    // run) then no-op.
+    // Race / pre-existing on a different name: recover by dropping the named
+    // index if it now exists (e.g. from a concurrent run) and recreating.
     if (
       code === 85 ||
       code === 86 ||
@@ -142,8 +124,6 @@ async function ensureIndex(
     return 'warned';
   }
 }
-
-// ─── Schema → IndexSpec[] ────────────────────────────────────────────────────
 
 function indexNameFor(modelName: string, keys: Record<string, any>, unique?: boolean): string {
   const k = Object.keys(keys)
@@ -190,10 +170,9 @@ function collectIndexSpecs(modelName: string, model: ModelDef<any>): IndexSpec[]
     });
   }
 
-  // Wave 4b — `.searchable()` fields. Mongo allows at most ONE text index
-  // per collection; if multiple fields are marked, combine them into a
-  // single text index across all marked columns.
-  const textCols = entries.filter(([, f]) => f.searchable).map(([n]) => n);
+  // `.searchable()` fields. Mongo allows at most ONE text index per collection,
+  // so combine every marked field into a single text index.
+  const textCols =entries.filter(([, f]) => f.searchable).map(([n]) => n);
   if (textCols.length > 0) {
     const keys: Record<string, any> = {};
     for (const c of textCols) keys[c] = 'text';
@@ -205,8 +184,6 @@ function collectIndexSpecs(modelName: string, model: ModelDef<any>): IndexSpec[]
 
   return specs;
 }
-
-// ─── Main ────────────────────────────────────────────────────────────────────
 
 /**
  * Push every index declared on the supplied schema to MongoDB.
@@ -243,10 +220,8 @@ export async function pushAllIndexes(consumerSchema?: any): Promise<void> {
     rebuilt = 0,
     warned = 0;
 
-  // Wave 4c — create any view-models first. Mongo views are collections
-  // created with `viewOn` + `pipeline`. Idempotent: if a collection of that
-  // name already exists with the same source/pipeline, skip; otherwise
-  // re-create (drop + create).
+  // Create any view-models first. Mongo views are collections created with
+  // `viewOn` + `pipeline`; we drop + recreate to honour pipeline drift.
   for (const [, model] of Object.entries(schema)) {
     const m = model as ModelDef<any>;
     if (!m.view) continue;
@@ -256,9 +231,9 @@ export async function pushAllIndexes(consumerSchema?: any): Promise<void> {
       console.log(`   ⚠ view '${m.collection}' missing sourceCollection — skipped`);
       continue;
     }
-    // Wave 5d — materialised view: a real collection populated by the
-    // pipeline's $out/$merge stage (not a Mongo read-only view). Initial
-    // populate happens here; db.<model>.refresh() re-runs it later.
+    // Materialised view: a real collection populated by the pipeline's
+    // $out/$merge stage (not a Mongo read-only view). Initial populate happens
+    // here; db.<model>.refresh() re-runs it later.
     if (m.view.materialised) {
       const hasOut = pipeline.some((s) => s && (s.$merge || s.$out));
       const full = hasOut ? pipeline : [...pipeline, { $out: m.collection }];
@@ -268,7 +243,6 @@ export async function pushAllIndexes(consumerSchema?: any): Promise<void> {
     }
     const existing = await db.listCollections({ name: m.collection }).toArray();
     if (existing.length > 0) {
-      // Drop + recreate to honour any pipeline drift. Cheap — views hold no data.
       try { await db.dropCollection(m.collection); } catch { /* */ }
     }
     await db.createCollection(m.collection, { viewOn: source, pipeline });

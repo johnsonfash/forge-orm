@@ -22,6 +22,10 @@ export {
   buildWhereTree, buildOrderBy, buildProjection, buildUpdateData, buildCursor,
 } from './ir/build';
 
+// ─── Column references — field-to-field comparison in `where` ───────────────
+export { col, isColRef, FORGE_COL } from './col';
+export type { ColRef } from './col';
+
 // ─── JSON-null markers ──────────────────────────────────────────────────────
 export {
   ForgeDbNull, ForgeJsonNull, ForgeAnyNull, isForgeNullMarker,
@@ -31,17 +35,11 @@ export {
 export { forgeValidator } from './validator';
 
 // ─── Schema DSL — define YOUR OWN models, then `createDb({ schema })` ───────
-// This is what makes forge a drop-in library: bring your own schema map.
-//   import { f, model, rel, enums, embed } from '@guide/forge';
-//   const Product = model('products', { id: f.id(), title: f.string(), price: f.decimal({ precision: 10, scale: 2 }) });
-//   const mySchema = { product: Product } as const;
-//   const db = await createDb({ url, schema: mySchema });   // db.product is fully typed
 export { f, model, rel, enums, embed } from './schema/core';
 export type { Field, TypedModel, RelationInfo, EnumDef, ModelOptions } from './schema/core';
 export type { FieldDef, FieldKind, ModelDef, IndexDef, RelationDef, OnDeleteAction, EmbedDef } from './schema/types';
-// The bundled sample schema (a blog/CMS domain) — handy as a reference, and the
-// default when you don't pass your own. `SchemaShape` is the structural type any
-// schema map satisfies; the active-schema setters are exported for advanced use.
+// Bundled sample schema (blog/CMS) — the default when you don't pass your own.
+// `SchemaShape` is the structural type any schema map satisfies.
 export { sampleSchema } from './schema';
 export { setActiveSchema, getActiveSchema } from './schema/active';
 export type { SchemaShape } from './schema/active';
@@ -52,12 +50,8 @@ export type { SchemaShape } from './schema/active';
 export type { ForgeOf, ForgeModels, PerModelTypes } from './forge-types';
 
 // ─── Direct-from-model inference (no SchemaMap registration required) ──────
-// Take a `typeof MyModel` and pull out any input/output shape you need:
-//   type C = InferCreate<typeof User>;
-//   type U = InferUpdate<typeof User>;
-//   type W = InferWhere<typeof User>;
-//   type All = Infer<typeof User>;            // .Row, .Where, .Create, .Update, …
-//   type Map = InferSchema<typeof mySchema>;  // mapped bundles, with relations
+//   InferCreate / InferUpdate / InferWhere<typeof User>, Infer<typeof User>
+//   (.Row/.Where/.Create/.Update/…), InferSchema<typeof mySchema>
 export type {
   Infer,
   InferRow,
@@ -79,29 +73,23 @@ export { buildPostgresCompileApi } from './adapters/postgres/compile';
 // ─── Raw SQL escape hatch ───────────────────────────────────────────────────
 // Tagged template + composition helpers — safe by default (values become
 // placeholders, never interpolated).
-//   const users = await db.$queryRaw<User>`SELECT * FROM users WHERE id = ${id}`;
 export { forgeSql, isSqlFragment, compileSqlFragment } from './raw-sql';
 export type { SqlFragment, CompiledRawSql } from './raw-sql';
 
 // Observability event types. Subscribe via db.$on('query'|'error', cb).
 export type { QueryEvent, ErrorEvent, EventListener } from './events';
 export { ForgeEmitter } from './events';
-// OpenTelemetry helper (structural — works with any tracer exposing
-// startSpan; @opentelemetry/api stays optional).
+// OpenTelemetry helper (structural — @opentelemetry/api stays optional).
 export { wireOtel } from './observability/otel';
 export type { OtelTracer, OtelSpan, WireOtelOptions } from './observability/otel';
 
-// Mongo connection singleton (used internally by the Mongo adapter's default
-// path). Standalone — forge has no framework coupling.
+// Mongo connection singleton (used internally by the Mongo adapter's default path).
 export { dbClient } from './client';
 
 // ─── Schema (sample blog/CMS) ───────────────────────────────────────────────
-//
-// The shipped schema is a sample. To use forge in another project, replace
+// The shipped schema is a sample. To use forge elsewhere, replace
 // src/schema/index.ts with that project's models and re-export Row types here
-// the same way (or just consume ForgeOf<'modelKey'> / ForgeModels['Name'] —
-// those are derived automatically from the schema map).
-
+// the same way (or consume ForgeOf<'modelKey'> / ForgeModels['Name']).
 export {
   schema,
   User, Profile, Post, Comment, Tag, PostTag, Like, AuditLog,
@@ -117,9 +105,7 @@ import {
 import { Row } from './schema/core';
 
 // ─── Named row types (Prisma-style imports work) ────────────────────────────
-//
-// `import { UserRow } from '@forge'` gives you the row shape for the sample
-// User. Real projects rename these to match their models.
+// Sample-schema row shapes; real projects rename these to match their models.
 export type UserRow      = Row<typeof _User>;
 export type ProfileRow   = Row<typeof _Profile>;
 export type PostRow      = Row<typeof _Post>;
@@ -136,8 +122,6 @@ export type { Row } from './schema/core';
 export { DbKnownError } from './adapters/mongo/errors';
 
 // ─── Drift detection (programmatic API behind `forge diff`) ─────────────────
-// Re-exported so tooling that wraps forge diff (CI gates, dashboards,
-// custom remediation scripts) doesn't have to fork the comparator.
 export {
   diffIntrospection,
   expectedFromSchema,
@@ -150,6 +134,5 @@ export type {
   IgnoreSpec,
 } from './scripts/diff-core';
 
-// Convenience alias: re-export ForgeModels under the Forge name for users who
-// prefer that. (ForgeModels is the real thing, derived from schema, no codegen.)
+// Convenience alias for ForgeModels.
 export type { ForgeModels as Forge } from './forge-types';

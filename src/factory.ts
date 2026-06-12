@@ -15,28 +15,17 @@ import { PostgresAdapter } from './adapters/postgres/adapter';
 import { MysqlAdapter } from './adapters/mysql/adapter';
 import { SqliteAdapter } from './adapters/sqlite/adapter';
 
-// createDb() — adapter-agnostic factory.
-//
-// Three call shapes, all returning the same Db handle:
-//
-//   1) URL only — adapter inferred from prefix
-//        createDb({ url: process.env.DATABASE_URL! })
-//
-//   2) Explicit type + URL
-//        createDb({ type: 'postgres', url: 'postgres://…' })
-//
-//   3) Structured config — type required, no url
-//        createDb({ type: 'postgres', host, port, database, user, password })
-//
-// On adapter detection failure or driver-not-installed, throws an actionable
-// error pointing the caller at the install command.
+// createDb() — adapter-agnostic factory. Three call shapes, all returning the
+// same Db handle: URL only (adapter inferred), explicit type + URL, or
+// structured config (type required, no url). On detection failure or
+// driver-not-installed, throws an actionable error with the install command.
 
 export interface CreateDbOptionsUrl {
   url: string;
   type?: AdapterKind;
-  // Wave 5e — reject unknown `where` keys at runtime. Off by default (the
-  // WhereInput type has a loose `[key: string]: any` escape hatch for
-  // composite-unique synthetic keys); strict closes it, catching typos.
+  // Reject unknown `where` keys at runtime. Off by default (the WhereInput type
+  // has a loose `[key: string]: any` escape hatch for composite-unique synthetic
+  // keys); strict closes it, catching typos.
   strict?: boolean;
   // Bring-your-own schema — your `model(...)` map. When omitted, forge uses
   // the bundled sample schema. One active schema per process.
@@ -52,9 +41,9 @@ export interface CreateDbOptionsStructured {
   password?: string;
   ssl?: boolean;
   pool?: { min?: number; max?: number };
-  // Wave 5e — see CreateDbOptionsUrl.strict.
+  // See CreateDbOptionsUrl.strict.
   strict?: boolean;
-  // Bring-your-own schema — see CreateDbOptionsUrl.schema.
+  // See CreateDbOptionsUrl.schema.
   schema?: SchemaShape;
 }
 
@@ -175,10 +164,8 @@ function redactForLog(url: string): string {
 
 // ─── Db handle construction ─────────────────────────────────────────────────
 
-// Helper: wraps an adapter method so it accepts BOTH tagged-template syntax
-//   db.$queryRaw`SELECT * FROM users WHERE id = ${id}`
-// and pre-built SqlFragment form
-//   db.$queryRaw(forgeSql.sql`SELECT ...`)
+// Wraps an adapter method so it accepts BOTH tagged-template syntax and a
+// pre-built SqlFragment.
 function makeRawCaller<R>(run: (frag: SqlFragment) => Promise<R>) {
   return function (first: any, ...values: unknown[]): Promise<R> {
     // Tagged-template signature: first arg is a TemplateStringsArray, which
@@ -209,25 +196,24 @@ function makeDb(adapter: Adapter, _url: string, runtime: { strict: boolean } = {
       const model = (schema as any)[key] as ModelDef<any> | undefined;
       if (!model) return undefined;
       if (!cache[key as keyof SchemaMap]) {
-        // Wave 2c-2: wrapper takes the active adapter so every execute /
-        // coerce / decode / cascade call dispatches through the right
-        // dialect. Without this, every wrapper would silently fall back
-        // to the Mongo singleton — which is the pre-Wave 2c behaviour.
+        // Wrapper takes the active adapter so every execute / coerce / decode /
+        // cascade call dispatches through the right dialect — otherwise every
+        // wrapper would silently fall back to the Mongo singleton.
         cache[key as keyof SchemaMap] = new CollectionWrapper(model, undefined, adapter, runtime.strict);
       }
       return cache[key as keyof SchemaMap];
     },
   });
 
-  // $transaction now dispatches through the adapter — works for both Mongo
-  // (replica-set ClientSession) and Postgres (pg PoolClient).
+  // Dispatches through the adapter — works for both Mongo (replica-set
+  // ClientSession) and Postgres (pg PoolClient).
   function $transaction(arg: any): any {
     if (Array.isArray(arg)) return Promise.all(arg);
     return adapter.$transaction(async (session) => arg(makeTx(session)));
   }
 
-  // $runCommandRaw stays Mongo-only — it's the BSON command channel. PG
-  // consumers reach for $queryRaw / $executeRaw (Wave 2d) instead.
+  // Mongo-only — it's the BSON command channel. SQL consumers reach for
+  // $queryRaw / $executeRaw instead.
   function $runCommandRaw(command: Document) {
     if (adapter.kind !== 'mongo') {
       throw new Error('[forge] $runCommandRaw is Mongo-only. Use $queryRaw on SQL adapters.');

@@ -8,9 +8,9 @@ export type FieldKind =
   | 'text' // unbounded string — TEXT on MySQL (vs `string`'s VARCHAR(255))
   | 'int'
   | 'float'
-  | 'decimal' // Wave 5e — exact numeric; PG numeric(p,s) / MySQL DECIMAL(p,s) / SQLite NUMERIC / Mongo Decimal128. JS type: string (no float loss).
-  | 'uuid' // Wave 5e — PG uuid / MySQL CHAR(36) / SQLite TEXT / Mongo UUID. JS type: string.
-  | 'bigint' // Wave 5e — PG bigint / MySQL BIGINT / SQLite INTEGER / Mongo Long. JS type: bigint.
+  | 'decimal' // exact numeric; PG numeric(p,s) / MySQL DECIMAL(p,s) / SQLite NUMERIC / Mongo Decimal128. JS: string (no float loss).
+  | 'uuid' // PG uuid / MySQL CHAR(36) / SQLite TEXT / Mongo UUID. JS: string.
+  | 'bigint' // PG bigint / MySQL BIGINT / SQLite INTEGER / Mongo Long. JS: bigint.
   | 'bool'
   | 'dateTime'
   | 'json'
@@ -35,42 +35,35 @@ export interface FieldDef {
   enumValues?: readonly string[];
   // For embed/embedMany: the embedded model definition (resolved lazily).
   embedOf?: () => EmbedDef<any>;
-  // Wave 4b — when true, `forge:push` auto-emits a full-text index:
+  // When true, `forge:push` auto-emits a full-text index:
   //   PG     → CREATE INDEX … USING gin(to_tsvector('simple', col))
   //   MySQL  → ALTER TABLE … ADD FULLTEXT(col)
   //   Mongo  → createIndex({ col: 'text' })
-  //   SQLite → unsupported (would need FTS5 virtual table); emits a warning.
+  //   SQLite → unsupported (would need FTS5 virtual table); warns.
   searchable?: boolean;
-  // Wave 4b — when true on a dateTime field, this is the soft-delete column.
-  // Reads automatically add `WHERE <col> IS NULL`; deletes become updates that
-  // set this column to now(). Only one soft-delete field per model.
+  // When true on a dateTime field, this is the soft-delete column. Reads add
+  // `WHERE <col> IS NULL`; deletes become updates setting it to now(). One per model.
   softDeleteAt?: boolean;
-  // Wave 5e — exact-numeric precision/scale for `decimal` fields.
-  //   PG numeric(p,s), MySQL DECIMAL(p,s). SQLite NUMERIC ignores them.
+  // Exact-numeric precision/scale for `decimal` fields. PG numeric(p,s), MySQL
+  // DECIMAL(p,s). SQLite NUMERIC ignores them.
   precision?: number;
   scale?: number;
-  // Wave 5e — when true on a `uuid` field, emit a DB-side default:
-  //   PG `DEFAULT gen_random_uuid()`, MySQL `DEFAULT (UUID())`. SQLite/Mongo ignore.
+  // When true on a `uuid` field, emit a DB-side default: PG `gen_random_uuid()`,
+  // MySQL `(UUID())`. SQLite/Mongo ignore.
   uuidDefault?: boolean;
-  // Wave 5e — generated/computed column. Holds the SQL expression.
-  //   PG/MySQL → `GENERATED ALWAYS AS (<expr>) STORED`, SQLite → `AS (<expr>) STORED`.
-  //   Mongo → ignored (warned at push). A dbGenerated column is never written by
-  //   the client; the wrapper drops it from inbound create/update data.
+  // Generated/computed column — holds the SQL expression. PG/MySQL → `GENERATED
+  // ALWAYS AS (<expr>) STORED`, SQLite → `AS (<expr>) STORED`, Mongo → ignored
+  // (warned). Never written by the client; dropped from inbound create/update data.
   dbGenerated?: string;
-  // v1.4.0 — primary-key strategy on `id` fields. Only meaningful when
-  // `kind === 'id'`; ignored on every other field. Drives the DDL emission
-  // (string column vs auto-incrementing integer) and whether the client
+  // Primary-key strategy; only meaningful when `kind === 'id'`. Drives DDL
+  // emission (string column vs auto-incrementing integer) and whether the client
   // generates an app-side id at create time.
-  //
-  //   'auto'      — default. App-generated ObjectId on Mongo / UUID on SQL.
-  //                 Stable across all four dialects. JS type: string.
-  //   'uuid'      — DB-side UUID default (PG gen_random_uuid(), MySQL
-  //                 UUID()). On SQLite + Mongo, equivalent to 'auto'.
-  //                 JS type: string.
-  //   'bigserial' — DB-side auto-incrementing integer. PG BIGSERIAL, MySQL
-  //                 BIGINT AUTO_INCREMENT, SQLite INTEGER PRIMARY KEY
-  //                 AUTOINCREMENT. Throws on Mongo at push time. JS type:
-  //                 number — `where: { id: 47 }` autocompletes accordingly.
+  //   'auto'      — default. App-generated ObjectId on Mongo / UUID on SQL. JS: string.
+  //   'uuid'      — DB-side UUID default (PG gen_random_uuid(), MySQL UUID());
+  //                 SQLite + Mongo behave like 'auto'. JS: string.
+  //   'bigserial' — DB-side auto-incrementing integer (PG BIGSERIAL, MySQL BIGINT
+  //                 AUTO_INCREMENT, SQLite INTEGER PRIMARY KEY AUTOINCREMENT).
+  //                 Throws on Mongo at push. JS: number.
   idType?: 'auto' | 'uuid' | 'bigserial';
 }
 
@@ -112,30 +105,27 @@ export interface ModelDef<F extends Record<string, FieldDef>> {
   // declared. Returns the relation map at call time.
   relations: () => Record<string, RelationDef>;
   indexes: IndexDef[];
-  uniques: string[][]; // composite uniques (@@unique([a, b]))
-  // Compound indexes already include @@index entries; uniques merged into indexes
-  // at registry-load time.
+  uniques: string[][]; // composite uniques (@@unique([a, b])), merged into indexes at registry-load time
 
-  // Wave 4c — when set, this model is a read-only view. The wrapper blocks
-  // create/update/delete/upsert; DDL emits CREATE VIEW (or createCollection
-  // with viewOn/pipeline on Mongo) instead of CREATE TABLE. `sql` holds the
-  // dialect-agnostic SELECT body (without the `CREATE VIEW name AS` prefix);
-  // `pipeline` is the Mongo aggregation pipeline. Adapter-specific behaviour
-  // picks one or the other.
+  // When set, this model is a read-only view. The wrapper blocks
+  // create/update/delete/upsert; DDL emits CREATE VIEW (or createCollection with
+  // viewOn/pipeline on Mongo) instead of CREATE TABLE. `sql` holds the
+  // dialect-agnostic SELECT body (no `CREATE VIEW name AS` prefix); `pipeline` is
+  // the Mongo aggregation pipeline. The adapter picks one.
   view?: {
     sql?: string;
     pipeline?: unknown[];
     // Source collection (Mongo's createCollection requires it).
     sourceCollection?: string;
-    // Wave 5d — materialised view. When true, DDL emits a physical, refreshable
-    // object instead of a plain view:
+    // Materialised view — DDL emits a physical, refreshable object instead of a
+    // plain view:
     //   PG     → CREATE MATERIALIZED VIEW; .refresh() runs REFRESH MATERIALIZED VIEW.
-    //   MySQL  → a base TABLE populated from `sql`; .refresh() truncates + re-INSERTs.
+    //   MySQL  → base TABLE populated from `sql`; .refresh() truncates + re-INSERTs.
     //   SQLite → same table-backed strategy as MySQL.
-    //   Mongo  → `pipeline` ends in $merge/$out into a target collection; .refresh() re-runs it.
+    //   Mongo  → `pipeline` ends in $merge/$out; .refresh() re-runs it.
     materialised?: boolean;
-    // Wave 5d — optional auto-refresh interval (e.g. '30s', '5m', '1h'). The
-    // adapter wires a setInterval that calls refresh(); it's cleared on close().
+    // Optional auto-refresh interval (e.g. '30s', '5m', '1h'). The adapter wires a
+    // setInterval calling refresh(), cleared on close().
     refreshEvery?: string;
   };
 }

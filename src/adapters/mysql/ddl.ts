@@ -39,9 +39,8 @@ export function buildSchemaDDL(schema: SchemaMap): DDLStatement[] {
     out.push(...buildIndexes(m));
     out.push(...buildSearchableIndexes(m));
   }
-  // Wave 4c — views. Wave 5d — MySQL has no native materialised views, so a
-  // materialised view is backed by a real TABLE populated from the SELECT;
-  // db.<model>.refresh() truncates + re-inserts.
+  // MySQL has no native materialised views — back them with a real TABLE
+  // populated from the SELECT; db.<model>.refresh() truncates + re-inserts.
   for (const key of Object.keys(schema)) {
     const m = (schema as any)[key] as ModelDef<any>;
     if (!m?.view?.sql) continue;
@@ -67,9 +66,8 @@ export function buildSchemaDDL(schema: SchemaMap): DDLStatement[] {
   return out;
 }
 
-// Wave 4b — auto-emit FULLTEXT indexes for `.searchable()` fields.
-// `MATCH(col) AGAINST(?)` (what the search operator compiles to) requires
-// a FULLTEXT index on that column.
+// Auto-emit FULLTEXT indexes for `.searchable()` fields: the search operator
+// compiles to `MATCH(col) AGAINST(?)`, which requires a FULLTEXT index.
 function buildSearchableIndexes(m: ModelDef<any>): DDLStatement[] {
   const d = MysqlDialect;
   const out: DDLStatement[] = [];
@@ -105,7 +103,6 @@ function renderColumn(name: string, field: FieldDef): string {
   const d = MysqlDialect;
   const colName = d.quoteIdent(name);
   const type = d.columnType(field);
-  // Generated column.
   if (field.dbGenerated) {
     return `${colName} ${type} GENERATED ALWAYS AS (${field.dbGenerated}) STORED`;
   }
@@ -121,7 +118,7 @@ function renderColumn(name: string, field: FieldDef): string {
 
 function renderDefault(field: FieldDef): string {
   if (!field.default) {
-    // Wave 5e — uuid DB-side default (MySQL 8+ allows expression defaults).
+    // uuid DB-side default — MySQL 8+ allows expression defaults.
     if (field.kind === 'uuid' && field.uuidDefault) return ` DEFAULT (UUID())`;
     if (field.kind === 'embedMany' && !field.optional) return ` DEFAULT (JSON_ARRAY())`;
     return '';

@@ -43,7 +43,6 @@ export function generateMigration(
   if (!d) return [];
   const pairs: MigrationPair[] = [];
   const actualTables = new Map(actual.tables.map((t) => [t.name, t]));
-  const actualNames = new Set([...actualTables.keys(), ...actual.views.map((v) => v.name)]);
 
   for (const key of Object.keys(schema)) {
     const m = schema[key] as ModelDef<any> | undefined;
@@ -145,6 +144,5 @@ export function generateMigration(
     });
   }
 
-  void actualNames;
   return pairs;
 }
