@@ -19,17 +19,10 @@ import {
 } from './compile-from-ir';
 import { withPgErrors } from './errors';
 
-// Postgres IR executor — wires SQLArtifacts to a pg pool. Same shape as the
-// Mongo executor; both implement the Adapter's executor methods.
+// Postgres IR executor — wires SQLArtifacts to a pg pool.
 //
-// Design notes:
-//   • Defaults are handled by the DB engine (DEFAULT clauses) — the wrapper
-//     passes only user-provided fields. For now (Wave 2b), the wrapper still
-//     pre-coerces via Mongo's coerce.ts because the existing tests assume it;
-//     Wave 2c's PG DDL generator will replace defaulting with native DEFAULTs.
-//   • Hydration is batched-IN: for each include relation, one SELECT with
-//     `WHERE fk = ANY($1)`. JOIN-style hydration for one-side relations is a
-//     Wave 2c optimisation flag (`relationLoadStrategy: 'join'`).
+// Hydration is batched-IN: for each include relation, one SELECT with
+// `WHERE fk = ANY($1)`.
 
 export interface PgPoolHandle {
   query(sql: string, params?: unknown[]): Promise<{ rows: any[]; rowCount: number | null }>;
@@ -40,8 +33,6 @@ export interface PgExecOpts {
   // duration of the call so all queries land on the same connection / txn.
   client?: PgPoolHandle;
 }
-
-// ─── Reads ──────────────────────────────────────────────────────────────────
 
 export async function executePgSelect(
   pool: PgPoolHandle,
@@ -112,8 +103,6 @@ export async function executePgCount(
   return Number(rows[0]?.count ?? 0);
 }
 
-// ─── Writes ─────────────────────────────────────────────────────────────────
-
 export async function executePgInsert(
   pool: PgPoolHandle,
   node: InsertNode,
@@ -146,15 +135,13 @@ export async function executePgDelete(
   opts: PgExecOpts = {},
 ): Promise<{ doc?: any; count: number }> {
   const exec = opts.client ?? pool;
-  // DELETE … RETURNING * gives us the row that was removed; cascade behaviour
-  // is delegated to the DB engine via ON DELETE clauses (set in DDL — Wave 2c).
+  // DELETE … RETURNING * gives us the removed row; cascade behaviour is
+  // delegated to the DB engine via ON DELETE clauses set in DDL.
   const artifact = compileDelete(node, model);
   const { rows, rowCount } = await withPgErrors(() => exec.query(artifact.sql, artifact.params));
   if (node.many) return { count: rowCount ?? rows.length };
   return { doc: rows[0], count: rows.length };
 }
-
-// ─── Hydration ──────────────────────────────────────────────────────────────
 
 async function hydrate(
   exec: PgPoolHandle,
@@ -273,8 +260,6 @@ async function applyRelationCounts(
     for (const row of rows) row._count[relName] = byFk.get(stringKey(row[rel.refs])) ?? 0;
   }
 }
-
-// ─── Utils ──────────────────────────────────────────────────────────────────
 
 function notNull<T>(v: T | null | undefined): v is T { return v != null; }
 

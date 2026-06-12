@@ -37,11 +37,9 @@ export class MysqlAdapter implements Adapter {
     const rawPool = mysql.createPool({
       uri: url,
       connectionLimit: 50,
-      // Reasonable defaults that match PG adapter behaviour.
-      // mysql2 doesn't have idleTimeoutMillis at the pool level by default.
     });
     this._pool = (rawPool.promise ? rawPool.promise() : rawPool) as MysqlPool;
-    // Sanity probe so auth/host errors surface at connect() time.
+    // Probe so auth/host errors surface at connect() time.
     await this._pool.query('SELECT 1');
   }
 
@@ -71,8 +69,6 @@ export class MysqlAdapter implements Adapter {
     if (!this._pool) throw new Error('[forge:mysql] pool accessed before connect() resolved');
     return this._pool;
   }
-
-  // ─── Executor surface ─────────────────────────────────────────────────
 
   private mysqlOpts(opts?: ExecOpts): MysqlExecOpts {
     return opts?.session ? { conn: opts.session as MysqlConn } : {};
@@ -129,8 +125,8 @@ export class MysqlAdapter implements Adapter {
       (r) => r.length);
   }
 
-  // Wave 4b — native streaming via mysql2's connection.query(...).stream().
-  // The pool's query API doesn't expose streams; we borrow a connection.
+  // The pool's query API doesn't expose streams, so borrow a connection and
+  // stream via mysql2's connection.query(...).stream().
   async *streamSelect(node: any, model: any, _opts?: ExecOpts): AsyncIterable<any> {
     const { compileSelect } = await import('./compile-from-ir');
     const a = compileSelect(node, model);
@@ -146,8 +142,6 @@ export class MysqlAdapter implements Adapter {
   }
 
   async applyProjectionAndHydration(): Promise<void> { /* executor does it */ }
-
-  // ─── Raw SQL ───────────────────────────────────────────────────────────
 
   async $queryRaw(fragment: import('../../raw-sql').SqlFragment, opts?: ExecOpts): Promise<any[]> {
     const { compileSqlFragment } = await import('../../raw-sql');
@@ -165,7 +159,6 @@ export class MysqlAdapter implements Adapter {
     return result.affectedRows ?? 0;
   }
 
-  // ─── $transaction ─────────────────────────────────────────────────────
   // mysql2 promise pool: borrow a connection, BEGIN, COMMIT/ROLLBACK.
   async $transaction<T>(fn: (session: unknown) => Promise<T>): Promise<T> {
     const conn = await this.pool.getConnection();
@@ -181,8 +174,6 @@ export class MysqlAdapter implements Adapter {
       if (typeof conn.release === 'function') conn.release();
     }
   }
-
-  // ─── coerce / decode / cascade ────────────────────────────────────────
 
   coerceInbound(model: any, data: any, _opts?: { forCreate?: boolean }) {
     if (!data || typeof data !== 'object') return data;
@@ -211,9 +202,8 @@ export class MysqlAdapter implements Adapter {
 
   async applyCascadesForDelete(): Promise<void> { /* DB-enforced */ }
 
-  // Wave 5d — table-backed materialised view refresh: clear + re-populate from
-  // the view's SELECT body. Wrapped in a transaction so readers never see an
-  // empty table mid-refresh.
+  // Table-backed materialised view refresh: clear + re-populate from the
+  // view's SELECT body. In a transaction so readers never see an empty table.
   async refreshView(model: any, opts?: ExecOpts): Promise<void> {
     const sql = model?.view?.sql;
     if (!sql) throw new Error(`[forge:mysql] '${model?.collection}' has no view SQL to refresh`);
@@ -227,7 +217,6 @@ export class MysqlAdapter implements Adapter {
     await this.$transaction((s) => run(s as MysqlConn));
   }
 
-  // Wave 5b — live-schema introspection (INFORMATION_SCHEMA).
   async introspect(): Promise<import('../types').DbIntrospection> {
     const { introspectMysql } = await import('./introspect');
     return introspectMysql(this.pool);

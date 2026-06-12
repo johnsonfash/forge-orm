@@ -1,15 +1,7 @@
 // Compile artifacts — typed shapes returned by `db.<model>.compile.<op>(args)`.
-//
-// These are the escape hatch: build a query through forge's typed API, get
-// back an object (Mongo) or SQL + params (Postgres/MySQL/SQLite) that you can
-// hand directly to the underlying driver you installed yourself. Useful for:
-//
-//   • Integrating forge into a codebase that owns its own connection pool
-//   • Plugging into a custom telemetry / replay system
-//   • Generating migrations or seed scripts from a typed query
-//   • Debugging — see exactly what forge would send
-//
-// The discriminated union on `kind` lets TS narrow per adapter.
+// The escape hatch: build a query through forge's typed API, get back an object
+// (Mongo) or SQL + params (SQL dialects) to hand directly to the driver you
+// installed yourself. The discriminated union on `kind` lets TS narrow per adapter.
 
 export type CompiledArtifact =
   | MongoArtifact

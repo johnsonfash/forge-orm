@@ -1,14 +1,8 @@
 // Adapter interface — every per-database adapter implements this.
 //
-// Wave 0 keeps the surface intentionally narrow: lifecycle, transactions, and
-// a `kind` tag. Wave 1 will add IR-execution methods (`executeSelect`,
-// `executeInsert`, `executeUpdate`, `executeDelete`, `executeAggregate`) once
-// the query IR is introduced. Wave 2+ adds DDL/migration methods.
-//
 // Drivers (`mongodb`, `pg`, `mysql2`, `better-sqlite3`) are loaded lazily by
 // each adapter inside `connect()` — never imported at module top level — so
-// that `npm install forge` doesn't force a peer that the consumer hasn't
-// chosen.
+// that `npm install forge` doesn't force a peer the consumer hasn't chosen.
 
 export type AdapterKind = 'mongo' | 'postgres' | 'mysql' | 'sqlite';
 
@@ -38,7 +32,7 @@ export interface DoctorReport {
   notes: string[];
 }
 
-// ─── Wave 5b — live-schema introspection ─────────────────────────────────────
+// ─── Live-schema introspection ───────────────────────────────────────────────
 // A normalized, dialect-agnostic snapshot of what's actually in the database,
 // used by `forge:diff` to compare against the declared forge schema.
 
@@ -84,21 +78,20 @@ export interface DbIntrospection {
   views: IntrospectedView[];
 }
 
-// Per-adapter execute opts. Each adapter narrows this with its own session
-// type (Mongo's ClientSession, PG's PoolClient, …). Wave 2b carries this as
-// a free-form `unknown` so wrappers can pass through whatever the adapter
-// expects without the IR layer learning driver types.
+// Per-adapter execute opts. `session` is free-form `unknown` so wrappers pass
+// through whatever the adapter expects (Mongo's ClientSession, PG's PoolClient,
+// …) without the IR layer learning driver types.
 export interface ExecOpts {
   session?: unknown;
-  // Wave 4 — executor will emit query/error events when present.
+  // Executor emits query/error events when present.
   emitter?: import('../events').ForgeEmitter;
 }
 
 export interface Adapter {
   readonly kind: AdapterKind;
   readonly capabilities: AdapterCapabilities;
-  // Wave 4 — every adapter owns an emitter. Executors call emitter.track(...)
-  // around each query so listeners can observe SQL/duration/rowcount/errors.
+  // Every adapter owns an emitter. Executors call emitter.track(...) around each
+  // query so listeners can observe SQL/duration/rowcount/errors.
   readonly emitter: import('../events').ForgeEmitter;
 
   // Lifecycle. `connect()` lazily requires the underlying driver and opens a
@@ -159,19 +152,15 @@ export interface Adapter {
   $queryRaw(fragment: import('../raw-sql').SqlFragment, opts?: ExecOpts): Promise<any[]>;
   $executeRaw(fragment: import('../raw-sql').SqlFragment, opts?: ExecOpts): Promise<number>;
 
-  // Wave 4b — optional native cursor streaming. When implemented, replaces
-  // the OFFSET/LIMIT chunking fallback in CollectionWrapper.findManyStream.
-  //   PG     → pg-cursor
-  //   MySQL  → mysql2 stream
-  //   SQLite → better-sqlite3 stmt.iterate()
-  //   Mongo  → cursor.stream()
-  // Adapters that haven't implemented this return undefined → wrapper falls
-  // back to OFFSET/LIMIT chunking.
+  // Optional native cursor streaming (PG pg-cursor, MySQL stream, SQLite
+  // stmt.iterate(), Mongo cursor.stream()). Adapters that don't implement it
+  // return undefined → wrapper falls back to OFFSET/LIMIT chunking in
+  // CollectionWrapper.findManyStream.
   streamSelect?(node: any, model: any, opts?: ExecOpts): AsyncIterable<any>;
 
-  // Wave 5b — introspect the live database schema for drift detection.
+  // Introspect the live database schema for drift detection.
   introspect?(): Promise<DbIntrospection>;
 
-  // Wave 5d — recompute a materialised view from its source definition.
+  // Recompute a materialised view from its source definition.
   refreshView?(model: any, opts?: ExecOpts & { concurrently?: boolean }): Promise<void>;
 }

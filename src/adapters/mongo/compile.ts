@@ -17,10 +17,8 @@ import {
 import { coerceCreatePayload, coerceExtendedJSON } from './coerce';
 import { schema } from '../../schema';
 
-// Mongo compile API — args in, MongoArtifact out. Wave 1: every method routes
-// through the IR (args → buildIR → compileFromIR), proving the IR is rich
-// enough to drive the full Mongo translation. The execute path will follow
-// in Wave 1b.
+// Mongo compile API — args in, MongoArtifact out. Every method routes through
+// the IR (args → buildIR → compileFromIR).
 
 function modelKeyFor(model: ModelDef<any>): string {
   for (const key of Object.keys(schema as any)) {

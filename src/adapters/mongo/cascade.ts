@@ -5,29 +5,20 @@ import { RelationInfo } from '../../schema/core';
 import { ModelDef, OnDeleteAction } from '../../schema/types';
 import { schema } from '../../schema';
 
-// schema map keyed by friendly name (e.g. 'business') → ModelDef.
-// Each child relation's `target` is one of these keys; we use this map to
-// invert the lookup ("which schema key corresponds to this parent model?")
-// when finding child relations that point at a given parent.
+// Inverts the schema map (ModelDef → its key) so we can answer "which schema
+// key corresponds to this parent model?" when finding child relations that
+// point at a given parent.
 const schemaKeyByModel = new Map<ModelDef<any>, string>();
 for (const [key, model] of Object.entries(schema)) {
   schemaKeyByModel.set(model as ModelDef<any>, key);
 }
 
-// ============================================================================
 // Cascade walker — replicates Prisma's onDelete semantics application-side.
-//
-// Mongo has no FK enforcement; Prisma did this in its query engine. We do
-// it here. For each row about to be deleted, we walk the schema's *inverse*
-// (one-to-many) relations whose owning side has `onDelete: Cascade` or
-// `SetNull`, and either delete or null-out the children.
-//
-// The walk is recursive: deleting a Business cascades to its videos, then
-// each video's likes/comments/etc., then each comment's replies, etc.
-//
-// Visited set prevents pathological loops (e.g. Comment → parent → replies
-// would otherwise spin if data shape allowed).
-// ============================================================================
+// Mongo has no FK enforcement; Prisma did this in its query engine. For each
+// row about to be deleted, we walk the schema's *inverse* (one-to-many)
+// relations whose owning side has `onDelete: Cascade` or `SetNull`, and either
+// delete or null-out the children. The walk recurses (Business → videos →
+// likes/comments → replies). The visited set prevents pathological loops.
 
 interface CascadeContext {
   visited: Set<string>;

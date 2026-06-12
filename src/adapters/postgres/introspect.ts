@@ -7,14 +7,12 @@ import type {
 } from '../types';
 import type { PgPoolHandle } from './execute';
 
-// Wave 5b — live-schema introspection for Postgres.
-//
-// Reads information_schema + pg_catalog to build a normalized snapshot the
-// drift comparator (src/scripts/diff.ts) compares against the forge schema.
-// Scoped to the `public` schema (where forge:push creates objects).
+// Live-schema introspection for Postgres. Reads information_schema +
+// pg_catalog to build a normalized snapshot the drift comparator
+// (src/scripts/diff.ts) compares against the forge schema. Scoped to the
+// `public` schema, where forge:push creates objects.
 
 export async function introspectPg(pool: PgPoolHandle): Promise<DbIntrospection> {
-  // Columns (also enumerates which relations are base tables).
   const cols = await pool.query(
     `SELECT table_name, column_name, data_type, udt_name, is_nullable,
             column_default, numeric_precision, numeric_scale, character_maximum_length
@@ -62,7 +60,6 @@ export async function introspectPg(pool: PgPoolHandle): Promise<DbIntrospection>
     `SELECT matviewname AS name FROM pg_matviews WHERE schemaname = 'public'`,
   );
 
-  // ── Assemble per-table ──────────────────────────────────────────────────
   const tableMap = new Map<string, IntrospectedTable>();
   const ensure = (name: string): IntrospectedTable => {
     let t = tableMap.get(name);

@@ -5,11 +5,10 @@ import type { SchemaContext } from './where';
 // Build the projection + relation hydration plan from a caller's `select` /
 // `include` / `omit` args. Schema-side names; adapters map to columns/keys.
 //
-// When `schema` is supplied, nested relation args (`include: { posts: { where:
-// {...}, orderBy: {...}, take: 10 } }`) get compiled into a fully-formed
-// sub-SelectNode on the RelationPlan, so adapters can recurse cleanly during
-// hydration. Without schema, nested args are stashed as `__rawArgs` (Wave 1a
-// behaviour kept for back-compat).
+// When `schema` is supplied, nested relation args (`include: { posts: { where,
+// orderBy, take } }`) get compiled into a fully-formed sub-SelectNode on the
+// RelationPlan so adapters can recurse cleanly during hydration. Without schema,
+// nested args are stashed as `__rawArgs`.
 
 export interface BuildProjectionResult {
   projection?: ProjectionPlan;
@@ -23,7 +22,7 @@ export function buildProjection(
 ): BuildProjectionResult {
   const relations = model.relations();
 
-  // ─── omit path (Prisma 5.13+) ────────────────────────────────
+  // omit path (Prisma 5.13+)
   if (args.omit && !args.select && !args.include) {
     const drop: string[] = [];
     for (const k of Object.keys(args.omit)) {
@@ -33,7 +32,7 @@ export function buildProjection(
     return { projection: { fields: [], omit: drop, counts: [], exclusive: false } };
   }
 
-  // ─── include path (all scalars + listed relations) ───────────
+  // include path (all scalars + listed relations)
   if (args.include) {
     const hydration: RelationPlan[] = [];
     const counts: string[] = [];
@@ -61,7 +60,7 @@ export function buildProjection(
     };
   }
 
-  // ─── select path (only listed scalars + listed relations) ────
+  // select path (only listed scalars + listed relations)
   if (args.select) {
     const fields: string[] = [];
     const hydration: RelationPlan[] = [];
@@ -116,10 +115,9 @@ function toRelationPlan(
 
   const targetModel = schema?.[rel.target];
   if (targetModel) {
-    // Schema-aware: build a real sub-SelectNode shell for the adapter to use.
-    // We can't import buildSelect here without circular deps, so callers in
-    // build/index.ts handle the recursion. Stash args verbatim; the orchestrator
-    // builds the full node.
+    // We can't import buildSelect here without circular deps, so build/index.ts
+    // handles the recursion — stash args verbatim and the orchestrator builds
+    // the full node.
     plan.nested = {
       cardinality: rel.kind === 'one' ? 'one' : 'many',
       limit: nestedArgs.take ?? nestedArgs.limit,
@@ -127,7 +125,6 @@ function toRelationPlan(
       ...({ __rawArgs: nestedArgs, __target: rel.target } as any),
     };
   } else {
-    // No schema: stash raw for adapter / Wave 1a back-compat.
     plan.nested = {
       cardinality: rel.kind === 'one' ? 'one' : 'many',
       limit: nestedArgs.take ?? nestedArgs.limit,

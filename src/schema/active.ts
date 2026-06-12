@@ -1,16 +1,10 @@
-// Schema decoupling — the "active" schema registry.
+// The "active" schema registry. forge reads models through whatever schema is
+// active, so a consumer can bring their own via `createDb({ schema })` instead of
+// the bundled sample. `index.ts` defaults it to the sample on load.
 //
-// forge reads models through whatever schema is *active*, so a consumer can
-// bring their own via `createDb({ schema: yourSchema })` instead of being
-// locked to the bundled sample. `src/schema/index.ts` defaults the active
-// schema to the sample on load (so out-of-the-box / tests work), and
-// `createDb({ schema })` swaps it.
-//
-// Scope: one active schema per process (last-write-wins). That covers the
-// overwhelmingly common "one schema per service" case. For several genuinely
-// independent schemas at once, run them in separate processes/workers — a
-// global registry can't represent two simultaneously. (This is the documented
-// limitation of the decoupling.)
+// Scope: one active schema per process (last-write-wins). For several genuinely
+// independent schemas at once, run them in separate processes/workers — a global
+// registry can't represent two simultaneously.
 
 import type { TypedModel } from './core';
 

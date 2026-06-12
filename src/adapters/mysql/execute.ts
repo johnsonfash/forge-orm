@@ -20,16 +20,9 @@ import {
 import { withMysqlErrors } from './errors';
 import { buildSelect, buildWhereTree } from '../../ir/build';
 
-// MySQL IR executor — wraps mysql2's promise pool.
-//
-// MySQL doesn't support RETURNING, so insert/update/delete are two-statement:
-//   1. perform the mutation (capture affected ids if possible)
-//   2. SELECT the affected rows by `where` to satisfy forge's "return the
-//      row(s) that were written" contract that callers expect.
-//
-// For UPDATE/DELETE single, we re-run the SELECT inside the same connection
-// to read your own write. For INSERT, we use the ids we generated (or that
-// mysql2 surfaces as `insertId` for auto-increment cases) to do the SELECT.
+// MySQL has no RETURNING: insert/update/delete mutate, then re-SELECT the
+// affected rows (by id, or by insertId range for auto-increment) within the
+// same connection to satisfy forge's "return the rows written" contract.
 
 export interface MysqlConn {
   query(sql: string, params?: unknown[]): Promise<[any, any]>;
@@ -46,12 +39,8 @@ export interface MysqlExecOpts {
   conn?: MysqlConn;
 }
 
-// ─── Decode rows ────────────────────────────────────────────────────────
-//
-// mysql2 returns booleans as numeric (0/1), dates as Date objects, JSON as
-// already-parsed (when the column is JSON type). We re-hydrate based on the
-// schema so callers see proper JS types.
-
+// mysql2 returns bools as 0/1, dates as Date, JSON pre-parsed; re-hydrate to
+// the schema's JS types.
 function decodeRow(model: ModelDef<any>, row: any): any {
   if (!row || typeof row !== 'object') return row;
   const out: any = {};
@@ -66,8 +55,7 @@ function decodeRow(model: ModelDef<any>, row: any): any {
       case 'embedMany':
       case 'stringArray':
       case 'intArray':
-        // mysql2 auto-parses JSON columns; but if a TEXT-backed column ended
-        // up here with a string, JSON.parse it.
+        // mysql2 auto-parses JSON columns; a TEXT-backed string still needs parsing.
         out[k] = typeof v === 'string' ? safeParse(v) : v;
         break;
       default:           out[k] = v;
@@ -79,8 +67,6 @@ function decodeRow(model: ModelDef<any>, row: any): any {
 function safeParse(s: string): any {
   try { return JSON.parse(s); } catch { return s; }
 }
-
-// ─── Reads ──────────────────────────────────────────────────────────────────
 
 export async function executeMysqlSelect(
   pool: MysqlPool,
@@ -134,8 +120,6 @@ function reshapeGroupByRow(row: any, byCols: string[]): any {
   return out;
 }
 
-// ─── Writes ─────────────────────────────────────────────────────────────────
-
 export async function executeMysqlInsert(
   pool: MysqlPool,
   node: InsertNode,
@@ -145,11 +129,9 @@ export async function executeMysqlInsert(
   const exec = opts.conn ?? pool;
   const a = compileInsert(node, model);
   const [result]: any = await withMysqlErrors(() => exec.execute(a.sql, a.params));
-  // INSERT returned. Now re-SELECT to get the rows back — by id if user
-  // provided ids, or by insertId range for auto-increment.
   const ids = node.rows.map((r) => r.id).filter((id) => id != null);
   if (ids.length === 0) {
-    // No ids supplied — assume INSERT auto-incremented. Use insertId / affectedRows.
+    // No ids supplied — recover the auto-incremented range via insertId / affectedRows.
     if (result.insertId != null && result.affectedRows > 0) {
       const placeholders = Array.from({ length: result.affectedRows }, () => '?').join(',');
       const ranged = Array.from({ length: result.affectedRows }, (_, i) => result.insertId + i);
@@ -178,8 +160,6 @@ export async function executeMysqlUpdate(
   const a = compileUpdate(node, model);
   const [result]: any = await withMysqlErrors(() => exec.execute(a.sql, a.params));
   if (node.many) return { count: result.affectedRows };
-  // Single-row update — follow up with SELECT (using node.where) to fetch
-  // the updated row.
   const selectArtifact = compileSelect(
     buildSelect(node.model, model, { where: irWhereToObject(node.where), take: 1 }, 'one'),
     model,
@@ -214,10 +194,9 @@ export async function executeMysqlDelete(
   return { doc: decodeRow(model, doc), count: result.affectedRows };
 }
 
-// Convert an IR WhereTree back to a Prisma-shape object so we can re-build
-// a SelectNode for the follow-up SELECT. We only need to handle the common
-// case (top-level eq leaves AND'd together) — that covers update/delete by
-// id / unique field.
+// Convert an IR WhereTree back to a Prisma-shape object to rebuild a SelectNode
+// for the follow-up SELECT. Only the common case (top-level eq leaves AND'd)
+// needs handling — that covers update/delete by id / unique field.
 function irWhereToObject(tree: any): any {
   if (!tree) return undefined;
   if (tree.kind === 'leaf' && tree.op === 'eq') return { [tree.field]: tree.value };
@@ -226,11 +205,8 @@ function irWhereToObject(tree: any): any {
     for (const c of tree.children) Object.assign(out, irWhereToObject(c) ?? {});
     return out;
   }
-  // Fallback: just trust it (covers most realistic update/delete where clauses).
   return tree;
 }
-
-// ─── Hydration / counts ─────────────────────────────────────────────────────
 
 async function hydrate(
   pool: MysqlPool,

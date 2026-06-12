@@ -1,32 +1,19 @@
 import type { DDLStatement } from './ddl';
 import type { PgPoolHandle } from './execute';
 
-// Migration runner for Postgres.
+// Migration runner for Postgres. Each statement is wrapped in a savepoint so a
+// single failure rolls back that statement without aborting the whole batch.
 //
-// Behaviour:
-//   1. Acquire a Postgres advisory lock so concurrent forge:push runs queue
-//      instead of racing. The lock is held for the duration of the migration
-//      and released when the txn commits/rolls back.
-//   2. Introspect what objects already exist (tables, constraints, indexes).
-//   3. Filter the DDL plan to skip already-applied statements.
-//   4. Apply the remaining statements inside a transaction. Each one is
-//      individually wrapped in a savepoint so a single failure rolls back
-//      that statement without aborting the whole batch.
-//   5. On any unrecoverable error, the outer transaction rolls back —
-//      nothing is half-applied.
-//
-// What's intentionally NOT implemented (deferred to Wave 2d):
+// Intentionally NOT implemented:
 //   • Migration journal / history (Prisma's _prisma_migrations equivalent).
 //     We push-on-startup style; for production drift detection, run
 //     forge:push against staging first and inspect the plan.
-//   • Renaming detection (ALTER TABLE … RENAME). Today, removing a model and
-//     adding another emits DROP + CREATE; data is preserved only when the
-//     name doesn't change.
-//   • Column type changes (ALTER TABLE … ALTER COLUMN). Today we leave
-//     existing columns alone; type drift surfaces at first failing query.
+//   • Renaming detection (ALTER TABLE … RENAME). Removing a model and adding
+//     another emits DROP + CREATE; data is preserved only when the name is kept.
+//   • Column type changes (ALTER TABLE … ALTER COLUMN). Existing columns are
+//     left alone; type drift surfaces at first failing query.
 
-// Stable lock id. Two random 32-bit ints hashed from "forge.migrate" — picked
-// at design time and frozen so all forge:push invocations share the same lock.
+// Stable lock id, frozen so all forge:push invocations share the same lock.
 const ADVISORY_LOCK_HI = 0x6f6f7267; // "forg"
 const ADVISORY_LOCK_LO = 0x65000001; // "e" + version
 
@@ -37,12 +24,11 @@ export interface MigrationPlan {
 }
 
 export interface ApplyReport {
-  applied: string[];     // statement names actually run
-  skipped: string[];     // statements skipped because the object already exists
+  applied: string[];
+  skipped: string[];     // object already existed
   failures: Array<{ name: string; error: string }>;
 }
 
-// Decide which statements need to run by introspecting current PG state.
 export async function planMigration(
   pool: PgPoolHandle,
   ddl: DDLStatement[],
@@ -124,12 +110,9 @@ export async function applyMigration(
   return { applied, skipped, failures };
 }
 
-// pg.Pool API surface we use for migrations — narrower than PoolClient.
 export interface PgPoolHandleWithConnect extends PgPoolHandle {
   connect(): Promise<PgPoolHandle & { release?: () => void }>;
 }
-
-// ─── Introspection helpers ──────────────────────────────────────────────────
 
 async function listTables(pool: PgPoolHandle): Promise<Set<string>> {
   const { rows } = await pool.query(

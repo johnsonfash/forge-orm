@@ -1,15 +1,10 @@
-// Forge event system — pub/sub for query lifecycle events.
+// Forge event system — pub/sub for query lifecycle events (logging, slow-query
+// alerting, OTel spans, audit/replay).
 //
-// Used for:
-//   • Query logging (`db.$on('query', e => log.info(e.sql, e.duration_ms))`)
-//   • Slow-query alerting
-//   • OpenTelemetry span emission (Wave 4b helper subscribes here)
-//   • Audit trails / replay capture
-//
-// Adapters call `emit('query', { ... })` after every executed statement. The
-// event payload is intentionally adapter-agnostic — `sql` carries either SQL
-// text or a description of the Mongo op (e.g. `"users.findOne"`), `params`
-// carries either parameter values or the Mongo args object.
+// Adapters emit after every executed statement. The payload is intentionally
+// adapter-agnostic — `sql` carries either SQL text or a description of the Mongo
+// op (e.g. `"users.findOne"`), `params` carries either parameter values or the
+// Mongo args object.
 
 export interface QueryEvent {
   /** Adapter kind that ran the query. */
@@ -47,10 +42,8 @@ export interface ErrorEvent {
 export type EventListener<E> = (event: E) => void | Promise<void>;
 
 // Lightweight pub/sub. Each adapter owns one Emitter instance; ForgeDb's
-// $on/$off mirror onto it. We don't use Node's EventEmitter to keep the
-// surface tight and zero-dependency on the Node API for users running
-// forge in non-Node runtimes (Bun, edge workers) — though that's not a
-// supported configuration yet, it costs nothing here.
+// $on/$off mirror onto it. Deliberately not Node's EventEmitter — keeps the
+// surface tight and free of any Node API dependency.
 export class ForgeEmitter {
   private queryListeners: EventListener<QueryEvent>[] = [];
   private errorListeners: EventListener<ErrorEvent>[] = [];

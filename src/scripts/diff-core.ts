@@ -106,8 +106,6 @@ export function expectedFromSchema(schema: Record<string, any>): {
     const m = schema[key] as ModelDef<any> | undefined;
     if (!m) continue;
     if (m.view) {
-      // Materialised views are table-backed on MySQL/SQLite, real matviews on
-      // PG, collections on Mongo — all introspect as a "view" entry here.
       views.push({ name: m.collection, materialised: m.view.materialised === true });
       continue;
     }

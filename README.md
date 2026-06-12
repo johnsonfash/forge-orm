@@ -3,8 +3,8 @@
 A small, Prisma-shaped data layer for **MongoDB, PostgreSQL, MySQL, and SQLite**.
 You write your models once in plain TypeScript and the same query code runs
 against any of the four databases. There is no code generation step, no Rust
-query engine, and no framework to adopt. It is about 5,000 lines of TypeScript
-you can read in an afternoon.
+query engine, and no framework to adopt — just readable TypeScript (around
+13,000 lines) over the official drivers, organised one adapter per database.
 
 ```
 npm install forge-orm
@@ -37,7 +37,7 @@ Mongo connection string. forge picks the right driver from the URL.
 ## Contents
 
 * [What forge is, and what it is not](#what-forge-is-and-what-it-is-not)
-  * [What's new in 1.4](#whats-new-in-14)
+  * [What's new](#whats-new)
 * [Install and pick your driver](#install-and-pick-your-driver)
 * [Connecting](#connecting)
 * [Defining a schema](#defining-a-schema)
@@ -49,6 +49,7 @@ Mongo connection string. forge picks the right driver from the URL.
   * [Embedded objects](#embedded-objects)
 * [Reading data](#reading-data)
   * [Filtering with `where`](#filtering-with-where)
+    * [Comparing two columns: `col()`](#comparing-two-columns-col)
   * [Choosing fields: `select` and `include`](#choosing-fields-select-and-include)
   * [Sorting and pagination](#sorting-and-pagination)
 * [Writing data](#writing-data)
@@ -94,35 +95,26 @@ features, a smaller ecosystem, and no GUI. If you need those, use Prisma or
 Drizzle. The [honest notes](#limitations-and-honest-notes) at the end spell
 this out.
 
-### What's new in 1.4
+### What's new
 
-**Primary-key strategies on `f.id()`.** SQL-only services can now pick the
-classic auto-incrementing integer PK without writing raw DDL. UUIDs and
-ObjectIds still work the same way; everything else is unchanged.
+Full release history is in [CHANGELOG.md](./CHANGELOG.md). Recent highlights:
 
-```ts
-id: f.id()                            // default — string id, ObjectId on Mongo, UUID on SQL
-id: f.id({ type: 'uuid' })            // DB-typed UUID (PG `uuid`, MySQL `CHAR(36)`)
-id: f.id({ type: 'bigserial' })       // PG BIGSERIAL / MySQL BIGINT AUTO_INCREMENT
-                                      // / SQLite INTEGER PRIMARY KEY AUTOINCREMENT
-                                      // — JS type narrows to `number`
-```
-
-Apply the change with the same migration commands you already use — nothing
-new to learn:
-
-```sh
-npx forge push                # creates / alters the column with the right dialect-specific DDL
-npx forge diff                # shows the schema → DB difference before pushing (optional pre-flight)
-npx forge diff apply          # generates a reconciliation migration if you prefer migrations files
-```
-
-`bigserial` is **SQL-only** by definition. Forge throws at `forge push` time
-on Mongo with a clear error — there's no Mongo equivalent and silent fallback
-would surprise more than loud failure. Use `auto` or `uuid` if you need
-cross-DB portability.
-
-Full table + worked example: [Picking a primary-key strategy](#picking-a-primary-key-strategy).
+- **1.6 — richer aggregates.** `groupBy`'s `having` now accepts both Prisma's
+  field-first shape (`{ total: { _sum: { gte: 1 } } }`) **and** the bucket-first
+  shape (`{ _sum: { total: { gte: 1 } } }`), and `count({ distinct: [...] })` is
+  fixed on MongoDB (it now counts distinct combinations, matching the SQL
+  dialects). See [Grouping and aggregates](#grouping-and-aggregates).
+- **1.5 — `col()` for field-to-field comparison.** Compare one column against
+  another inside a `where` (`{ currentUsage: { lt: col('globalLimit') } }`),
+  portable across every dialect — Mongo `$expr`, SQL `a <op> b`. This makes an
+  atomic, race-safe guarded counter expressible through the normal `update()`
+  API. See [Comparing two columns](#comparing-two-columns-col). (1.5.1 also
+  fixed a `findOneAndUpdate` result-unwrap bug that affected `update()` on
+  models with a field literally named `value`.)
+- **1.4 — primary-key strategies on `f.id()`** (`auto` / `uuid` / `bigserial`).
+  SQL-only services can pick a classic auto-incrementing integer PK without raw
+  DDL; UUIDs and ObjectIds are unchanged. See
+  [Picking a primary-key strategy](#picking-a-primary-key-strategy).
 
 ---
 
@@ -512,6 +504,31 @@ Available operators:
 * Text columns marked `.searchable()`: `search` (see
   [Full-text search](#full-text-search)).
 
+#### Comparing two columns: `col()`
+
+Use `col('otherField')` on the right-hand side of `equals`/`not`/`lt`/`lte`/
+`gt`/`gte` to compare one column against another column **of the same row**,
+instead of against a literal. It works the same on every dialect — Mongo
+compiles it to `$expr`, SQL to a plain `a <op> b`.
+
+```ts
+import { col } from 'forge-orm';
+
+// promos still under their global cap
+await db.promo.findMany({
+  where: { currentUsage: { lt: col('globalLimit') } },
+});
+
+// the canonical use: an atomic, race-safe guarded counter
+await db.promo.update({
+  where: { id, currentUsage: { lt: col('globalLimit') } },   // only if room remains
+  data:  { currentUsage: { increment: 1 } },                 // single atomic write
+});
+```
+
+`col()` only accepts the six comparison operators, and the referenced field
+must be a real scalar column (a typo or relation name throws at build time).
+
 ### Choosing fields: `select` and `include`
 
 By default a query returns all of a model's own columns. To change that, use one
@@ -626,16 +643,41 @@ await db.user.delete({ where: { id: 'u1' } });   // posts with onDelete:'Cascade
 
 ## Grouping and aggregates
 
+`groupBy` aggregates rows by one or more columns. Each result row carries the
+grouped columns plus the aggregate buckets you ask for: `_count`, `_sum`,
+`_avg`, `_min`, `_max`. `_count._all` is `COUNT(*)`; per-column counts go in
+`_count.<col>`.
+
 ```ts
-const byRole = await db.user.groupBy({
-  by:     ['role'],
-  where:  { active: true },
-  _count: { _all: true },
-  _avg:   { age: true },
-  having: { _count: { id: { gt: 1 } } },
-  orderBy:{ role: 'asc' },
+const byStatus = await db.order.groupBy({
+  by:      ['status'],
+  where:   { channel: 'web' },          // filter rows BEFORE grouping
+  _count:  { _all: true },
+  _sum:    { total: true },
+  _avg:    { total: true },
+  _min:    { total: true },
+  _max:    { total: true },
+  orderBy: { status: 'asc' },
 });
-// [{ role: 'USER', _count: { _all: 42 }, _avg: { age: 31.2 } }, …]
+// [{ status: 'paid', _count: { _all: 3 }, _sum: { total: 600 }, _avg: { total: 200 }, … }, …]
+```
+
+`having` filters the **groups** after aggregation. It accepts both Prisma's
+field-first shape and the bucket-first shape — they mean the same thing:
+
+```ts
+having: { total: { _sum: { gte: 120 } } }   // field-first (Prisma)
+having: { _sum: { total: { gte: 120 } } }   // bucket-first
+```
+
+### Distinct
+
+`distinct` on `findMany` returns one row per distinct value-combination of the
+listed columns; on `count` it counts those combinations.
+
+```ts
+await db.order.findMany({ distinct: ['status'] });    // one row per status
+await db.order.count({ distinct: ['channel'] });      // how many distinct channels
 ```
 
 ---
@@ -990,8 +1032,10 @@ performance. Run `forge:bench` and `forge:bench:compare` to see for yourself.
 
 ## Testing
 
-The repository's own test suite (run from a clone) has 191 unit tests and 163
-live integration tests across all four databases.
+The repository's own test suite (run from a clone) has 260 unit tests and 164
+live integration scenarios across all four databases, plus dedicated regression
+scripts (e.g. `regression-mongo-value-field.ts`, `regression-groupby-distinct.ts`)
+wired into the Mongo integration run.
 
 ```sh
 npm run forge:check         # unit tests, type checks, and autocomplete checks (no database needed)

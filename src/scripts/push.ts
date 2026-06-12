@@ -25,8 +25,6 @@ async function main() {
     process.exit(1);
   }
 
-  // Resolve once so every adapter sees the same models. Falls back to
-  // the bundled sample (with a warning) for forge's own dev/test runs.
   const { schema, source } = loadConsumerSchema();
   console.log(`[forge:push] ${kind} — schema: ${source}`);
 

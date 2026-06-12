@@ -3,14 +3,10 @@ import type { MysqlPool } from './execute';
 
 // MySQL migration runner.
 //
-// Differences from PG's:
-//   • Concurrent push serialised via `SELECT GET_LOCK('forge_migrate', 60)`
-//     instead of pg_advisory_xact_lock.
-//   • MySQL doesn't support SAVEPOINT for DDL (DDL implicitly commits any
-//     open transaction). So we run statements outside a wrapping txn and
-//     accept that a mid-batch failure leaves prior successes applied — same
-//     semantic as `prisma db push`.
-//   • Introspection via INFORMATION_SCHEMA instead of pg_*.
+//   • Concurrent push serialised via `SELECT GET_LOCK('forge_migrate', 60)`.
+//   • MySQL has no SAVEPOINT for DDL (DDL implicitly commits any open txn), so
+//     statements run outside a wrapping txn — a mid-batch failure leaves prior
+//     successes applied (same semantic as `prisma db push`).
 
 export interface ApplyReport {
   applied: string[];
@@ -37,7 +33,6 @@ export async function applyMigration(
       throw new Error('[forge:mysql] could not acquire migration lock — another push is running');
     }
 
-    // Introspect what's already there.
     const [tableRows]: any = await conn.query(
       `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE()`,
     );

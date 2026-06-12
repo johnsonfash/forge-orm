@@ -5,24 +5,6 @@ import { PostgresDialect, type Dialect } from './dialect';
 // DDL generator — turns a Forge schema into the SQL statements that build the
 // physical Postgres tables, constraints, and indexes.
 //
-// Output is a list of statements you can run in order. The migration runner
-// (migrate.ts) wraps them in a transaction with an advisory lock so two
-// concurrent `forge:push` runs serialise instead of racing.
-//
-// What we emit per model:
-//   • CREATE TABLE IF NOT EXISTS "<collection>" (
-//       "<col>" <type> [NULL|NOT NULL] [DEFAULT ...],
-//       ...,
-//       PRIMARY KEY ("id")
-//     )
-//   • ALTER TABLE … ADD CONSTRAINT "<name>" UNIQUE ("col")      per field-unique
-//   • ALTER TABLE … ADD CONSTRAINT "<name>" UNIQUE (cols)       per composite
-//   • ALTER TABLE … ADD CONSTRAINT "<name>" FOREIGN KEY ("fk")  per relation
-//                   REFERENCES "<target>" ("refs")
-//                   ON DELETE CASCADE|SET NULL|NO ACTION|RESTRICT
-//   • ALTER TABLE … ADD CONSTRAINT "<name>" CHECK (col IN ('a', 'b', ...))   for enums
-//   • CREATE INDEX IF NOT EXISTS "<name>" ON …                  per @@index
-//
 // Design rules:
 //   • Constraint + index names are deterministic and prefixed (`<table>_*`) so
 //     diff-based migrations can find and reconcile them.
@@ -31,16 +13,12 @@ import { PostgresDialect, type Dialect } from './dialect';
 //     pg_constraint to skip when already present (see migrate.ts).
 
 export interface DDLStatement {
-  // Logical kind helps the migration runner decide whether to skip on
-  // already-exists or to ALTER rather than emit fresh.
   kind: 'table' | 'unique' | 'foreignKey' | 'check' | 'index';
   sql: string;
   // Deterministic name for the object this statement creates. Used by the
   // migrator to look up "is this already applied?" in pg_class/pg_constraint.
   name: string;
   table: string;
-  // Drop SQL for full down-migration support. Wave 2c emits CREATE only; this
-  // is set up so Wave 2d's `forge:reset` can iterate in reverse.
   dropSql?: string;
 }
 
@@ -50,13 +28,11 @@ function tableConstraintName(table: string, kind: string, parts: string[]): stri
   // Constraint names are 63-byte limited in PG; collapse long ones.
   const raw = `${RESERVED_INDEX_PREFIX}${table}_${kind}_${parts.join('_')}`;
   if (raw.length <= 60) return raw;
-  // Hash-collapse the tail when too long (deterministic per input).
+  // Hash-collapse when too long (deterministic per input).
   let hash = 0;
   for (let i = 0; i < raw.length; i++) hash = (hash * 31 + raw.charCodeAt(i)) | 0;
   return `${RESERVED_INDEX_PREFIX}${table}_${kind}_${(hash >>> 0).toString(36)}`;
 }
-
-// ─── Per-model emission ─────────────────────────────────────────────────────
 
 export interface BuildDDLOptions {
   dialect?: Dialect;
@@ -69,12 +45,11 @@ export function buildSchemaDDL(
   const d = opts.dialect ?? PostgresDialect;
   const out: DDLStatement[] = [];
 
-  // Pass 1: tables (so FKs in pass 2 can reference them). Views go through
-  // a separate pass after tables so they can reference base tables.
+  // Pass 1: tables (so FKs in pass 2 and views in pass 3 can reference them).
   for (const key of Object.keys(schema)) {
     const m = (schema as any)[key] as ModelDef<any>;
     if (!m) continue;
-    if (m.view) continue;       // views handled in pass 3
+    if (m.view) continue;
     out.push(buildCreateTable(d, m));
   }
 
@@ -90,8 +65,7 @@ export function buildSchemaDDL(
     out.push(...buildSearchableIndexes(d, m));
   }
 
-  // Pass 3: Wave 4c — CREATE VIEW for view-marked models. Wave 5d —
-  // CREATE MATERIALIZED VIEW when `.asView({ materialised: true })`.
+  // Pass 3: CREATE [MATERIALIZED] VIEW for view-marked models.
   for (const key of Object.keys(schema)) {
     const m = (schema as any)[key] as ModelDef<any>;
     if (!m?.view?.sql) continue;
@@ -119,10 +93,9 @@ export function buildSchemaDDL(
   return out;
 }
 
-// Wave 4b — auto-emit GIN indexes on to_tsvector(col) for fields marked
-// `.searchable()`. Matches PG's recommended FTS index pattern; the
-// `where: { col: { search: q } }` operator compiles to the same expression
-// so this index serves the query.
+// Auto-emit GIN indexes on to_tsvector(col) for `.searchable()` fields. The
+// `where: { col: { search: q } }` operator compiles to the same expression so
+// this index serves the query.
 function buildSearchableIndexes(d: Dialect, m: ModelDef<any>): DDLStatement[] {
   const out: DDLStatement[] = [];
   for (const [fieldName, fdef] of Object.entries(m.fields)) {
@@ -178,13 +151,11 @@ function renderColumn(d: Dialect, name: string, field: FieldDef): string {
 
 function renderDefault(field: FieldDef): string {
   if (!field.default) {
-    // Wave 5e — uuid with `{ default: 'gen_random_uuid' }` gets a DB-side default.
     if (field.kind === 'uuid' && field.uuidDefault) {
       return ` DEFAULT gen_random_uuid()`;
     }
-    // embedMany without an explicit default still defaults to empty array in
-    // the DB so callers don't have to pass `[]` for every create. Optional
-    // embedManys remain free to be NULL.
+    // embedMany defaults to empty array so callers don't pass `[]` on every
+    // create. Optional embedManys remain free to be NULL.
     if (field.kind === 'embedMany' && !field.optional) {
       return ` DEFAULT '[]'::jsonb`;
     }
@@ -192,14 +163,13 @@ function renderDefault(field: FieldDef): string {
   }
   switch (field.default.kind) {
     case 'now':    return ' DEFAULT now()';
-    case 'autoId': return ''; // ObjectId-flavour ids are caller-generated; pure-SQL ids land in Wave 2d
+    case 'autoId': return ''; // ObjectId-flavour ids are caller-generated
     case 'literal': {
       const v = field.default.value;
       if (v === null) return ' DEFAULT NULL';
       if (typeof v === 'boolean') return ` DEFAULT ${v ? 'TRUE' : 'FALSE'}`;
       if (typeof v === 'number') return ` DEFAULT ${v}`;
       if (typeof v === 'string') return ` DEFAULT ${escapeSqlString(v)}`;
-      // Embed/json defaults: serialize to JSON literal.
       return ` DEFAULT ${escapeSqlString(JSON.stringify(v))}::jsonb`;
     }
   }
@@ -208,8 +178,6 @@ function renderDefault(field: FieldDef): string {
 function escapeSqlString(v: string): string {
   return `'${String(v).replace(/'/g, "''")}'`;
 }
-
-// ─── Constraints ────────────────────────────────────────────────────────────
 
 function buildPerFieldUniques(d: Dialect, m: ModelDef<any>): DDLStatement[] {
   const table = m.collection;

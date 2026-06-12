@@ -25,17 +25,6 @@ import { notFoundError, rethrowMongoError } from './errors';
 import type { ObjectId } from 'mongodb';
 import { mongo } from './bson';
 
-// Mongo IR executor — turns IR nodes into actual driver calls.
-//
-// Wave 1b scope: SelectNode + CountNode. Writes (Insert/Update/Delete) move
-// onto IR in the next iteration; they still go through the legacy translate
-// path for now.
-//
-// Hydration is recursive: a SelectNode's `hydration: RelationPlan[]` carries
-// fully-resolved sub-SelectNodes (built schema-aware in ir/build/index.ts),
-// so we just invoke `executeSelect` on each one with the IN-filter for the
-// parent IDs and stitch the result.
-
 interface ExecOpts { session?: ClientSession }
 
 export async function executeSelect(
@@ -69,7 +58,6 @@ export async function executeSelect(
 
   let out: any[] = rows.map((r) => decodeRow(model, r));
 
-  // Distinct: post-fetch dedup (Wave 1a contract retained).
   if (node.distinct?.length) {
     out = dedupeBy(out, node.distinct);
   }
@@ -96,8 +84,6 @@ async function applyProjectionAndHydration(
   }
 }
 
-// ─── Writes ─────────────────────────────────────────────────────────────────
-//
 // Executors return the raw inserted/updated/deleted document(s) so the wrapper
 // can layer the same select/include/omit projection + hydration on top via
 // applyProjectionAndHydration. Cascade enforcement for deletes lives here so
@@ -145,8 +131,20 @@ export async function executeUpdate(
   const options = artifact.args.options ?? {};
   try {
     if (artifact.op === 'findOneAndUpdate') {
-      const raw = await coll.findOneAndUpdate(filter, update, { ...options, ...(sessOpt ?? {}) });
-      const doc = (raw as any)?.value !== undefined ? (raw as any).value : raw;
+      // Force the ModifyResult wrapper so the return shape is deterministic
+      // across driver versions: v5 defaults to `{ value, ok, lastErrorObject }`,
+      // but v6/v7 default to returning the bare document. Without this, the
+      // unwrap below would have to guess — and a document field literally named
+      // `value` (e.g. a promo's discount `value`) would be mistaken for the
+      // driver's result envelope, silently turning a successful update into a
+      // false not-found.
+      const raw: any = await coll.findOneAndUpdate(filter, update, {
+        ...options,
+        ...(sessOpt ?? {}),
+        includeResultMetadata: true,
+      });
+      // `raw` is now always a ModifyResult: `.value` is the document (or null).
+      const doc = raw ? raw.value : null;
       if (!doc && !node.upsertCreate) {
         // Wrapper decides whether to throw — return undefined for callers to
         // surface notFoundError with their args.where context.
@@ -154,7 +152,6 @@ export async function executeUpdate(
       }
       return { doc, count: 1 };
     }
-    // updateMany
     const r = await coll.updateMany(filter, update, sessOpt);
     return { count: r.modifiedCount };
   } catch (err) {
@@ -180,7 +177,7 @@ export async function executeDelete(
     await applyCascadesForDelete(model, [target as any]);
     return { doc: target, count: 1 };
   }
-  // deleteMany — fetch first for cascade.
+  // Fetch first so cascade enforcement runs against the pre-delete rows.
   const targets = await coll.find(filter, sessOpt).toArray();
   if (targets.length === 0) return { count: 0 };
   const ids = targets.map((d) => (d as any)._id);
@@ -193,7 +190,6 @@ export async function executeDelete(
 // /omit + hydration on top of an already-fetched document.
 export { applyProjectionAndHydration };
 
-// Unused-import guard — used by typecheck:
 void notFoundError;
 
 // Reshape Mongo's $group output back into Prisma's nested `{ <by>, _count,
@@ -231,10 +227,24 @@ export async function executeCount(
 ): Promise<number> {
   const artifact = compileCount(node, model);
   const coll = dbClient.db.collection(artifact.collection);
-  return coll.countDocuments(artifact.args.filter ?? {}, opts.session ? { session: opts.session } : undefined);
-}
+  const sessOpt = opts.session ? { session: opts.session } : undefined;
+  const filter = artifact.args.filter ?? {};
 
-// ─── Hydration helpers ──────────────────────────────────────────────────────
+  // `count({ distinct: [...] })` — count distinct value-combinations of the
+  // listed fields. countDocuments() can't do this, so group then count the
+  // groups. (The SQL dialects compile this to COUNT(DISTINCT …).)
+  if (node.distinct?.length) {
+    const groupId: Record<string, string> = {};
+    for (const fieldName of node.distinct) groupId[fieldName] = '$' + appKeyToDbKey(fieldName);
+    const pipeline: Record<string, any>[] = [];
+    if (Object.keys(filter).length) pipeline.push({ $match: filter });
+    pipeline.push({ $group: { _id: groupId } }, { $count: 'n' });
+    const res = await coll.aggregate(pipeline, sessOpt).toArray();
+    return res.length ? (res[0] as any).n : 0;
+  }
+
+  return coll.countDocuments(filter, sessOpt);
+}
 
 async function hydrate(
   rows: any[],
@@ -278,7 +288,6 @@ async function hydrateOwningOne(
     where: undefined,
     cardinality: 'many',
   });
-  // Override the where with the FK IN-filter.
   const node: SelectNode = {
     ...subNode,
     kind: 'select',
@@ -371,7 +380,6 @@ async function hydrateMany(
 }
 
 function mergeNested(rel: RelationPlan, fallback: { where?: any; cardinality: 'one' | 'many' }) {
-  // Merge the materialised nested SelectNode shell with execute defaults.
   const nested = rel.nested ?? {};
   return {
     where: (nested as any).where ?? fallback.where,
@@ -410,7 +418,6 @@ async function applyRelationCounts(
       for (const row of rows) row._count[relName] = 0;
       continue;
     }
-    // One aggregate per relation: group by FK value, count.
     const grouped = await coll.aggregate([
       { $match: { [appKeyToDbKey(rel.on)]: { $in: coerced } } },
       { $group: { _id: `$${appKeyToDbKey(rel.on)}`, c: { $sum: 1 } } },
@@ -420,8 +427,6 @@ async function applyRelationCounts(
     for (const row of rows) row._count[relName] = byFk.get(stringKey(row[rel.refs])) ?? 0;
   }
 }
-
-// ─── Utility ────────────────────────────────────────────────────────────────
 
 function hasField(model: ModelDef<any>, fieldName: string): boolean {
   return model.fields[fieldName] != null;

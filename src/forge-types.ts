@@ -1,18 +1,9 @@
-// Per-model ergonomic type aliases — Prisma-shape DX without codegen.
-//
-// Two access styles, both backed by the same mapped type:
-//
-//   1) Generic by schema key (works for every model, even custom ones):
-//        type W = ForgeOf<'user'>['WhereInput'];
-//        type C = ForgeOf<'video'>['CreateInput'];
-//        type R = ForgeOf<'comment'>['Payload'];   // dependent on args
-//
-//   2) Capitalised dotted lookup over the schema map:
-//        type W = ForgeModels['User']['WhereInput'];
-//        type R = ForgeModels['Video']['Payload'];
-//
-// Everything derives from the live schema — adding/removing a model or field
-// updates these on save. No `prisma generate` step.
+// Per-model ergonomic type aliases — Prisma-shape DX without codegen. Two access
+// styles, same underlying mapped type:
+//   1) Generic by schema key:  ForgeOf<'user'>['WhereInput']
+//   2) Capitalised lookup:     ForgeModels['User']['WhereInput']
+// Everything derives from the live schema, so it updates on save with no
+// `prisma generate` step.
 
 import type { SchemaMap } from './schema';
 import type {
@@ -28,7 +19,7 @@ import type {
   WhereInput as WhereInputT,
 } from './schema/core';
 
-// Per-model bundle — all the types you'd reach for when building queries.
+// Per-model bundle — all the query-building types for one model.
 export type PerModelTypes<M> = M extends TypedModel<infer F, infer R>
   ? {
       WhereInput: WhereInputT<F>;
@@ -73,16 +64,14 @@ export type PerModelTypes<M> = M extends TypedModel<infer F, infer R>
       DeleteManyArgs: { where?: WhereInputT<F> };
       CountArgs: { where?: WhereInputT<F>; distinct?: Array<keyof F & string> };
 
-      // Resolved return shape for a given args object — `Payload<typeof args>`
-      // gives you the exact return type of findFirst/findMany/etc.
+      // Resolved return shape for a given args object — the exact return type of
+      // findFirst/findMany/etc.
       Payload: <Args>(args: Args) => Resolve<F, R, Args, SchemaMap>;
     }
   : never;
 
-// Generic accessor: ForgeOf<'user'>['WhereInput']
 export type ForgeOf<K extends keyof SchemaMap> = PerModelTypes<SchemaMap[K]>;
 
-// Capitalised map: ForgeModels['User']['WhereInput']
 export type ForgeModels = {
   [K in keyof SchemaMap as Capitalize<K & string>]: PerModelTypes<SchemaMap[K]>;
 };

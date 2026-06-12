@@ -1,15 +1,8 @@
 // Query IR — adapter-agnostic intermediate representation.
 //
-// Every wrapper method (findMany, create, update, ...) converts user args into
-// one of these nodes. Adapters then either:
-//   • Execute it (adapters/<kind>/execute.ts)        — Wave 1b
-//   • Compile it (adapters/<kind>/compile-from-ir.ts) — Wave 1a (this file)
-//   • Emit DDL from it (Wave 2)
-//
-// The IR is pure data. No driver types leak in. SQL compilers and Mongo
-// compilers consume the exact same tree.
-
-// ─── Top-level nodes ────────────────────────────────────────────────────────
+// Every wrapper method converts user args into one of these nodes; adapters
+// then execute, compile, or emit DDL from them. The IR is pure data — no driver
+// types leak in, so SQL and Mongo compilers consume the exact same tree.
 
 export type IRNode =
   | SelectNode
@@ -82,19 +75,15 @@ export interface CountNode {
 export interface AggregateNode {
   kind: 'aggregate';
   model: string;
-  pipeline?: any[];               // Mongo passthrough — Wave 4 adds typed sugar
+  pipeline?: any[];               // Mongo passthrough
 }
 
-// GroupByNode — typed aggregations across rows, grouped by a set of fields.
-// Compiles to SQL `GROUP BY` + aggregate functions on PG/MySQL/SQLite, and
-// to a `$group` stage on Mongo.
 export interface GroupByNode {
   kind: 'groupBy';
   model: string;
   by: string[];                            // schema field names to group by
   where?: WhereTree;                       // pre-aggregation filter
-  // Aggregations — each is a map of `field name → true`. `_count._all` is a
-  // synthetic key meaning COUNT(*) (no specific column).
+  // `_count._all` is a synthetic key meaning COUNT(*) (no specific column).
   _count?: { _all?: boolean } & Record<string, boolean | undefined>;
   _avg?: Record<string, boolean>;
   _sum?: Record<string, boolean>;
@@ -108,8 +97,6 @@ export interface GroupByNode {
   limit?: number;
   offset?: number;
 }
-
-// ─── Where tree ─────────────────────────────────────────────────────────────
 
 export type WhereTree =
   | WhereLeaf
@@ -125,6 +112,11 @@ export interface WhereLeaf {
   value: any;                     // already coerced by the IR builder
   // For string ops; ignored elsewhere.
   caseInsensitive?: boolean;
+  // Field-to-field comparison: when set, the leaf compares `field <op> rhsField`
+  // (both schema-side field names) instead of `field <op> value`, and `value`
+  // is ignored. Produced by `col('rhsField')`. Only the comparison ops
+  // (eq/ne/lt/lte/gt/gte) are valid here — enforced at IR-build time.
+  rhsField?: string;
 }
 
 export interface WhereAnd { kind: 'and'; children: WhereTree[] }
@@ -145,10 +137,8 @@ export type WhereOp =
   | 'lt' | 'lte' | 'gt' | 'gte'
   | 'contains' | 'startsWith' | 'endsWith'
   | 'has' | 'hasSome' | 'hasEvery' | 'isEmpty'
-  | 'jsonPath'                    // reserved for Wave 4 (Postgres jsonb)
-  | 'search';                     // reserved for Wave 4 (full-text)
-
-// ─── Projection + relations ─────────────────────────────────────────────────
+  | 'jsonPath'                    // reserved (Postgres jsonb)
+  | 'search';                     // reserved (full-text)
 
 export interface ProjectionPlan {
   // Scalar field names (schema-side). Empty array + exclusive=true means
@@ -176,11 +166,7 @@ export interface RelationPlan {
   };
 }
 
-// ─── Order, cursor ──────────────────────────────────────────────────────────
-
 export interface OrderByEntry {
-  // Either a scalar field on the model, or a relation-scoped order
-  // (Wave 1: scalar only; Wave 2 SQL adds relation-ordered).
   field: string;
   direction: 'asc' | 'desc';
   // SQL-only; ignored by Mongo. 'first' = NULLS FIRST.

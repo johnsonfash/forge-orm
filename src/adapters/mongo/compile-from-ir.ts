@@ -30,8 +30,6 @@ function modelDef(modelKey: string, override?: ModelDef<any>): ModelDef<any> {
   return m;
 }
 
-// ─── Where ──────────────────────────────────────────────────────────────────
-
 function compileWhere(model: ModelDef<any>, tree: WhereTree | undefined): Record<string, any> {
   if (!tree) return {};
   return compileWhereNode(model, tree);
@@ -50,21 +48,37 @@ function compileWhereNode(model: ModelDef<any>, tree: WhereTree): Record<string,
     case 'not':
       return { $nor: [compileWhereNode(model, tree.child)] };
     case 'relation':
-      // Wave 1a: one-side `is`/`isNot` mapped to FK existence; many-side
-      // (`some`/`every`/`none`) deferred to Wave 4 (Mongo $lookup not used yet).
-      // The legacy translateWhere path still handles these for execute; this
-      // IR-only consumer keeps the contract by returning {}.
+      // Relation filters in `where` are not yet supported on Mongo (no $lookup);
+      // return {} (match-all) rather than erroring. Tracked as a known gap.
       return {};
     case 'leaf':
       return compileLeaf(model, tree);
   }
 }
 
+// Mongo aggregation-expression operator for each field-to-field comparison op.
+const EXPR_OPS: Partial<Record<string, string>> = {
+  eq: '$eq', ne: '$ne', lt: '$lt', lte: '$lte', gt: '$gt', gte: '$gte',
+};
+
 function compileLeaf(
   model: ModelDef<any>,
   leaf: Extract<WhereTree, { kind: 'leaf' }>,
 ): Record<string, any> {
   const dbKey = appKeyToDbKey(leaf.field);
+
+  // Field-to-field comparison (`col('rhsField')`) → $expr. No value coercion:
+  // both operands are column paths, not literals.
+  if (leaf.rhsField !== undefined) {
+    const exprOp = EXPR_OPS[leaf.op];
+    if (!exprOp) {
+      throw new Error(`[forge] col() comparison not supported for op '${leaf.op}'`);
+    }
+    return {
+      $expr: { [exprOp]: ['$' + dbKey, '$' + appKeyToDbKey(leaf.rhsField)] },
+    };
+  }
+
   const def = getFieldDef(model, leaf.field);
   const coerce = (v: any) => (def ? coerceFieldValue(def, v) : v);
   const out: Record<string, any> = {};
@@ -94,16 +108,14 @@ function compileLeaf(
     case 'hasEvery':  out[dbKey] = { $all: (leaf.value as any[]).map(coerce) }; return out;
     case 'isEmpty':   out[dbKey] = leaf.value ? { $size: 0 } : { $not: { $size: 0 } }; return out;
     case 'search': {
-      // Mongo's $text is collection-scoped (not field-scoped). We expose
-      // it via field-level `{ col: { search: 'q' } }` for API parity with
-      // the SQL dialects, but the query actually fires across every
-      // text-indexed field. Requires `collection.createIndex({ col: 'text' })`
-      // beforehand (Wave 4b will emit this via forge:push).
+      // Mongo's $text is collection-scoped (not field-scoped). We expose it
+      // via field-level `{ col: { search: 'q' } }` for API parity with the SQL
+      // dialects, but the query fires across every text-indexed field. Requires
+      // `collection.createIndex({ col: 'text' })` beforehand.
       out.$text = { $search: String(leaf.value) };
       return out;
     }
     case 'jsonPath':
-      // Wave 5 territory.
       return out;
   }
 }
@@ -111,8 +123,6 @@ function compileLeaf(
 function nonEmpty(o: Record<string, any>): boolean {
   return Object.keys(o).length > 0;
 }
-
-// ─── Projection ─────────────────────────────────────────────────────────────
 
 function compileProjection(plan: ProjectionPlan | undefined): Record<string, 0 | 1> | undefined {
   if (!plan) return undefined;
@@ -132,14 +142,10 @@ function compileProjection(plan: ProjectionPlan | undefined): Record<string, 0 |
   return undefined;
 }
 
-// ─── OrderBy ────────────────────────────────────────────────────────────────
-
 function compileOrderBy(orderBy: OrderByEntry[] | undefined): Array<[string, 1 | -1]> | undefined {
   if (!orderBy?.length) return undefined;
   return orderBy.map((e) => [appKeyToDbKey(e.field), e.direction === 'desc' ? -1 : 1]);
 }
-
-// ─── Cursor ─────────────────────────────────────────────────────────────────
 
 function compileCursor(model: ModelDef<any>, cursor: CursorSpec | undefined): Record<string, any> | undefined {
   if (!cursor?.fields) return undefined;
@@ -152,8 +158,6 @@ function compileCursor(model: ModelDef<any>, cursor: CursorSpec | undefined): Re
   if (Object.keys(out).length === 1) return out;
   return { $and: Object.entries(out).map(([k, v]) => ({ [k]: v })) };
 }
-
-// ─── Top-level compilers ────────────────────────────────────────────────────
 
 export function compileSelect(node: SelectNode, modelOverride?: ModelDef<any>): MongoArtifact {
   const m = modelDef(node.model, modelOverride);
@@ -274,13 +278,9 @@ function remapKeys(_m: ModelDef<any>, obj: Record<string, any>): Record<string, 
   return out;
 }
 
-// ─── GroupBy → Mongo $group pipeline ────────────────────────────────────────
-//
-// Builds the same logical operation as the PG compiler: pre-filter via $match,
-// aggregate via $group, post-filter via $match on aggregate aliases (having),
-// sort/limit/skip via $sort/$limit/$skip. The wrapper reshapes the result back
-// into Prisma's nested `{ <by-cols>, _count: {...}, _avg: {...}, ... }` payload.
-
+// Same logical op as the PG compiler: pre-filter $match, aggregate $group,
+// post-filter $match on aggregate aliases (having), sort/limit/skip. The
+// wrapper reshapes the result into Prisma's nested `{ <by-cols>, _count, ... }`.
 export function compileGroupBy(node: GroupByNode, modelOverride?: ModelDef<any>): MongoArtifact {
   const m = modelDef(node.model, modelOverride);
   const pipeline: any[] = [];
@@ -290,13 +290,12 @@ export function compileGroupBy(node: GroupByNode, modelOverride?: ModelDef<any>)
     if (Object.keys(f).length) pipeline.push({ $match: f });
   }
 
-  // $group _id: nested doc keyed by group columns.
   const groupId: Record<string, any> = {};
   for (const f of node.by) groupId[f] = `$${appKeyToDbKey(f)}`;
   const groupStage: Record<string, any> = { _id: groupId };
 
-  // Aggregations — flat aliases ($sum/$avg/$min/$max). _count._all → $sum: 1.
-  const addAgg = (bucket: '_count' | '_avg' | '_sum' | '_min' | '_max', field: string, mongoOp: string) => {
+  // Flat aliases ($sum/$avg/$min/$max). _count._all → $sum: 1.
+  const addAgg =(bucket: '_count' | '_avg' | '_sum' | '_min' | '_max', field: string, mongoOp: string) => {
     const alias = `__agg_${bucket.slice(1)}_${field}`;
     if (field === '_all') groupStage[alias] = { $sum: 1 };
     else groupStage[alias] = { [mongoOp]: `$${appKeyToDbKey(field)}` };
@@ -309,7 +308,6 @@ export function compileGroupBy(node: GroupByNode, modelOverride?: ModelDef<any>)
 
   pipeline.push({ $group: groupStage });
 
-  // having → $match on the aggregate aliases.
   if (node.having && typeof node.having === 'object') {
     const havingMatch: Record<string, any> = {};
     for (const [bucket, inner] of Object.entries(node.having)) {
@@ -328,11 +326,10 @@ export function compileGroupBy(node: GroupByNode, modelOverride?: ModelDef<any>)
     if (Object.keys(havingMatch).length) pipeline.push({ $match: havingMatch });
   }
 
-  // Order by — operate on group columns (read from _id.<col>) or aliases.
   if (node.orderBy?.length) {
     const sort: Record<string, 1 | -1> = {};
     for (const e of node.orderBy) {
-      // Prefer group column path; fall back to alias.
+      // Group columns live under _id.<col>; everything else is an alias.
       const path = node.by.includes(e.field) ? `_id.${e.field}` : appKeyToDbKey(e.field);
       sort[path] = e.direction === 'desc' ? -1 : 1;
     }

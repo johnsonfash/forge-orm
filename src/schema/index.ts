@@ -1,33 +1,14 @@
-// ============================================================================
-// Sample schema — a multi-tenant blog/CMS domain, designed to exercise every
-// feature the wrapper supports:
-//
-//   • enums (Role, PostStatus, LikeKind)
-//   • embed (Address — fixed embedded composite type)
-//   • embedMany (SocialLink, Revision — variable-length embedded list)
-//   • per-field unique (User.email, Post.slug, Tag.name)
-//   • composite @@unique (Like[user_id, post_id, kind], PostTag[post_id, tag_id])
-//   • multi-column indexes ([author_id, status], [post_id, created_at])
-//   • single-column index ([slug], [role])
-//   • one-to-one via FK (User ↔ Profile)
-//   • one-to-many (User → Posts → Comments)
-//   • many-to-many via join (Post ↔ Tag through PostTag)
-//   • self-referential (Comment.parent_id → Comment)
-//   • cascade variants (Cascade / SetNull / NoAction)
-//   • JSON field (AuditLog.payload, Post.meta)
-//   • stringArray (Post.tag_names cached list)
-//   • Optional / required fields, default(now()), default(literal), updatedAt
-//
-// Names are deliberately generic so anyone can read the schema as documentation.
-// ============================================================================
+// Sample schema — a blog/CMS domain that exercises every wrapper feature (enums,
+// embed/embedMany, per-field + composite uniques, multi/single-column indexes,
+// one-to-one/one-to-many/many-to-many/self-referential relations, cascade
+// variants, JSON, stringArray, defaults, updatedAt). Names are deliberately
+// generic so the schema reads as documentation.
 
 import { rel as $rel, embed, enums, f, ModelRelations, RelationInfo } from './core';
 import { model } from './core';
 import { getActiveSchema, setActiveSchema, type SchemaShape } from './active';
 
 const rel = $rel;
-
-// ─── Enums ──────────────────────────────────────────────────────────────────
 
 export const Role = enums(['USER', 'EDITOR', 'ADMIN'] as const);
 export type Role = (typeof Role.values)[number];
@@ -37,8 +18,6 @@ export type PostStatus = (typeof PostStatus.values)[number];
 
 export const LikeKind = enums(['LIKE', 'BOOKMARK'] as const);
 export type LikeKind = (typeof LikeKind.values)[number];
-
-// ─── Composite (embedded) types ─────────────────────────────────────────────
 
 export const AddressEmbed = () =>
   embed('Address', {
@@ -60,8 +39,6 @@ export const RevisionEmbed = () =>
     body: f.string(),
     edited_at: f.dateTime().default('now'),
   });
-
-// ─── Models ─────────────────────────────────────────────────────────────────
 
 export const User = model('users', {
   id: f.id(),
@@ -101,7 +78,7 @@ export const Post = model('posts', {
   author_id: f.objectId(),
   title: f.string(),
   slug: f.string().unique(),
-  body: f.text().searchable(),                       // searchable → auto-FTS index per dialect via forge:push
+  body: f.text().searchable(),
   status: f.enumOf(PostStatus.values).default('DRAFT'),
   tag_names: f.stringArray().optional(),
   view_count: f.int().default(0),
@@ -127,7 +104,7 @@ export const Comment = model('comments', {
   post_id: f.objectId(),
   author_id: f.objectId().optional(),
   parent_id: f.objectId().optional(),
-  body: f.text(),                                    // unbounded comment body
+  body: f.text(),
   like_count: f.int().default(0),
   is_deleted: f.bool().default(false),
   created_at: f.dateTime().default('now'),
@@ -183,16 +160,15 @@ export const AuditLog = model('audit_logs', {
   event: f.string(),
   payload: f.json().optional(),
   created_at: f.dateTime().default('now'),
-  deleted_at: f.dateTime().softDeleteAt(),  // soft-delete marker (Wave 4b)
+  deleted_at: f.dateTime().softDeleteAt(),
 }, {
   indexes: [{ keys: { actor_id: 1, created_at: -1 } }],
 }).relate(() => ({
   actor: rel.one('user', { on: 'actor_id', refs: 'id', onDelete: 'SetNull' }),
 }));
 
-// Wave 4c — a read-only view over Post.
-// `published_posts` exposes only PUBLISHED, non-soft-deleted posts. Writes
-// against this model throw at the wrapper layer; reads work transparently.
+// A read-only view over Post: only PUBLISHED posts. Writes throw at the wrapper
+// layer; reads work transparently.
 export const PublishedPosts = model('published_posts', {
   id: f.id(),
   title: f.string(),
@@ -201,10 +177,7 @@ export const PublishedPosts = model('published_posts', {
   view_count: f.int(),
   published_at: f.dateTime().optional(),
 }).asView({
-  // SQL dialects: a parameter-free SELECT body. forge:push emits
-  // `CREATE OR REPLACE VIEW published_posts AS <sql>`.
   sql: `SELECT id, title, slug, author_id, view_count, published_at FROM posts WHERE status = 'PUBLISHED'`,
-  // Mongo equivalent: the aggregation pipeline that the view materialises.
   sourceCollection: 'posts',
   pipeline: [
     { $match: { status: 'PUBLISHED' } },
@@ -212,11 +185,9 @@ export const PublishedPosts = model('published_posts', {
   ],
 });
 
-// Wave 5d — a materialised view: per-author post rollups, recomputed on
-// demand via `db.postStats.refresh()`. PG emits CREATE MATERIALIZED VIEW;
-// MySQL/SQLite back it with a TABLE repopulated on refresh; Mongo populates a
-// collection via the pipeline's $out. `post_count`/`total_views` use f.bigint()
-// to also exercise the Wave 5e bigint type end-to-end.
+// A materialised view: per-author post rollups, recomputed on demand via
+// `db.postStats.refresh()`. PG emits CREATE MATERIALIZED VIEW; MySQL/SQLite back
+// it with a refreshed TABLE; Mongo populates a collection via the pipeline's $out.
 export const PostStats = model('post_stats', {
   author_id: f.objectId(),
   post_count: f.bigint(),
@@ -232,13 +203,9 @@ export const PostStats = model('post_stats', {
   ],
 });
 
-// ─── Schema registry ────────────────────────────────────────────────────────
-//
-// `sampleSchema` is the bundled demonstration schema (a blog/CMS domain that
-// exercises every feature). It is ALSO the default active schema, so forge
-// works out of the box for the sample and the test suite.
-//
-// To use forge for YOUR domain, define your own `model(...)` map and pass it:
+// `sampleSchema` is the bundled demonstration schema and ALSO the default active
+// schema, so forge works out of the box for the sample and the test suite. For
+// your own domain, define a `model(...)` map and pass it:
 //   const db = await createDb({ url, schema: mySchema });
 // forge then reads *your* models everywhere — nothing here is hardwired.
 export const sampleSchema = {
@@ -257,11 +224,11 @@ export const sampleSchema = {
 // Default the active schema to the sample on module load.
 setActiveSchema(sampleSchema as unknown as SchemaShape);
 
-// `schema` is a LIVE VIEW of whichever schema is currently active (the sample
-// by default; whatever `createDb({ schema })` set otherwise). The entire
-// codebase reads models through this proxy, so consumer schemas flow in without
-// threading a map through every function. It's typed as the sample `SchemaMap`
-// for back-compat; per-consumer static typing flows through `ForgeDb<S>`.
+// `schema` is a LIVE VIEW of whichever schema is currently active (the sample by
+// default; whatever `createDb({ schema })` set otherwise). The whole codebase
+// reads models through this proxy, so consumer schemas flow in without threading
+// a map through every function. Typed as the sample `SchemaMap`; per-consumer
+// static typing flows through `ForgeDb<S>`.
 export const schema: SchemaMap = new Proxy({} as SchemaMap, {
   get: (_t, k) => (getActiveSchema() as any)[k as any],
   has: (_t, k) => (k as any) in getActiveSchema(),
@@ -277,8 +244,8 @@ export const schema: SchemaMap = new Proxy({} as SchemaMap, {
 // schema is supplied. Consumer schemas type through ForgeDb<S> generically.
 export type SchemaMap = typeof sampleSchema;
 
-// ─── Type-level relation-target validation ──────────────────────────────────
-
+// Type-level relation-target validation — fails the build if any relation
+// targets a name not in the schema map.
 type AllRelationTargets<S> = {
   [K in keyof S]: ModelRelations<S[K]> extends infer R
     ? R extends Record<string, RelationInfo>

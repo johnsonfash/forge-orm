@@ -14,8 +14,7 @@ import {
 import { withSqliteErrors } from './errors';
 import { SqliteDialect } from './dialect';
 
-// SQLiteAdapter — wraps better-sqlite3 (synchronous driver) in forge's async
-// Adapter contract.
+// SQLiteAdapter — wraps better-sqlite3 (sync driver) in forge's async contract.
 //
 // Connection-string forms accepted:
 //   sqlite:./app.db                   → ./app.db relative to cwd
@@ -24,10 +23,9 @@ import { SqliteDialect } from './dialect';
 //   file:./app.db                      → same as sqlite:
 //   ./app.db (bare path ending .db)   → also recognised by detectAdapterKind
 //
-// Cascade enforcement: the DDL emits FOREIGN KEY ... ON DELETE CASCADE
-// inside CREATE TABLE, but SQLite only honours those if
-// `PRAGMA foreign_keys = ON` is set on the connection. The adapter sets it
-// at connect(); the migrator re-sets it for safety.
+// Cascade gotcha: ON DELETE CASCADE is only honoured when
+// `PRAGMA foreign_keys = ON` is set per-connection. Set at connect();
+// the migrator re-sets it for safety.
 
 const CAPS: AdapterCapabilities = {
   nativeCascades: true,            // via FK ON DELETE clauses, with pragma
@@ -48,11 +46,9 @@ export class SqliteAdapter implements Adapter {
     this._url = url;
     const filename = this._urlToFilename(url);
     const sqlite = loadDriver('sqlite', url);
-    // better-sqlite3's default export is the Database constructor.
     const Database = (sqlite as any).default ?? sqlite;
     this._db = new Database(filename) as SqliteDb;
-    // Critical for cascades + general correctness:
-    this._db.pragma('foreign_keys = ON');
+    this._db.pragma('foreign_keys = ON');   // required for cascades to fire
     this._db.pragma('journal_mode = WAL');  // better concurrent read perf
   }
 
@@ -82,8 +78,6 @@ export class SqliteAdapter implements Adapter {
     if (!this._db) throw new Error('[forge:sqlite] db accessed before connect() resolved');
     return this._db;
   }
-
-  // ─── Executor surface ─────────────────────────────────────────────────
 
   private sqliteOpts(opts?: ExecOpts): SqliteExecOpts {
     return opts?.session ? { db: opts.session as SqliteDb } : {};
@@ -140,22 +134,18 @@ export class SqliteAdapter implements Adapter {
       (r) => r.length);
   }
 
-  // Wave 4b — native streaming via better-sqlite3's stmt.iterate(). Yields
-  // rows from the prepared statement without materialising the result set.
+  // Streaming via better-sqlite3's stmt.iterate() — yields rows without
+  // materialising the result set.
   async *streamSelect(node: any, model: any, _opts?: ExecOpts): AsyncIterable<any> {
     const { compileSelect } = await import('./compile-from-ir');
     const a = compileSelect(node, model);
     const stmt = this.db.prepare(a.sql);
-    // better-sqlite3 statements have an `.iterate(...params)` that returns a
-    // synchronous iterator. We hand-decode each row via the model.
     const iter = (stmt as any).iterate(...a.params);
     const { decodeRow } = await import('./execute');
     for (const row of iter) yield decodeRow(model, row);
   }
 
   async applyProjectionAndHydration(): Promise<void> { /* no-op; executor does it */ }
-
-  // ─── Raw SQL ───────────────────────────────────────────────────────────
 
   async $queryRaw(fragment: import('../../raw-sql').SqlFragment, opts?: ExecOpts): Promise<any[]> {
     const { compileSqlFragment } = await import('../../raw-sql');
@@ -172,13 +162,9 @@ export class SqliteAdapter implements Adapter {
     return r.changes;
   }
 
-  // ─── $transaction (BEGIN / COMMIT / ROLLBACK) ─────────────────────────
-  //
-  // better-sqlite3 has its own .transaction() helper, but it expects a sync
-  // callback. We need to support async callbacks, so we drive the BEGIN/
-  // COMMIT/ROLLBACK directly. The same db handle is passed back via
-  // ExecOpts.session so nested calls inside the callback land on the same
-  // transactional state.
+  // better-sqlite3's .transaction() helper only takes sync callbacks, so we
+  // drive BEGIN/COMMIT/ROLLBACK directly to support async ones. The db handle
+  // is passed back via ExecOpts.session so nested calls share the txn state.
   async $transaction<T>(fn: (session: unknown) => Promise<T>): Promise<T> {
     this.db.exec('BEGIN');
     try {
@@ -190,8 +176,6 @@ export class SqliteAdapter implements Adapter {
       throw err;
     }
   }
-
-  // ─── coerce / decode / cascade ────────────────────────────────────────
 
   coerceInbound(model: any, data: any, _opts?: { forCreate?: boolean }) {
     if (!data || typeof data !== 'object') return data;
@@ -223,8 +207,8 @@ export class SqliteAdapter implements Adapter {
     // PRAGMA foreign_keys = ON is set at connect; cascades happen in-engine.
   }
 
-  // Wave 5d — table-backed materialised view refresh: clear + re-populate from
-  // the view's SELECT body, inside a transaction.
+  // Table-backed materialised view refresh: clear + re-populate from the
+  // view's SELECT body, in a transaction.
   async refreshView(model: any, opts?: ExecOpts): Promise<void> {
     const sql = model?.view?.sql;
     if (!sql) throw new Error(`[forge:sqlite] '${model?.collection}' has no view SQL to refresh`);
@@ -237,21 +221,16 @@ export class SqliteAdapter implements Adapter {
     tx();
   }
 
-  // Wave 5b — live-schema introspection (sqlite_master + PRAGMA).
   async introspect(): Promise<import('../types').DbIntrospection> {
     const { introspectSqlite } = await import('./introspect');
     return introspectSqlite(this.db);
   }
 
-  // ─── URL → filename ────────────────────────────────────────────────────
-
   private _urlToFilename(url: string): string {
-    // `:memory:` is special — better-sqlite3 recognises it as in-RAM.
     if (url === 'sqlite::memory:' || url === ':memory:') return ':memory:';
     const stripped = url
       .replace(/^sqlite:/, '')
       .replace(/^file:/, '');
-    // Empty path → in-memory.
     if (stripped === '' || stripped === ':memory:') return ':memory:';
     return stripped;
   }

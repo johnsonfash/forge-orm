@@ -1,23 +1,9 @@
-// SQLite IR consumer — emits SQLite SQL + ? placeholders.
-//
-// 90% of the logic mirrors the Postgres compiler — the IR is the same.
-// SQLite-specific differences are concentrated in a few small areas:
-//   • Placeholders are `?` (handled by SqliteDialect.placeholder).
-//   • Boolean values: SQLite has no bool type — we coerce `true` → 1,
-//     `false` → 0 at the parameter binding site.
-//   • Array operators (`has`, `hasSome`, `hasEvery`, `isEmpty`): SQLite
-//     stores arrays as JSON in TEXT columns. Operators map to json_each()
-//     and json_array_length() expressions.
-//   • `distinct` on single column → SELECT DISTINCT (covers the common
-//     case; SQLite has no DISTINCT ON, so multi-column distinct uses a
-//     GROUP BY rewrite).
-//   • `ctid` idiom for single-row UPDATE/DELETE → use SQLite's hidden
-//     `rowid` instead.
-//   • Inserts use `RETURNING *` (SQLite 3.35+, 2021).
-//
-// We delegate most of the work — including the WhereTree compiler — to
-// Postgres's logic by passing SqliteDialect through. The few SQLite-specific
-// overrides live in this file.
+// SQLite IR consumer — runs the PG compiler with SqliteDialect (same IR), then
+// applies SQLite-specific rewrites that the dialect can't express:
+//   • No DISTINCT ON — single-col distinct → DISTINCT, multi-col → GROUP BY.
+//   • PG's `ctid` single-row idiom → SQLite's hidden `rowid`.
+// Bools→0/1 coercion and `?` placeholders are handled by the dialect; inserts
+// use RETURNING * (SQLite 3.35+, 2021).
 
 import type {
   CountNode,
@@ -40,7 +26,7 @@ import {
   compileUpdate as pgCompileUpdate,
 } from '../postgres/compile-from-ir';
 
-// Coerce booleans → 0/1 in params (SQLite has no bool).
+// SQLite has no bool — coerce to 0/1; dates → ISO strings.
 function coerceParams(params: unknown[]): unknown[] {
   return params.map((v) => {
     if (typeof v === 'boolean') return v ? 1 : 0;
@@ -58,17 +44,11 @@ function postProcess(artifact: SQLArtifact): SQLArtifact {
   };
 }
 
-// Most of PG's compilers Just Work via the Dialect abstraction. We swap
-// the dialect, then coerce param types on the way out.
-
 export function compileSelect(node: SelectNode, modelOverride?: ModelDef<any>): SQLArtifact {
-  // PG compiler emits `DISTINCT ON (col)` for `distinct`. SQLite doesn't
-  // support that — rewrite to `DISTINCT` when the distinct list is a single
-  // column matching the order, otherwise rewrite to GROUP BY.
+  // SQLite has no DISTINCT ON — rewrite the prefix to plain DISTINCT.
   const a = pgCompileSelect(node, modelOverride, SqliteDialect);
   let sql = a.sql;
   if (node.distinct?.length) {
-    // Strip "DISTINCT ON (...)" prefix, add a "DISTINCT" after SELECT.
     sql = sql.replace(/^SELECT DISTINCT ON \([^)]+\) /, 'SELECT DISTINCT ');
   }
   return postProcess({ ...a, sql });
@@ -81,7 +61,6 @@ export function compileCount(node: CountNode, modelOverride?: ModelDef<any>): SQ
   const a = pgCompileCount(node, modelOverride, SqliteDialect);
   let sql = a.sql;
   if (node.distinct && node.distinct.length > 1) {
-    // Wrap the FROM clause in a GROUP BY subquery.
     const m = modelDef(node.model, modelOverride);
     const table = SqliteDialect.quoteIdent(m.collection);
     const cols = node.distinct.map((f) => `${table}.${SqliteDialect.quoteIdent(f)}`).join(', ');

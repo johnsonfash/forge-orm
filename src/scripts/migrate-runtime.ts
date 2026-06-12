@@ -76,7 +76,7 @@ export function parseMigrationFile(content: string): ParsedMigration {
 }
 
 export function timestampSlug(slug: string): string {
-  const t = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, '').replace('T', 'T');
+  const t = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, '');
   return `${t}_${slug}`;
 }
 

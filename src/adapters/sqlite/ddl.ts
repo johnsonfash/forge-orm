@@ -3,15 +3,11 @@ import type { SchemaMap } from '../../schema';
 import { SqliteDialect } from './dialect';
 import type { DDLStatement } from '../postgres/ddl';
 
-// SQLite DDL — same shape as Postgres but adjusted for SQLite quirks:
-//   • No CHECK on enum CREATE TABLE clauses can use IN — same as PG.
-//   • Foreign keys are emitted inside CREATE TABLE (not via ALTER TABLE,
-//     which SQLite doesn't fully support for FKs). They take effect only if
-//     `PRAGMA foreign_keys = ON` was set — the adapter does this at connect.
-//   • No `ALTER TABLE … ADD CONSTRAINT UNIQUE` — emit `CREATE UNIQUE INDEX`
-//     instead.
-//   • Boolean defaults: 0 / 1, not TRUE / FALSE.
-//   • Timestamp default: `CURRENT_TIMESTAMP` (no `now()`).
+// SQLite DDL — same shape as Postgres, adjusted for SQLite quirks:
+//   • FKs emitted inside CREATE TABLE (SQLite can't ALTER TABLE … ADD FK), and
+//     only enforced when `PRAGMA foreign_keys = ON` (adapter sets it at connect).
+//   • No `ALTER TABLE … ADD CONSTRAINT UNIQUE` — use `CREATE UNIQUE INDEX`.
+//   • Boolean defaults 0/1; timestamp default `CURRENT_TIMESTAMP` (no `now()`).
 
 const RESERVED_INDEX_PREFIX = 'forge_';
 
@@ -27,16 +23,13 @@ export function buildSchemaDDL(schema: SchemaMap): DDLStatement[] {
   const d = SqliteDialect;
   const out: DDLStatement[] = [];
 
-  // SQLite emits FKs inline in CREATE TABLE, so we build the whole table
-  // statement up-front including FKs.
+  // FKs are inline in CREATE TABLE, so build the full table statement up-front.
   for (const key of Object.keys(schema)) {
     const m = (schema as any)[key] as ModelDef<any>;
     if (!m || m.view) continue;
     out.push(buildCreateTable(m, schema));
   }
 
-  // Per-field uniques + composite uniques become CREATE UNIQUE INDEX
-  // (SQLite doesn't have an ALTER TABLE … ADD CONSTRAINT UNIQUE form).
   for (const key of Object.keys(schema)) {
     const m = (schema as any)[key] as ModelDef<any>;
     if (!m || m.view) continue;
@@ -45,10 +38,9 @@ export function buildSchemaDDL(schema: SchemaMap): DDLStatement[] {
     out.push(...buildFtsTables(m));
   }
 
-  // Wave 4c — views. SQLite supports CREATE VIEW; updates / inserts /
-  // deletes against views are blocked at the wrapper layer. Wave 5d — no
-  // native materialised views, so back them with a TABLE populated from the
-  // SELECT; db.<model>.refresh() clears + re-inserts.
+  // SQLite has no native materialised views — back them with a TABLE populated
+  // from the SELECT; db.<model>.refresh() clears + re-inserts. Plain views use
+  // CREATE VIEW; writes against them are blocked at the wrapper layer.
   for (const key of Object.keys(schema)) {
     const m = (schema as any)[key] as ModelDef<any>;
     if (!m?.view?.sql) continue;
@@ -75,11 +67,9 @@ export function buildSchemaDDL(schema: SchemaMap): DDLStatement[] {
   return out;
 }
 
-// Wave 4b — auto-emit FTS5 virtual table for models with `.searchable()`
-// fields. SQLite's full-text search lives in a separate `<table>_fts` virtual
-// table; users query it via $queryRaw. We don't auto-wire reads through the
-// FTS table (would require route-rewriting in the executor); `$queryRaw` is
-// the supported query path until that lands.
+// Auto-emit an FTS5 virtual table (`<table>_fts`) for models with
+// `.searchable()` fields. Reads aren't auto-routed through it (would need
+// executor route-rewriting); $queryRaw is the supported query path for now.
 function buildFtsTables(m: ModelDef<any>): DDLStatement[] {
   const d = SqliteDialect;
   const cols: string[] = [];
@@ -96,16 +86,15 @@ function buildFtsTables(m: ModelDef<any>): DDLStatement[] {
   const newCols = cols.map((c) => `new.${d.quoteIdent(c)}`).join(', ');
   const oldCols = cols.map((c) => `old.${d.quoteIdent(c)}`).join(', ');
 
-  // 1. The FTS5 virtual table (external-content shadow of the base table).
+  // FTS5 virtual table (external-content shadow of the base table).
   out.push({
     kind: 'index', name: tname, table: m.collection,
     sql: `CREATE VIRTUAL TABLE IF NOT EXISTS ${ftsQ} USING fts5(${colsQ}, content=${baseQ}, content_rowid='rowid')`,
     dropSql: `DROP TABLE IF EXISTS ${ftsQ}`,
   });
 
-  // 2. Triggers to keep the FTS table in sync with INSERT/DELETE/UPDATE on
-  // the base table. Without these the virtual table starts empty even when
-  // the base has data — every base mutation must mirror into the FTS index.
+  // Triggers mirror base-table INSERT/DELETE/UPDATE into the FTS index —
+  // without them the virtual table stays empty even as the base fills.
   out.push({
     kind: 'index', name: `${tname}_ai`, table: m.collection,
     sql: `CREATE TRIGGER IF NOT EXISTS ${d.quoteIdent(`${tname}_ai`)}
@@ -153,7 +142,6 @@ function buildCreateTable(m: ModelDef<any>, schema: SchemaMap): DDLStatement {
   }
   if (pkField && !pkInline) cols.push(`PRIMARY KEY (${d.quoteIdent(pkField)})`);
 
-  // Enum CHECKs inline
   for (const [name, fdef] of Object.entries(m.fields)) {
     const field = fdef as FieldDef;
     if (field.kind === 'enum' && field.enumValues?.length) {
@@ -162,7 +150,6 @@ function buildCreateTable(m: ModelDef<any>, schema: SchemaMap): DDLStatement {
     }
   }
 
-  // FKs inline
   const rels = m.relations();
   for (const [, rel] of Object.entries(rels)) {
     const r = rel as RelationDef;
@@ -241,7 +228,6 @@ function buildUniques(m: ModelDef<any>): DDLStatement[] {
   const d = SqliteDialect;
   const table = m.collection;
   const out: DDLStatement[] = [];
-  // Per-field
   for (const [fieldName, field] of Object.entries(m.fields)) {
     const fd = field as FieldDef;
     if (!fd.unique) continue;
@@ -253,7 +239,6 @@ function buildUniques(m: ModelDef<any>): DDLStatement[] {
       dropSql: `DROP INDEX IF EXISTS ${d.quoteIdent(name)}`,
     });
   }
-  // Composite
   for (const cols of m.uniques ?? []) {
     const name = tableConstraintName(table, 'uq', cols);
     const colList = cols.map(d.quoteIdent).join(', ');
