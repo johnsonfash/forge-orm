@@ -33,8 +33,14 @@ export class MongoAdapter implements Adapter {
   readonly emitter = new ForgeEmitter();
   private _url?: string;
 
+  constructor(private _injected?: import('./driver').MongoDriver) {}
+
   async connect(url: string): Promise<void> {
     this._url = url;
+    if (this._injected) {
+      await dbClient.adopt(this._injected.client, this._injected.dbName);
+      return;
+    }
     if (!process.env.DATABASE_URL) process.env.DATABASE_URL = url;
     await dbClient.connect();
   }

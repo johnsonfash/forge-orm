@@ -28,6 +28,21 @@ class DatabaseClient {
     return this._db;
   }
 
+  // Adopt a caller-supplied MongoClient (createDb({ driver: mongoDriver(...) }))
+  // instead of building one from DATABASE_URL. connect() is idempotent on the
+  // mongodb driver, so it's safe whether or not the client is already connected.
+  async adopt(client: any, dbName?: string): Promise<void> {
+    if (this._db) return;
+    this._client = client;
+    this._connecting = (async () => {
+      await client.connect();
+      this._db = dbName ? client.db(dbName) : client.db();
+      // eslint-disable-next-line no-console
+      console.log(`[Database] connected to ${this._db!.databaseName} (injected client)`);
+    })();
+    return this._connecting;
+  }
+
   async connect(): Promise<void> {
     if (this._db) return;
     if (this._connecting) return this._connecting;

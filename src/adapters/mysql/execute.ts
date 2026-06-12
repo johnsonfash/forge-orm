@@ -160,6 +160,11 @@ export async function executeMysqlUpdate(
   const a = compileUpdate(node, model);
   const [result]: any = await withMysqlErrors(() => exec.execute(a.sql, a.params));
   if (node.many) return { count: result.affectedRows };
+  // Guarded update (e.g. `col()` precondition, or any non-eq predicate): when
+  // nothing changed, the row didn't match the guard → surface not-found (P2025).
+  // For plain eq-by-id updates we tolerate affectedRows=0 (MySQL counts CHANGED
+  // rows, so a no-op update isn't a miss) and re-SELECT to return the row.
+  if (whereHasNonEq(node.where) && result.affectedRows === 0) return { doc: undefined, count: 0 };
   const selectArtifact = compileSelect(
     buildSelect(node.model, model, { where: irWhereToObject(node.where), take: 1 }, 'one'),
     model,
@@ -191,21 +196,39 @@ export async function executeMysqlDelete(
   if (!doc) return { doc: undefined, count: 0 };
   const a = compileDelete(node, model);
   const [result]: any = await withMysqlErrors(() => exec.execute(a.sql, a.params));
+  // Guarded delete that matched no row → not-found, even though the identity
+  // SELECT found the (unguarded) row.
+  if (whereHasNonEq(node.where) && result.affectedRows === 0) return { doc: undefined, count: 0 };
   return { doc: decodeRow(model, doc), count: result.affectedRows };
 }
 
-// Convert an IR WhereTree back to a Prisma-shape object to rebuild a SelectNode
-// for the follow-up SELECT. Only the common case (top-level eq leaves AND'd)
-// needs handling — that covers update/delete by id / unique field.
+// Extract the stable EQ-identity predicates from an IR WhereTree to rebuild the
+// follow-up SELECT (MySQL has no RETURNING). Guard/precondition predicates
+// (non-eq, `col()` field comparisons, OR/NOT/relation) are DROPPED — they
+// identify nothing after the write, and emitting them would reference IR
+// internals as columns. The eq leaves (id / unique field) locate the row.
 function irWhereToObject(tree: any): any {
   if (!tree) return undefined;
-  if (tree.kind === 'leaf' && tree.op === 'eq') return { [tree.field]: tree.value };
+  if (tree.kind === 'leaf') {
+    return tree.op === 'eq' && tree.rhsField === undefined ? { [tree.field]: tree.value } : {};
+  }
   if (tree.kind === 'and') {
     const out: any = {};
     for (const c of tree.children) Object.assign(out, irWhereToObject(c) ?? {});
     return out;
   }
-  return tree;
+  return {};
+}
+
+// Whether the where carries any predicate beyond plain eq-by-value (a guard):
+// a non-eq op, a `col()` field comparison, or an OR/NOT/relation node. Used to
+// decide whether affectedRows=0 means "guard failed" (→ not-found).
+function whereHasNonEq(tree: any): boolean {
+  if (!tree) return false;
+  if (tree.kind === 'leaf') return tree.op !== 'eq' || tree.rhsField !== undefined;
+  if (tree.kind === 'and' || tree.kind === 'or') return (tree.children as any[]).some(whereHasNonEq);
+  if (tree.kind === 'not') return whereHasNonEq(tree.child);
+  return true;
 }
 
 async function hydrate(
