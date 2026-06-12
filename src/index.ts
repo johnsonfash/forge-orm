@@ -12,6 +12,13 @@ export type { SqliteDriver } from './adapters/sqlite/driver';
 //   createDb({ schema, driver: postgresJsDriver(postgres(url)) })
 export { pgDriver, postgresJsDriver, isPostgresDriver } from './adapters/postgres/driver';
 export type { PostgresDriver, PgQueryable } from './adapters/postgres/driver';
+// Pluggable MySQL drivers — mysql2 (default), mariadb, or PlanetScale.
+export { mysql2Driver, mariadbDriver, planetscaleDriver, isMysqlDriver } from './adapters/mysql/driver';
+export type { MysqlDriver, MysqlQueryable } from './adapters/mysql/driver';
+// Pluggable Mongo — bring your own MongoClient (DocumentDB/Cosmos/FerretDB/custom).
+//   createDb({ schema, driver: mongoDriver(new MongoClient(uri, opts), 'mydb') })
+export { mongoDriver, isMongoDriver } from './adapters/mongo/driver';
+export type { MongoDriver } from './adapters/mongo/driver';
 export type { Adapter, AdapterKind, AdapterCapabilities, DoctorReport } from './adapters/types';
 export { ForgeMissingDriverError } from './adapters/missing-driver';
 export { detectAdapterKind } from './adapters/detect';

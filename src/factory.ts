@@ -50,10 +50,14 @@ export interface CreateDbOptionsStructured {
 // Bring-your-own-driver: hand forge a pre-wrapped driver port (expo-sqlite,
 // op-sqlite, libsql, …) instead of a URL. The driver's `kind` selects the
 // adapter; `url` is optional and only used as a label.
+export type ForgeDriver =
+  | import('./adapters/sqlite/driver').SqliteDriver
+  | import('./adapters/postgres/driver').PostgresDriver
+  | import('./adapters/mysql/driver').MysqlDriver
+  | import('./adapters/mongo/driver').MongoDriver;
+
 export interface CreateDbOptionsDriver {
-  driver:
-    | import('./adapters/sqlite/driver').SqliteDriver
-    | import('./adapters/postgres/driver').PostgresDriver;
+  driver: ForgeDriver;
   url?: string;
   strict?: boolean;
   schema?: SchemaShape;
@@ -152,19 +156,14 @@ async function pickAndConnect(opts: CreateDbOptions): Promise<{ adapter: Adapter
   return { adapter, url };
 }
 
-function instantiateAdapter(
-  kind: AdapterKind,
-  driver?:
-    | import('./adapters/sqlite/driver').SqliteDriver
-    | import('./adapters/postgres/driver').PostgresDriver,
-): Adapter {
+function instantiateAdapter(kind: AdapterKind, driver?: ForgeDriver): Adapter {
   switch (kind) {
     case 'mongo':
-      return new MongoAdapter();
+      return new MongoAdapter(driver as import('./adapters/mongo/driver').MongoDriver | undefined);
     case 'postgres':
       return new PostgresAdapter(driver as import('./adapters/postgres/driver').PostgresDriver | undefined);
     case 'mysql':
-      return new MysqlAdapter();
+      return new MysqlAdapter(driver as import('./adapters/mysql/driver').MysqlDriver | undefined);
     case 'sqlite':
       return new SqliteAdapter(driver as import('./adapters/sqlite/driver').SqliteDriver | undefined);
   }

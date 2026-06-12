@@ -4,6 +4,36 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite - one code
 path, no codegen, no external query engine.
 
+## 1.9.0 — pluggable MySQL + Mongo drivers (and a MySQL guard fix)
+
+All four databases are now pluggable.
+
+- **MySQL** routes through a `MysqlDriver` port. Built-in wrappers: `mysql2Driver`
+  (default), `mariadbDriver` (MariaDB connector), `planetscaleDriver`
+  (`@planetscale/database`, serverless). Pass mariadb pools `bigIntAsNumber:true`
+  / `insertIdAsNumber:true` for type parity with mysql2.
+- **MongoDB** — one canonical driver, so pluggability means bringing your own
+  `MongoClient` via `mongoDriver(client, dbName?)`: custom options, a shared
+  client, or a Mongo-API backend (Amazon DocumentDB, Azure Cosmos DB, FerretDB).
+
+```ts
+const db = await createDb({ schema, driver: mariadbDriver(pool) });
+const db = await createDb({ schema, driver: mongoDriver(new MongoClient(uri), 'mydb') });
+```
+
+**Bug fix (MySQL):** a `col()` field comparison — or any non-eq predicate — on a
+single `update()`/`delete()` made the no-RETURNING follow-up SELECT reference IR
+internals as columns (`Unknown column '…kind'`). Guarded writes now extract only
+the eq-identity predicates for the follow-up, and use `affectedRows` to surface a
+failed guard as not-found (P2025). This affected the default `mysql2` path too;
+the integration suite simply never exercised a guarded MySQL update.
+
+Verified: default mysql2 (35/35) + mongo (38/38) unchanged through the ports;
+mariadb verified end-to-end on real MySQL (`regression-mariadb-driver.ts`),
+injected MongoClient verified on real Mongo (`regression-mongo-driver.ts`).
+
+- Note: `forge push` / `applyMigration` still assume the default `mysql2` pool.
+
 ## 1.8.0 — pluggable Postgres drivers (postgres.js)
 
 The Postgres adapter now routes through a normalized `PostgresDriver` port, so

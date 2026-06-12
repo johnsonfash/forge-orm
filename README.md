@@ -100,6 +100,12 @@ this out.
 
 Full release history is in [CHANGELOG.md](./CHANGELOG.md). Recent highlights:
 
+- **1.9 — pluggable MySQL + Mongo.** MySQL adds `mariadbDriver` and
+  `planetscaleDriver` alongside the default `mysql2`; Mongo lets you bring your
+  own `MongoClient` (`mongoDriver`) for DocumentDB / Cosmos / FerretDB / custom
+  options. All four databases are now pluggable. (Also fixed a latent bug: a
+  `col()`/non-eq guard on a MySQL `update`/`delete` referenced IR internals as
+  columns.) See [Alternative drivers](#alternative-drivers-react-native-edge).
 - **1.8 — pluggable Postgres drivers.** Use `postgres.js` (porsager) instead of
   `node-postgres`, or any client you wrap, via `createDb({ driver: postgresJsDriver(...) })`.
   Same port idea as 1.7. See [Alternative drivers](#alternative-drivers-react-native-edge).
@@ -248,6 +254,31 @@ The `PostgresDriver` port is `query` + `transaction` + `close` (optional
 `stream`). Note: `forge push` / `applyMigration` currently assume the default
 `pg` pool; with an injected Postgres driver, run your runtime queries through
 forge and manage DDL separately (or with `pg`).
+
+**MySQL** is pluggable the same way — default is `mysql2`, with `mariadbDriver`
+(MariaDB connector) and `planetscaleDriver` (`@planetscale/database`, serverless)
+built in:
+
+```ts
+import mariadb from 'mariadb';
+import { createDb, mariadbDriver } from 'forge-orm';
+
+// Pass bigIntAsNumber/insertIdAsNumber for type parity with mysql2.
+const pool = mariadb.createPool({ host, user, database, bigIntAsNumber: true, insertIdAsNumber: true });
+const db = await createDb({ schema, driver: mariadbDriver(pool) });
+```
+
+**MongoDB** has one canonical driver (`mongodb`), so "pluggable" means bringing
+your own `MongoClient` — for custom options, a shared client, or a Mongo-API
+backend (Amazon DocumentDB, Azure Cosmos DB, FerretDB):
+
+```ts
+import { MongoClient } from 'mongodb';
+import { createDb, mongoDriver } from 'forge-orm';
+
+const client = new MongoClient(uri, { tls: true, appName: 'svc' });
+const db = await createDb({ schema, driver: mongoDriver(client, 'mydb') });
+```
 
 ---
 

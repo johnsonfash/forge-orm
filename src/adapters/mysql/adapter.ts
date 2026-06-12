@@ -13,12 +13,17 @@ import {
   type MysqlPool,
 } from './execute';
 import { withMysqlErrors } from './errors';
+import { mysql2Driver, type MysqlDriver, type MysqlQueryable } from './driver';
+
+// MysqlAdapter — drives a MysqlDriver port (driver.ts). By default it opens a
+// mysql2 promise pool from the URL; a pre-wrapped driver (mariadb, PlanetScale,
+// …) can be injected via createDb({ driver }).
 
 const CAPS: AdapterCapabilities = {
-  nativeCascades: true,            // via FK ON DELETE
-  nativeUpsert: true,              // ON DUPLICATE KEY UPDATE
-  nullsOrdering: false,            // no NULLS FIRST/LAST
-  jsonPath: true,                  // JSON_EXTRACT, ->, ->>
+  nativeCascades: true,
+  nativeUpsert: true,
+  nullsOrdering: false,
+  jsonPath: true,
   transactionsRequireReplicaSet: false,
 };
 
@@ -26,52 +31,70 @@ export class MysqlAdapter implements Adapter {
   readonly kind = 'mysql' as const;
   readonly capabilities = CAPS;
   readonly emitter = new ForgeEmitter();
-  private _pool?: MysqlPool;
+  private _driver?: MysqlDriver;
+  // Raw mysql2 promise pool when we created one — kept so the migration tooling
+  // (which calls getConnection) still has a full handle via `.pool`.
+  private _rawPool?: MysqlPool;
   private _url?: string;
+
+  constructor(private _injected?: MysqlDriver) {}
 
   async connect(url: string): Promise<void> {
     this._url = url;
-    const mysql = loadDriver('mysql', url);
-    // mysql2's `mysql.createPool` returns a callback-style pool; we want the
-    // promise interface from `mysql.createPool(...).promise()`.
-    const rawPool = mysql.createPool({
-      uri: url,
-      connectionLimit: 50,
-    });
-    this._pool = (rawPool.promise ? rawPool.promise() : rawPool) as MysqlPool;
+    if (this._injected) {
+      this._driver = this._injected;
+    } else {
+      const mysql = loadDriver('mysql', url);
+      const rawPool = mysql.createPool({ uri: url, connectionLimit: 50 });
+      this._rawPool = (rawPool.promise ? rawPool.promise() : rawPool) as MysqlPool;
+      this._driver = mysql2Driver(this._rawPool);
+    }
     // Probe so auth/host errors surface at connect() time.
-    await this._pool.query('SELECT 1');
+    await this._driver.query('SELECT 1', []);
   }
 
   async close(): Promise<void> {
-    if (this._pool?.end) await this._pool.end();
-    this._pool = undefined;
+    if (this._driver) await this._driver.close();
+    this._driver = undefined;
   }
 
   async doctor(): Promise<DoctorReport> {
-    const driver = isDriverInstalled('mysql');
+    const injected = !!this._injected;
+    const driver = injected ? { installed: true, version: undefined } : isDriverInstalled('mysql');
     return {
       kind: 'mysql',
-      driverPackage: 'mysql2',
+      driverPackage: injected ? '(injected driver)' : 'mysql2',
       driverInstalled: driver.installed,
       driverVersion: driver.version,
       connectionString: this._url,
       capabilities: CAPS,
       notes: [
-        'No RETURNING clause — INSERT/UPDATE/DELETE that return rows do a follow-up SELECT.',
-        'Cascades enforced by the DB engine via FK ON DELETE clauses (ensure InnoDB engine).',
-        'NULLS FIRST/LAST not supported — ordering follows the collation.',
+        injected
+          ? 'Custom driver injected via createDb({ driver }) — e.g. mariadb, PlanetScale.'
+          : 'Driver: mysql2. No RETURNING — writes that return rows do a follow-up SELECT.',
+        'Queries route through a normalized driver port.',
       ],
     };
   }
 
+  get driver(): MysqlDriver {
+    if (!this._driver) throw new Error('[forge:mysql] driver accessed before connect() resolved');
+    return this._driver;
+  }
+
+  // The full mysql2 pool (with getConnection) when forge created one — used by
+  // the migration tooling. Falls back to the queryable port for injected drivers.
   get pool(): MysqlPool {
-    if (!this._pool) throw new Error('[forge:mysql] pool accessed before connect() resolved');
-    return this._pool;
+    return this._rawPool ?? (this.driver as unknown as MysqlPool);
   }
 
   private mysqlOpts(opts?: ExecOpts): MysqlExecOpts {
     return opts?.session ? { conn: opts.session as MysqlConn } : {};
+  }
+
+  // Handle the executor should use: the txn session if present, else the driver.
+  private handle(opts?: ExecOpts): MysqlPool {
+    return (opts?.session as MysqlPool | undefined) ?? (this.driver as unknown as MysqlPool);
   }
 
   private async _track<T>(
@@ -96,48 +119,43 @@ export class MysqlAdapter implements Adapter {
 
   executeSelect(node: any, model: any, opts?: ExecOpts) {
     return this._track('select', node, model,
-      () => executeMysqlSelect(this.pool, node, model, this.mysqlOpts(opts)),
+      () => executeMysqlSelect(this.handle(opts), node, model, this.mysqlOpts(opts)),
       (r) => r.length);
   }
   executeCount(node: any, model: any, opts?: ExecOpts) {
     return this._track('count', node, model,
-      () => executeMysqlCount(this.pool, node, model, this.mysqlOpts(opts)),
+      () => executeMysqlCount(this.handle(opts), node, model, this.mysqlOpts(opts)),
       () => 1);
   }
   executeInsert(node: any, model: any, opts?: ExecOpts) {
     return this._track('insert', node, model,
-      () => executeMysqlInsert(this.pool, node, model, this.mysqlOpts(opts)),
+      () => executeMysqlInsert(this.handle(opts), node, model, this.mysqlOpts(opts)),
       (r) => r.count);
   }
   executeUpdate(node: any, model: any, opts?: ExecOpts) {
     return this._track('update', node, model,
-      () => executeMysqlUpdate(this.pool, node, model, this.mysqlOpts(opts)),
+      () => executeMysqlUpdate(this.handle(opts), node, model, this.mysqlOpts(opts)),
       (r) => r.count);
   }
   executeDelete(node: any, model: any, opts?: ExecOpts) {
     return this._track('delete', node, model,
-      () => executeMysqlDelete(this.pool, node, model, this.mysqlOpts(opts)),
+      () => executeMysqlDelete(this.handle(opts), node, model, this.mysqlOpts(opts)),
       (r) => r.count);
   }
   executeGroupBy(node: any, model: any, opts?: ExecOpts) {
     return this._track('groupBy', node, model,
-      () => executeMysqlGroupBy(this.pool, node, model, this.mysqlOpts(opts)),
+      () => executeMysqlGroupBy(this.handle(opts), node, model, this.mysqlOpts(opts)),
       (r) => r.length);
   }
 
-  // The pool's query API doesn't expose streams, so borrow a connection and
-  // stream via mysql2's connection.query(...).stream().
   async *streamSelect(node: any, model: any, _opts?: ExecOpts): AsyncIterable<any> {
     const { compileSelect } = await import('./compile-from-ir');
     const a = compileSelect(node, model);
-    const conn = await this.pool.getConnection() as any;
-    try {
-      // mysql2's promise wrapper exposes the underlying connection via `.connection`.
-      const raw = conn.connection ?? conn;
-      const stream: any = raw.query({ sql: a.sql, values: a.params }).stream({ highWaterMark: 200 });
-      for await (const row of stream) yield row;
-    } finally {
-      if (typeof conn.release === 'function') conn.release();
+    if (this.driver.stream) {
+      yield* this.driver.stream(a.sql, a.params);
+    } else {
+      const [rows] = await this.driver.query(a.sql, a.params);
+      for (const row of rows as any[]) yield row;
     }
   }
 
@@ -146,7 +164,7 @@ export class MysqlAdapter implements Adapter {
   async $queryRaw(fragment: import('../../raw-sql').SqlFragment, opts?: ExecOpts): Promise<any[]> {
     const { compileSqlFragment } = await import('../../raw-sql');
     const { sql, params } = compileSqlFragment(fragment, 'mysql');
-    const exec = (opts?.session as MysqlConn | undefined) ?? this.pool;
+    const exec = this.handle(opts);
     const [rows] = await withMysqlErrors(() => exec.query(sql, params));
     return rows as any[];
   }
@@ -154,25 +172,13 @@ export class MysqlAdapter implements Adapter {
   async $executeRaw(fragment: import('../../raw-sql').SqlFragment, opts?: ExecOpts): Promise<number> {
     const { compileSqlFragment } = await import('../../raw-sql');
     const { sql, params } = compileSqlFragment(fragment, 'mysql');
-    const exec = (opts?.session as MysqlConn | undefined) ?? this.pool;
+    const exec = this.handle(opts);
     const [result]: any = await withMysqlErrors(() => exec.execute(sql, params));
     return result.affectedRows ?? 0;
   }
 
-  // mysql2 promise pool: borrow a connection, BEGIN, COMMIT/ROLLBACK.
   async $transaction<T>(fn: (session: unknown) => Promise<T>): Promise<T> {
-    const conn = await this.pool.getConnection();
-    try {
-      await conn.query('START TRANSACTION');
-      const result = await fn(conn);
-      await conn.query('COMMIT');
-      return result;
-    } catch (err) {
-      try { await conn.query('ROLLBACK'); } catch { /* swallow */ }
-      throw err;
-    } finally {
-      if (typeof conn.release === 'function') conn.release();
-    }
+    return this.driver.transaction((session: MysqlQueryable) => fn(session));
   }
 
   coerceInbound(model: any, data: any, _opts?: { forCreate?: boolean }) {
@@ -197,24 +203,21 @@ export class MysqlAdapter implements Adapter {
   }
 
   decodeOutbound(_model: any, row: any) {
-    return row;   // executor decodes
+    return row;
   }
 
   async applyCascadesForDelete(): Promise<void> { /* DB-enforced */ }
 
-  // Table-backed materialised view refresh: clear + re-populate from the
-  // view's SELECT body. In a transaction so readers never see an empty table.
   async refreshView(model: any, opts?: ExecOpts): Promise<void> {
     const sql = model?.view?.sql;
     if (!sql) throw new Error(`[forge:mysql] '${model?.collection}' has no view SQL to refresh`);
     const q = '`' + String(model.collection).replace(/`/g, '``') + '`';
-    const conn = (opts?.session as MysqlConn | undefined);
-    const run = async (c: MysqlConn | MysqlPool) => {
+    const run = async (c: MysqlQueryable) => {
       await c.query(`DELETE FROM ${q}`);
       await c.query(`INSERT INTO ${q} ${sql}`);
     };
-    if (conn) { await run(conn); return; }
-    await this.$transaction((s) => run(s as MysqlConn));
+    if (opts?.session) { await run(opts.session as MysqlQueryable); return; }
+    await this.$transaction((s) => run(s as MysqlQueryable));
   }
 
   async introspect(): Promise<import('../types').DbIntrospection> {
