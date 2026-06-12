@@ -4,6 +4,32 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite - one code
 path, no codegen, no external query engine.
 
+## 1.8.0 — pluggable Postgres drivers (postgres.js)
+
+The Postgres adapter now routes through a normalized `PostgresDriver` port, so
+`node-postgres` (`pg`) is no longer the only option. Wrap any client and pass it
+to `createDb({ driver })`:
+
+```ts
+import postgres from 'postgres';
+import { createDb, postgresJsDriver } from 'forge-orm';
+
+const db = await createDb({ schema, driver: postgresJsDriver(postgres(url)) });
+```
+
+Built-in wrappers: `pgDriver` (default, node-postgres) and `postgresJsDriver`
+(porsager/postgres.js). The port is `query` + `transaction` + `close` (optional
+`stream`); any other client fits the same shape.
+
+- The default `pg` path is unchanged and backward compatible (53/53 PG
+  integration scenarios pass through the port).
+- postgres.js is verified end-to-end against real Postgres
+  (`regression-postgresjs-driver.ts`): DDL, RETURNING writes, `col()` guards,
+  groupBy/having, `count({ distinct })`, transaction commit AND rollback.
+- Note: `forge push` / `applyMigration` still assume the default `pg` pool
+  (advisory locks need `pool.connect()`); with an injected driver, run runtime
+  queries through forge and manage DDL via `pg` or directly.
+
 ## 1.7.0 — pluggable SQLite drivers (React Native, edge, Turso)
 
 The SQLite adapter no longer hard-depends on `better-sqlite3` (a native Node
