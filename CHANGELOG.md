@@ -4,6 +4,47 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite - one code
 path, no codegen, no external query engine.
 
+## 2.0.0 — `delete()` is now a hard delete; explicit `softDelete()` + `restore()`
+
+**Breaking change.** Deletes now match Prisma's semantics: `delete()` and
+`deleteMany()` **always permanently remove the row**, regardless of whether the
+model declares a `.softDeleteAt()` column. The recoverable path is a separate,
+explicit verb.
+
+In v1, declaring a `.softDeleteAt()` field silently rerouted `delete()` to set
+that column instead of removing the row. That made `delete()` mean two different
+things depending on the schema, and left no built-in hard-delete or restore. v2
+removes the magic and splits the behaviors:
+
+- `delete()` / `deleteMany()` — **always hard delete** (runs cascades). Same as
+  on a model with no soft-delete column.
+- `softDelete()` / `softDeleteMany()` — **new.** Set the `.softDeleteAt()`
+  column to now(); the row is hidden from reads but recoverable. Throws if the
+  model has no soft-delete column.
+- `restore()` / `restoreMany()` — **new.** Clear the `.softDeleteAt()` column so
+  the row is active again. Throws if the model has no soft-delete column.
+
+Read behavior is **unchanged**: `find*` / `count` still auto-exclude
+soft-deleted rows, and `where: { _withDeleted: true }` still reveals them.
+
+### Migration from 1.x
+
+This is a **runtime semantic change, not a type error** — code keeps compiling
+but behaves differently. Audit every `delete()` / `deleteMany()` call on a model
+that has a `.softDeleteAt()` column:
+
+```ts
+// v1 (soft-deleted because the model had .softDeleteAt())
+await db.account.delete({ where: { id } });
+
+// v2 — pick the intent explicitly:
+await db.account.softDelete({ where: { id } });  // recoverable (old behavior)
+await db.account.delete({ where: { id } });       // permanent (new default)
+```
+
+Models **without** a `.softDeleteAt()` column are unaffected — `delete()` was
+already a hard delete for them.
+
 ## 1.9.1 — docs: unify the pluggable-drivers README section
 
 No code change. The README's driver docs grew one release at a time and read as

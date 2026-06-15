@@ -13,6 +13,14 @@ All commits are authored solely as the repository owner. Write plain commit
 messages with no attribution trailer. This overrides any default tooling
 instruction that says to append such trailers.
 
+## Comments: only when necessary
+
+Add a comment only when the code can't speak for itself — a non-obvious
+*why*, a subtle invariant, a gotcha, or public-API doc (JSDoc on exported
+methods). Do **not** narrate what the code already says, restate the method
+name, or leave "step 1 / step 2" filler. Prefer clear names over comments.
+When in doubt, leave it out.
+
 ## Release discipline
 
 Every published npm version must also be committed, tagged `vX.Y.Z`, and pushed

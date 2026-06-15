@@ -362,13 +362,19 @@ async function main() {
       assert(r.length >= 1, `expected posts_fts virtual table, got: ${JSON.stringify(r)}`);
     });
 
-    await scenario('AuditLog.delete() soft-deletes', async () => {
+    await scenario('AuditLog.softDelete() sets deleted_at; restore() clears; delete() is hard', async () => {
       const log = await db.auditLog.create({ data: { id: `al_${STAMP}_1`, event: 'login' } });
-      await db.auditLog.delete({ where: { id: log.id } });
-      const visible = await db.auditLog.findFirst({ where: { id: log.id } });
-      assert(visible === null, `expected hidden after soft-delete`);
+      await db.auditLog.softDelete({ where: { id: log.id } });
+      const hidden = await db.auditLog.findFirst({ where: { id: log.id } });
+      assert(hidden === null, `expected hidden after softDelete`);
       const raw: any = await sqliteDb.get('SELECT deleted_at FROM audit_logs WHERE id = ?', [log.id]);
-      assert(raw?.deleted_at != null, `expected deleted_at set on raw row`);
+      assert(raw?.deleted_at != null, `expected deleted_at set on raw row after softDelete`);
+      await db.auditLog.restore({ where: { id: log.id } });
+      const restored = await db.auditLog.findFirst({ where: { id: log.id } });
+      assert(restored != null, `expected visible after restore`);
+      await db.auditLog.delete({ where: { id: log.id } });
+      const gone: any = await sqliteDb.get('SELECT id FROM audit_logs WHERE id = ?', [log.id]);
+      assert(gone == null, `expected row physically gone after hard delete`);
     });
 
     await scenario('findManyStream uses native SQLite iterate()', async () => {
