@@ -392,11 +392,27 @@ async function main() {
       assert(fts != null, `expected forge_posts_fts index, got: ${idxs.map((i: any) => i.name).join(', ')}`);
     });
 
-    await scenario('AuditLog.delete() soft-deletes', async () => {
+    await scenario('AuditLog.softDelete() hides; restore() brings back; delete() is hard', async () => {
+      // softDelete() sets the .softDeleteAt() field → hidden from reads.
       const log = await db.auditLog.create({ data: { event: 'login' } as any });
+      await db.auditLog.softDelete({ where: { id: (log as any).id } });
+      const hidden = await db.auditLog.findFirst({ where: { id: (log as any).id } });
+      assert(hidden === null, `expected hidden after softDelete`);
+      // The row still exists — visible via the _withDeleted escape hatch.
+      const withDeleted = await db.auditLog.findFirst({
+        where: { id: (log as any).id, _withDeleted: true } as any,
+      });
+      assert(withDeleted != null, `expected row to still exist after softDelete`);
+      // restore() clears the field → visible again.
+      await db.auditLog.restore({ where: { id: (log as any).id } });
+      const restored = await db.auditLog.findFirst({ where: { id: (log as any).id } });
+      assert(restored != null, `expected visible after restore`);
+      // delete() is a HARD delete even on a soft-delete model — row is gone.
       await db.auditLog.delete({ where: { id: (log as any).id } });
-      const visible = await db.auditLog.findFirst({ where: { id: (log as any).id } });
-      assert(visible === null, `expected hidden after soft-delete`);
+      const gone = await db.auditLog.findFirst({
+        where: { id: (log as any).id, _withDeleted: true } as any,
+      });
+      assert(gone === null, `expected row permanently gone after hard delete`);
     });
 
     await scenario('findManyStream uses native Mongo cursor', async () => {

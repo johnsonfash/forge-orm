@@ -333,13 +333,19 @@ async function main() {
       assert(rows.length >= 1, `expected forge_posts_fts_body index, got: ${JSON.stringify(rows)}`);
     });
 
-    await scenario('AuditLog.delete() soft-deletes', async () => {
+    await scenario('AuditLog.softDelete() sets deleted_at; restore() clears; delete() is hard', async () => {
       const log = await db.auditLog.create({ data: { id: `al_${STAMP}_1`, event: 'login' } });
-      await db.auditLog.delete({ where: { id: log.id } });
-      const visible = await db.auditLog.findFirst({ where: { id: log.id } });
-      assert(visible === null, `expected hidden after soft-delete`);
+      await db.auditLog.softDelete({ where: { id: log.id } });
+      const hidden = await db.auditLog.findFirst({ where: { id: log.id } });
+      assert(hidden === null, `expected hidden after softDelete`);
       const [raw]: any = await mysqlPool.query(`SELECT deleted_at FROM audit_logs WHERE id = ?`, [log.id]);
-      assert(raw.length === 1 && raw[0].deleted_at != null, `expected deleted_at set`);
+      assert(raw.length === 1 && raw[0].deleted_at != null, `expected deleted_at set after softDelete`);
+      await db.auditLog.restore({ where: { id: log.id } });
+      const restored = await db.auditLog.findFirst({ where: { id: log.id } });
+      assert(restored != null, `expected visible after restore`);
+      await db.auditLog.delete({ where: { id: log.id } });
+      const [gone]: any = await mysqlPool.query(`SELECT id FROM audit_logs WHERE id = ?`, [log.id]);
+      assert(gone.length === 0, `expected row physically gone after hard delete`);
     });
 
     await scenario('findManyStream uses native MySQL stream', async () => {

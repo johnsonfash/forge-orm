@@ -466,12 +466,9 @@ export class CollectionWrapper<
     this._assertWritable('delete');
     this._assertStrictWhere(args.where);
     const mk = this._modelKey();
-    // Wave 4b — soft delete: if the model declares a `.softDeleteAt()` field,
-    // rewrite DELETE to UPDATE that sets that column to now().
-    const sd = this._softDeleteField();
-    if (sd) {
-      return this.update({ ...args, data: { [sd]: new Date() } as any } as any) as any;
-    }
+    // v2: delete() is ALWAYS a hard delete (Prisma parity) — no schema magic.
+    // For the recoverable path on models that declare a `.softDeleteAt()`
+    // field, use softDelete() / softDeleteMany() and restore() / restoreMany().
     const node = buildDelete(
       mk, this.model,
       { where: args.where, many: false },
@@ -486,11 +483,7 @@ export class CollectionWrapper<
     this._assertWritable('deleteMany');
     this._assertStrictWhere(args?.where);
     const mk = this._modelKey();
-    // Soft delete: rewrite to updateMany.
-    const sd = this._softDeleteField();
-    if (sd) {
-      return this.updateMany({ where: args.where, data: { [sd]: new Date() } as any }) as any;
-    }
+    // v2: hard delete always. See softDeleteMany() for the recoverable path.
     const node = buildDelete(
       mk, this.model,
       { where: args.where, many: true },
@@ -498,6 +491,55 @@ export class CollectionWrapper<
     );
     const r = await this.adapter.executeDelete(node, this.model, { session: this._session });
     return { count: r.count };
+  }
+
+  /**
+   * Soft delete — set the model's `.softDeleteAt()` field to now() so the row
+   * is hidden from reads (find/count auto-filter it) yet recoverable via
+   * restore(). Returns the updated row, honouring the same select/include/omit
+   * options as delete(). Throws if the model has no `.softDeleteAt()` field —
+   * use delete() for a hard delete.
+   */
+  async softDelete<A extends {
+    where: WhereInput<F>;
+    select?: ISelect<F, R, SM>;
+    include?: IInclude<R, SM>;
+    omit?: { [K in keyof F]?: boolean };
+  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A, SM>> {
+    this._assertWritable('softDelete');
+    const sd = this._requireSoftDeleteField('softDelete');
+    return this.update({ ...args, data: { [sd]: new Date() } as any } as any) as any;
+  }
+
+  /** Bulk soft delete — sets `.softDeleteAt()` on every matching row. */
+  async softDeleteMany(args: { where?: WhereInput<F> } = {}): Promise<{ count: number }> {
+    this._assertWritable('softDeleteMany');
+    const sd = this._requireSoftDeleteField('softDeleteMany');
+    return this.updateMany({ where: args.where, data: { [sd]: new Date() } as any });
+  }
+
+  /**
+   * Restore a soft-deleted row — clears the `.softDeleteAt()` field so the row
+   * is active (visible to reads) again. Reaches soft-deleted rows directly:
+   * update() does not apply the soft-delete read filter. Throws if the model
+   * has no `.softDeleteAt()` field.
+   */
+  async restore<A extends {
+    where: WhereInput<F>;
+    select?: ISelect<F, R, SM>;
+    include?: IInclude<R, SM>;
+    omit?: { [K in keyof F]?: boolean };
+  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A, SM>> {
+    this._assertWritable('restore');
+    const sd = this._requireSoftDeleteField('restore');
+    return this.update({ ...args, data: { [sd]: null } as any } as any) as any;
+  }
+
+  /** Bulk restore — clears `.softDeleteAt()` on every matching row. */
+  async restoreMany(args: { where?: WhereInput<F> } = {}): Promise<{ count: number }> {
+    this._assertWritable('restoreMany');
+    const sd = this._requireSoftDeleteField('restoreMany');
+    return this.updateMany({ where: args.where, data: { [sd]: null } as any });
   }
 
   // Replaces Prisma's aggregateRaw — same signature, returns plain documents
@@ -552,6 +594,20 @@ export class CollectionWrapper<
       if ((f as any).softDeleteAt) return name;
     }
     return undefined;
+  }
+
+  // Resolve the soft-delete field or throw a clear error. Used by
+  // softDelete/softDeleteMany/restore/restoreMany — operations that are
+  // meaningless without a `.softDeleteAt()` field.
+  private _requireSoftDeleteField(op: string): string {
+    const sd = this._softDeleteField();
+    if (!sd) {
+      throw new Error(
+        `[forge] ${op}() requires a field declared with .softDeleteAt() on ` +
+        `'${this.model.collection}'. Either add one, or use delete() for a hard delete.`,
+      );
+    }
+    return sd;
   }
 
   // Augment a `where` object to exclude soft-deleted rows. Opt out by passing

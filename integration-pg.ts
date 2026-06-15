@@ -553,21 +553,28 @@ async function main() {
       assert(r.length === 1, `expected forge_posts_fts_body index, got: ${JSON.stringify(r)}`);
     });
 
-    await scenario('AuditLog.delete() soft-deletes (sets deleted_at, row stays)', async () => {
+    await scenario('AuditLog.softDelete() sets deleted_at (row stays); restore() clears; delete() is hard', async () => {
       const log = await db.auditLog.create({ data: { id: `al_${STAMP}_1`, event: 'login' } });
-      await db.auditLog.delete({ where: { id: log.id } });
-      const visible = await db.auditLog.findFirst({ where: { id: log.id } });
-      assert(visible === null, `expected hidden after soft-delete, got: ${JSON.stringify(visible)}`);
-      // Verify via raw SQL that the row physically exists with deleted_at set
+      await db.auditLog.softDelete({ where: { id: log.id } });
+      const hidden = await db.auditLog.findFirst({ where: { id: log.id } });
+      assert(hidden === null, `expected hidden after softDelete, got: ${JSON.stringify(hidden)}`);
+      // The row physically exists with deleted_at set.
       const raw: any = await db.$queryRaw`SELECT id, deleted_at FROM audit_logs WHERE id = ${log.id}`;
       assert(raw.length === 1 && raw[0].deleted_at != null, `expected row with deleted_at set, got: ${JSON.stringify(raw)}`);
+      await db.auditLog.restore({ where: { id: log.id } });
+      const restored = await db.auditLog.findFirst({ where: { id: log.id } });
+      assert(restored != null, `expected visible after restore`);
+      // delete() hard-removes even on a soft-delete model.
+      await db.auditLog.delete({ where: { id: log.id } });
+      const gone: any = await db.$queryRaw`SELECT id FROM audit_logs WHERE id = ${log.id}`;
+      assert(gone.length === 0, `expected row physically gone after hard delete, got: ${JSON.stringify(gone)}`);
     });
 
-    await scenario('AuditLog.findFirst with _withDeleted: true surfaces deleted', async () => {
+    await scenario('AuditLog.findFirst with _withDeleted: true surfaces soft-deleted', async () => {
       const log = await db.auditLog.create({ data: { id: `al_${STAMP}_2`, event: 'logout' } });
-      await db.auditLog.delete({ where: { id: log.id } });
+      await db.auditLog.softDelete({ where: { id: log.id } });
       const visible: any = await db.auditLog.findFirst({ where: { id: log.id, _withDeleted: true } as any });
-      assert(visible?.id === log.id, `expected _withDeleted=true to surface deleted row`);
+      assert(visible?.id === log.id, `expected _withDeleted=true to surface soft-deleted row`);
     });
 
     await scenario('findManyStream uses native PG cursor', async () => {
