@@ -100,6 +100,18 @@ this out.
 
 Full release history is in [CHANGELOG.md](./CHANGELOG.md). Recent highlights:
 
+- **2.1 — partial indexes on MongoDB.** A schema `IndexDef` now accepts
+  `partialFilterExpression`, so `forge push` can build a partial index — e.g. a
+  unique index that only covers documents where the field is a string. MongoDB
+  only; ignored by the SQL dialects. See [Indexes and unique constraints](#indexes-and-unique-constraints).
+- **2.0.1 — upsert bug fix (MongoDB).** `upsert()` no longer emits the same path
+  in both `$setOnInsert` and an update operator (which Mongo rejected with
+  "would create a conflict"). Fields the update writes are dropped from
+  `$setOnInsert`; create/update overlap (counter `increment`, set-on-both) now
+  just works. See [Transactions](#transactions) note and the CHANGELOG.
+- **2.0 — `delete()` is always a hard delete.** Breaking change: `delete()` /
+  `deleteMany()` permanently remove rows on every model; the recoverable path is
+  the explicit `softDelete()` / `restore()` verbs. See [Soft delete](#soft-delete).
 - **1.9 — pluggable MySQL + Mongo.** MySQL adds `mariadbDriver` and
   `planetscaleDriver` alongside the default `mysql2`; Mongo lets you bring your
   own `MongoClient` (`mongoDriver`) for DocumentDB / Cosmos / FerretDB / custom
@@ -459,6 +471,19 @@ const Post = model('posts', {
   indexes: [{ keys: { author_id: 1, status: 1 } }],   // a two-column index
   uniques: [['author_id', 'slug']],                   // a combined unique
 });
+```
+
+On MongoDB an index entry may carry `expireAfterSeconds` (a TTL index) or a
+`partialFilterExpression` (a [partial index](https://www.mongodb.com/docs/manual/core/index-partial/)
+that only covers matching documents). Both are MongoDB-only and ignored by the
+SQL dialects:
+
+```ts
+indexes: [{
+  keys: { txn: 1 },
+  unique: true,
+  partialFilterExpression: { txn: { $type: 'string' } },  // unique only over string `txn`s
+}]
 ```
 
 ### Relations

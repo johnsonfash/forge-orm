@@ -26,6 +26,7 @@ interface IndexSpec {
   sparse?: boolean;
   name: string;
   expireAfterSeconds?: number;
+  partialFilterExpression?: Record<string, unknown>;
 }
 
 interface IndexInfo {
@@ -34,14 +35,23 @@ interface IndexInfo {
   unique?: boolean;
   sparse?: boolean;
   expireAfterSeconds?: number;
+  partialFilterExpression?: Record<string, unknown>;
+}
+
+// Order-independent JSON for comparing a partialFilterExpression we declared
+// against the one Mongo echoes back (object key order isn't guaranteed equal).
+export function stableJson(v: any): string {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v);
+  if (Array.isArray(v)) return `[${v.map(stableJson).join(',')}]`;
+  return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stableJson(v[k])}`).join(',')}}`;
 }
 
 // Stable string for spec comparison: preserves key insertion order.
-function fingerprint(keys: Record<string, any>, unique?: boolean, sparse?: boolean, expireAfterSeconds?: number): string {
+export function fingerprint(keys: Record<string, any>, unique?: boolean, sparse?: boolean, expireAfterSeconds?: number, partialFilterExpression?: Record<string, unknown>): string {
   const keyStr = Object.keys(keys)
     .map((k) => `${k}:${keys[k]}`)
     .join(',');
-  return `${keyStr}|u=${unique ? 1 : 0}|s=${sparse ? 1 : 0}|ttl=${expireAfterSeconds ?? '-'}`;
+  return `${keyStr}|u=${unique ? 1 : 0}|s=${sparse ? 1 : 0}|ttl=${expireAfterSeconds ?? '-'}|pfe=${partialFilterExpression ? stableJson(partialFilterExpression) : '-'}`;
 }
 
 async function listExisting(collection: Collection): Promise<Map<string, IndexInfo>> {
@@ -57,6 +67,7 @@ async function listExisting(collection: Collection): Promise<Map<string, IndexIn
         unique: !!i.unique,
         sparse: !!i.sparse,
         expireAfterSeconds: i.expireAfterSeconds,
+        partialFilterExpression: i.partialFilterExpression,
       });
     }
     return map;
@@ -77,12 +88,15 @@ async function ensureIndex(
   if (spec.expireAfterSeconds !== undefined) {
     opts.expireAfterSeconds = spec.expireAfterSeconds;
   }
+  if (spec.partialFilterExpression) {
+    opts.partialFilterExpression = spec.partialFilterExpression;
+  }
 
-  const want = fingerprint(spec.keys, spec.unique, spec.sparse, spec.expireAfterSeconds);
+  const want = fingerprint(spec.keys, spec.unique, spec.sparse, spec.expireAfterSeconds, spec.partialFilterExpression);
   const have = existing.get(spec.name);
 
   if (have) {
-    const haveFp = fingerprint(have.key, have.unique, have.sparse, have.expireAfterSeconds);
+    const haveFp = fingerprint(have.key, have.unique, have.sparse, have.expireAfterSeconds, have.partialFilterExpression);
     if (haveFp === want) {
       return 'skipped';
     }
@@ -132,7 +146,7 @@ function indexNameFor(modelName: string, keys: Record<string, any>, unique?: boo
   return `idx_${modelName}_${k}${unique ? '_uq' : ''}`;
 }
 
-function collectIndexSpecs(modelName: string, model: ModelDef<any>): IndexSpec[] {
+export function collectIndexSpecs(modelName: string, model: ModelDef<any>): IndexSpec[] {
   const specs: IndexSpec[] = [];
 
   // Single-field uniques.
@@ -166,6 +180,7 @@ function collectIndexSpecs(modelName: string, model: ModelDef<any>): IndexSpec[]
       unique: idx.unique,
       sparse: idx.sparse,
       expireAfterSeconds: idx.expireAfterSeconds,
+      partialFilterExpression: idx.partialFilterExpression,
       name: idx.name || indexNameFor(modelName, idx.keys, idx.unique),
     });
   }

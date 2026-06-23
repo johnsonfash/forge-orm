@@ -75,6 +75,12 @@ export interface IndexDef {
   sparse?: boolean;
   name?: string;
   expireAfterSeconds?: number;
+  /**
+   * MongoDB only: build a partial index covering just the documents that match
+   * this filter (e.g. `{ email: { $type: 'string' } }` for a unique index that
+   * ignores rows where the field is absent). Ignored by the SQL dialects.
+   */
+  partialFilterExpression?: Record<string, unknown>;
 }
 
 export type RelationKind = 'one' | 'many';
