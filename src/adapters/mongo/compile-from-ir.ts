@@ -240,8 +240,29 @@ export function compileUpdate(node: UpdateNode, modelOverride?: ModelDef<any>): 
   }
   if (node.upsertCreate) {
     // upsertCreate is pre-coerced (defaults included) by the wrapper's
-    // upsert() before being passed via the IR. Compile uses it verbatim.
-    update.$setOnInsert = node.upsertCreate;
+    // upsert() before being passed via the IR.
+    //
+    // Mongo rejects the same path appearing in $setOnInsert and another update
+    // operator ("Updating the path 'x' would create a conflict at 'x'"), and it
+    // treats a path that prefixes another (`a` vs `a.b`) as a conflict too. Any
+    // field the update already writes is therefore dropped from $setOnInsert —
+    // on insert the update operator ($set/$inc/$mul/$push/$unset) sets it anyway,
+    // so create/update overlap (e.g. `create:{ seq:1 }, update:{ seq:{increment:1} }`)
+    // and "set the same fields whether inserting or updating" both just work.
+    const writtenPaths = [
+      ...Object.keys(update.$set || {}),
+      ...Object.keys(update.$inc || {}),
+      ...Object.keys(update.$mul || {}),
+      ...Object.keys(update.$push || {}),
+      ...Object.keys(update.$unset || {}),
+    ];
+    const conflicts = (a: string, b: string): boolean =>
+      a === b || a.startsWith(b + '.') || b.startsWith(a + '.');
+    const setOnInsert: Record<string, any> = {};
+    for (const [k, v] of Object.entries(node.upsertCreate)) {
+      if (!writtenPaths.some((w) => conflicts(k, w))) setOnInsert[k] = v;
+    }
+    if (Object.keys(setOnInsert).length) update.$setOnInsert = setOnInsert;
   }
   const filter = compileWhere(m, node.where);
   if (node.upsertCreate) {

@@ -4,6 +4,27 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite - one code
 path, no codegen, no external query engine.
 
+## 2.0.1 — upsert: no more `$setOnInsert`/update path conflicts (Mongo)
+
+**Bug fix (MongoDB).** `upsert()` compiled the entire `create` payload into
+`$setOnInsert` verbatim while the `update` payload became `$set`/`$inc`/`$mul`/
+`$push`/`$unset`. When a field appeared in **both** `create` and `update`, Mongo
+rejected the write with *"Updating the path 'x' would create a conflict at
+'x'"* — so two natural patterns threw on the insert branch:
+
+```ts
+// counter: create seeds 1, update increments
+await db.counter.upsert({ where: { id }, create: { id, seq: 1 }, update: { seq: { increment: 1 } } });
+// "set these fields whether inserting or updating"
+await db.consent.upsert({ where: { user_id }, create: { user_id, categories }, update: { categories } });
+```
+
+Now the compiler drops from `$setOnInsert` any path the update operators
+already write (exact match **and** prefix conflicts like `a` vs `a.b`). On
+insert the update operator sets the value anyway, so both patterns just work;
+`$setOnInsert` is omitted entirely when every create field overlaps the update.
+Insert-only create fields are still emitted. SQL dialects were unaffected.
+
 ## 2.0.0 — `delete()` is now a hard delete; explicit `softDelete()` + `restore()`
 
 **Breaking change.** Deletes now match Prisma's semantics: `delete()` and

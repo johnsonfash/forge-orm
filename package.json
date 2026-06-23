@@ -1,6 +1,6 @@
 {
   "name": "forge-orm",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Prisma-shape multi-database ORM/wrapper for MongoDB, PostgreSQL, MySQL & SQLite from one codebase — no codegen, no query engine. Bring your own schema.",
   "license": "MIT",
   "author": "johnsonfash",
