@@ -45,3 +45,32 @@ describe('mongo compileUpdate (IR successor to translateUpdateData)', () => {
     expect(u.$set._id).toBe(oid.toString());   // key remapped at compile; ObjectId coercion happens in coerceInbound
   });
 });
+
+// Regression: upsert must not emit the same path in $setOnInsert AND an update
+// operator — Mongo rejects that ("would create a conflict at 'x'"). Fields the
+// update writes are dropped from $setOnInsert; on insert the operator sets them.
+describe('mongo compileUpdate — upsert $setOnInsert / update-operator dedup', () => {
+  function upsert(create: any, data: any): any {
+    const node = buildUpdate('m', M, { where: { id: 'x' }, data, many: false, upsertCreate: create });
+    return (compileUpdate(node, M) as any).args.update;
+  }
+
+  test('field incremented in update is dropped from $setOnInsert (counter pattern)', () => {
+    const u = upsert({ count: 1, name: 'seed' }, { count: { increment: 1 } });
+    expect(u.$inc).toEqual({ count: 1 });
+    expect(u.$setOnInsert.count).toBeUndefined();   // would conflict with $inc
+    expect(u.$setOnInsert.name).toBe('seed');       // insert-only, kept
+  });
+
+  test('field $set in update is dropped from $setOnInsert', () => {
+    const u = upsert({ name: 'a', count: 5 }, { name: 'b' });
+    expect(u.$set.name).toBe('b');
+    expect(u.$setOnInsert.name).toBeUndefined();
+    expect(u.$setOnInsert.count).toBe(5);
+  });
+
+  test('$setOnInsert omitted entirely when every create field overlaps the update', () => {
+    const u = upsert({ name: 'a' }, { name: 'b' });
+    expect(u.$setOnInsert).toBeUndefined();
+  });
+});
