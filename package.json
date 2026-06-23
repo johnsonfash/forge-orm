@@ -1,6 +1,6 @@
 {
   "name": "forge-orm",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "description": "Prisma-shape multi-database ORM/wrapper for MongoDB, PostgreSQL, MySQL & SQLite from one codebase — no codegen, no query engine. Bring your own schema.",
   "license": "MIT",
   "author": "johnsonfash",
@@ -60,7 +60,7 @@
     "forge:integration:pg": "ts-node --transpile-only --project tsconfig.json integration-pg.ts && npm run forge:regression:pg",
     "forge:regression:pg": "ts-node --transpile-only --project tsconfig.json regression-postgresjs-driver.ts",
     "forge:integration:mongo": "ts-node --transpile-only --project tsconfig.json integration-mongo.ts && npm run forge:regression:mongo",
-    "forge:regression:mongo": "ts-node --transpile-only --project tsconfig.json regression-mongo-value-field.ts && ts-node --transpile-only --project tsconfig.json regression-groupby-distinct.ts && ts-node --transpile-only --project tsconfig.json regression-mongo-driver.ts",
+    "forge:regression:mongo": "ts-node --transpile-only --project tsconfig.json regression-mongo-value-field.ts && ts-node --transpile-only --project tsconfig.json regression-groupby-distinct.ts && ts-node --transpile-only --project tsconfig.json regression-mongo-driver.ts && ts-node --transpile-only --project tsconfig.json regression-mongo-partial-index.ts",
     "forge:integration:mysql": "ts-node --transpile-only --project tsconfig.json integration-mysql.ts && npm run forge:regression:mysql",
     "forge:regression:mysql": "ts-node --transpile-only --project tsconfig.json regression-mariadb-driver.ts",
     "forge:integration:sqlite": "ts-node --transpile-only --project tsconfig.json integration-sqlite.ts && npm run forge:regression:sqlite",

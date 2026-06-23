@@ -4,6 +4,34 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite - one code
 path, no codegen, no external query engine.
 
+## 2.1.0 — partial indexes on MongoDB (`partialFilterExpression`)
+
+**New feature (MongoDB).** A schema `IndexDef` now accepts
+`partialFilterExpression`, so `forge push` can build a [partial index](https://www.mongodb.com/docs/manual/core/index-partial/)
+— an index that only covers the documents matching a filter. The canonical use
+is a unique index that ignores rows where the field is absent or the wrong type:
+
+```ts
+const Payment = model('payments', {
+  id:  f.id(),
+  txn: f.string().optional(),
+}, {
+  indexes: [{
+    keys: { txn: 1 },
+    unique: true,
+    name: 'idx_pay_txn',
+    partialFilterExpression: { txn: { $type: 'string' } },  // unique only over string txns
+  }],
+});
+```
+
+`forge push` creates it with the filter, and the idempotency fingerprint now
+includes the filter (order-independent), so adding/changing a
+`partialFilterExpression` triggers a rebuild while an unchanged one is skipped.
+The field is **MongoDB-only** and ignored by the SQL dialects. Covered by new
+unit tests plus `regression-mongo-partial-index.ts` (creation, idempotency, and
+that uniqueness is enforced only over the filtered subset).
+
 ## 2.0.1 — upsert: no more `$setOnInsert`/update path conflicts (Mongo)
 
 **Bug fix (MongoDB).** `upsert()` compiled the entire `create` payload into

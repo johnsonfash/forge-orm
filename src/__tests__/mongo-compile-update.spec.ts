@@ -73,4 +73,38 @@ describe('mongo compileUpdate — upsert $setOnInsert / update-operator dedup', 
     const u = upsert({ name: 'a' }, { name: 'b' });
     expect(u.$setOnInsert).toBeUndefined();
   });
+
+  test('multiply overlap dropped from $setOnInsert', () => {
+    const u = upsert({ count: 5, name: 'x' }, { count: { multiply: 2 } });
+    expect(u.$mul).toEqual({ count: 2 });
+    expect(u.$setOnInsert.count).toBeUndefined();
+    expect(u.$setOnInsert.name).toBe('x');
+  });
+
+  test('$unset overlap dropped from $setOnInsert', () => {
+    const u = upsert({ name: 'x', count: 1 }, { name: { unset: true } } as any);
+    expect(u.$unset).toEqual({ name: '' });
+    expect(u.$setOnInsert.name).toBeUndefined();
+    expect(u.$setOnInsert.count).toBe(1);
+  });
+
+  test('partial overlap keeps only the non-overlapping create fields', () => {
+    const u = upsert({ name: 'a', count: 9 }, { name: 'b' });
+    expect(u.$set.name).toBe('b');
+    expect(u.$setOnInsert).toEqual({ count: 9 });
+  });
+
+  test('no overlap leaves create ($setOnInsert) and update intact', () => {
+    const u = upsert({ name: 'seed' }, { count: { increment: 1 } });
+    expect(u.$inc).toEqual({ count: 1 });
+    expect(u.$setOnInsert).toEqual({ name: 'seed' });
+  });
+
+  test('prefix conflict (`meta` vs `meta.x`) drops the parent from $setOnInsert', () => {
+    // Hand-built node: a dotted $set path whose parent is a $setOnInsert key.
+    const node: any = { model: 'm', where: { id: 'x' }, set: { 'meta.x': 1 }, upsertCreate: { meta: { a: 1 } }, many: false };
+    const u = (compileUpdate(node, M) as any).args.update;
+    expect(u.$set['meta.x']).toBe(1);
+    expect(u.$setOnInsert).toBeUndefined(); // `meta` removed as a prefix conflict
+  });
 });
