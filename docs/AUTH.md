@@ -47,10 +47,10 @@ Two patterns blur the boundary. **Per-tenant database roles** — a SaaS where e
 The default shape across every dialect — a username and password in the connection string, validated by the database against its credential store.
 
 ```
-postgres://forge_writer:hunter2@db.internal:5432/app?sslmode=verify-full
-mysql://forge_writer:hunter2@db.internal:3306/app?ssl-mode=VERIFY_IDENTITY
-mongodb://forge_writer:hunter2@cluster.mongodb.net/app?authSource=admin
-sqlserver://forge_writer:hunter2@db.internal:1433/app?encrypt=true
+postgres://forge_writer:REDACTED_PASSWORD@db.internal:5432/app?sslmode=verify-full
+mysql://forge_writer:REDACTED_PASSWORD@db.internal:3306/app?ssl-mode=VERIFY_IDENTITY
+mongodb://forge_writer:REDACTED_PASSWORD@cluster.mongodb.net/app?authSource=admin
+sqlserver://forge_writer:REDACTED_PASSWORD@db.internal:1433/app?encrypt=true
 ```
 
 forge passes the string to the driver verbatim. The driver parses it, splits username/password out of the URL, and ships the password over the TLS-wrapped wire. No credential touches forge itself; the executor only sees a connected driver.
@@ -572,7 +572,7 @@ ExecStart=/usr/local/bin/forge-api
 
 ```
 # /etc/forge/api.env — mode 0600, owned by the api user
-DATABASE_URL=postgres://forge_writer:hunter2@db.internal:5432/app?sslmode=verify-full
+DATABASE_URL=postgres://forge_writer:REDACTED_PASSWORD@db.internal:5432/app?sslmode=verify-full
 ```
 
 Risks: the env file is on disk (mitigate with disk encryption); env vars are visible to `ptrace` (mitigate with user separation); rotation requires `systemctl restart` (mitigate with an LB drain window). Acceptable for small-scale; not past a certain organisational size, at which point you have a secret manager.
@@ -642,7 +642,7 @@ Atlas supports three authentication mechanisms for production workloads; the con
 ### SCRAM-SHA-256 (the default)
 
 ```
-mongodb+srv://forge_writer:password@cluster.abcde.mongodb.net/app?authSource=admin
+mongodb+srv://forge_writer:REDACTED_PASSWORD@cluster.abcde.mongodb.net/app?authSource=admin
 ```
 
 Credentials are validated against Atlas's internal user store. Rotation rewrites the password in the Atlas UI or via API; the application's secret manager picks it up.
