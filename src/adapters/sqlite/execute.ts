@@ -70,12 +70,21 @@ function encodeParams(params: unknown[]): unknown[] {
     if (v == null) return v;
     if (v instanceof Date) return v.toISOString();
     if (typeof v === 'boolean') return v ? 1 : 0;
-    if (typeof v === 'object' && !Buffer.isBuffer(v) && !Array.isArray(v)) {
+    // Buffer is Node-only — guard so wasm/browser bundles don't blow up at
+    // module-eval time. Uint8Array passes through untouched in either runtime.
+    if (typeof v === 'object' && !isBufferLike(v) && !Array.isArray(v)) {
       return JSON.stringify(v);
     }
     if (Array.isArray(v)) return JSON.stringify(v);
     return v;
   });
+}
+
+function isBufferLike(v: unknown): boolean {
+  if (v instanceof Uint8Array) return true;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const B = (globalThis as any).Buffer;
+  return !!B && typeof B.isBuffer === 'function' && B.isBuffer(v);
 }
 
 export async function executeSqliteSelect(

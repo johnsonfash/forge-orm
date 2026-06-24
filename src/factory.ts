@@ -50,8 +50,8 @@ export interface CreateDbOptionsStructured {
 }
 
 // Bring-your-own-driver: hand forge a pre-wrapped driver port (expo-sqlite,
-// op-sqlite, libsql, …) instead of a URL. The driver's `kind` selects the
-// adapter; `url` is optional and only used as a label.
+// op-sqlite, libsql, wasm-sqlite, …) instead of a URL. The driver's `kind`
+// selects the adapter; `url` is optional and only used as a label.
 export type ForgeDriver =
   | import('./adapters/sqlite/driver').SqliteDriver
   | import('./adapters/postgres/driver').PostgresDriver
@@ -100,6 +100,14 @@ export type ForgeDb<S extends SchemaShape = SchemaMap> = Collections<S> & {
     (fragment: SqlFragment): Promise<number>;
   };
   $disconnect(): Promise<void>;
+  // Runtime DDL apply — the browser/wasm replacement for `forge push`. Reads
+  // the active schema, emits dialect DDL, applies what's missing inside a
+  // transaction. Idempotent — already-existing tables/indexes are skipped.
+  // Currently sqlite-only (Node dialects use the CLI). Returns an apply report:
+  // { applied, skipped, failures }.
+  $migrate(opts?: { logger?: (line: string) => void }): Promise<{
+    applied: string[]; skipped: string[]; failures: { name: string; error: string }[];
+  }>;
   // Query lifecycle pub/sub. Subscribe before queries run; the returned
   // function unsubscribes. Listener errors never break queries.
   $on: {
@@ -221,6 +229,7 @@ function makeDb(adapter: Adapter, _url: string, runtime: { strict: boolean } = {
       if (key === '$queryRaw') return makeRawCaller((frag) => adapter.$queryRaw(frag));
       if (key === '$executeRaw') return makeRawCaller((frag) => adapter.$executeRaw(frag));
       if (key === '$disconnect') return () => adapter.close();
+      if (key === '$migrate') return $migrate;
       if (key === '$on') return (event: any, cb: any) => adapter.emitter.on(event, cb);
       if (key === '$off') return (event: any, cb: any) => adapter.emitter.off(event, cb);
       const model = (schema as any)[key] as ModelDef<any> | undefined;
@@ -240,6 +249,23 @@ function makeDb(adapter: Adapter, _url: string, runtime: { strict: boolean } = {
   function $transaction(arg: any): any {
     if (Array.isArray(arg)) return Promise.all(arg);
     return adapter.$transaction(async (session) => arg(makeTx(session)));
+  }
+
+  // Runtime DDL apply for the wasm path. Lazy-imports the migrator so the
+  // mongo/pg/mysql bundles never pull in the sqlite DDL emitter.
+  async function $migrate(opts?: { logger?: (line: string) => void }) {
+    if (adapter.kind !== 'sqlite') {
+      throw new Error(
+        `[forge] $migrate() is only supported on sqlite adapters today. ` +
+        `For ${adapter.kind} use the CLI: 'npx forge push'.`,
+      );
+    }
+    const { runMigrate } = await import('./wasm/migrate');
+    // adapter.db is the SqliteDriver after connect; the sqlite adapter exposes
+    // it as a getter so an injected wasm driver works the same as a default
+    // better-sqlite3 driver.
+    const driver = (adapter as unknown as { db: import('./adapters/sqlite/driver').SqliteDriver }).db;
+    return runMigrate(driver, opts);
   }
 
   // Mongo-only — it's the BSON command channel. SQL consumers reach for

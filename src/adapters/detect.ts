@@ -9,6 +9,11 @@ const URL_PREFIX_TO_KIND: Array<[RegExp, AdapterKind]> = [
   [/^postgres(ql)?:\/\//i, 'postgres'],
   [/^(mysql|mariadb):\/\//i, 'mysql'],
   [/^(sqlite:|file:)/i, 'sqlite'],
+  // Browser sqlite-wasm — OPFS persistent, OPFS SAH-pool (multi-tab safe),
+  // and the bare `:memory:` ephemeral form. All resolve to the sqlite adapter
+  // and route through the wasm driver injected by createDb({ driver }).
+  [/^opfs(-sahpool)?:/i, 'sqlite'],
+  [/^:memory:$/i, 'sqlite'],
   [/^duckdb:/i, 'duckdb'],
   // mssql / sqlserver — both prefixes are in the wild.
   [/^(mssql|sqlserver):\/\//i, 'mssql'],

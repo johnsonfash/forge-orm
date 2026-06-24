@@ -1,6 +1,6 @@
 {
   "name": "forge-orm",
-  "version": "2.3.1",
+  "version": "2.4.0",
   "description": "Prisma-shape multi-database ORM/wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB & SQL Server from one codebase — typed geo / vector / JSON path / full-text search, no codegen, no query engine. Bring your own schema.",
   "license": "MIT",
   "author": "johnsonfash",
@@ -44,6 +44,26 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./wasm": {
+      "types": "./dist/wasm/index.d.ts",
+      "default": "./dist/wasm/index.js"
+    },
+    "./wasm/worker": {
+      "types": "./dist/wasm/worker.d.ts",
+      "default": "./dist/wasm/worker.js"
+    },
+    "./wasm/vite": {
+      "types": "./dist/wasm/vite.d.ts",
+      "default": "./dist/wasm/vite.js"
+    },
+    "./wasm/next": {
+      "types": "./dist/wasm/next.d.ts",
+      "default": "./dist/wasm/next.js"
+    },
+    "./wasm/webpack": {
+      "types": "./dist/wasm/webpack.d.ts",
+      "default": "./dist/wasm/webpack.js"
     },
     "./package.json": "./package.json"
   },
@@ -102,6 +122,7 @@
     "forge:all": "npm run forge:check && npm run forge:integration && npm run forge:bench"
   },
   "peerDependencies": {
+    "@sqlite.org/sqlite-wasm": ">=3.45.0",
     "better-sqlite3": "^11.0.0",
     "mongodb": "^6.0.0",
     "mysql2": "^3.0.0",
@@ -119,6 +140,9 @@
     },
     "better-sqlite3": {
       "optional": true
+    },
+    "@sqlite.org/sqlite-wasm": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -127,6 +151,7 @@
     "@prisma/adapter-mariadb": "^7.8.0",
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
+    "@sqlite.org/sqlite-wasm": "^3.53.0-build1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/jest": "^30.0.0",
     "@types/node": "^25.9.1",
