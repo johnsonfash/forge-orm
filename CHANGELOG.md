@@ -4,6 +4,46 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.3.1 — README rewrite: complete field-type + modifier tables, full operator reference
+
+**Docs-only release.** No runtime change. The 2.3.0 README hadn't been
+re-syned end-to-end after the new features landed — `f.geoPoint()` and
+`f.vector()` were absent from the Field types table, and the modifier
+list was a code block rather than a table. This release rewrites the
+README from start to finish:
+
+- **Field types** table now lists every builder (`f.id` / `objectId` /
+  `string` / `text` / `int` / `float` / `decimal` / `bigint` / `uuid` /
+  `bool` / `dateTime` / `json` / `enumOf` / `embed` / `embedMany` /
+  `stringArray` / `intArray` / **`geoPoint`** / **`vector`**) with TS
+  type + per-dialect storage.
+- **Field modifiers** is now a proper table covering all nine
+  (`optional` / `unique` / `default(value)` / `default('now')` /
+  `default('autoId')` / `updatedAt` / **`searchable`** /
+  **`softDeleteAt`** / **`dbgenerated`**) with dialect quirks.
+- **New top-level Operator reference table** covering every `where`
+  operator (`equals` / `not` / `in` / `notIn` / `lt`-`gte` / `contains` /
+  `startsWith` / `endsWith` / `mode` / `has` / `hasEvery` / `hasSome` /
+  `isEmpty` / `some` / `every` / `none` / `search` / `path` / `near` /
+  `withinPolygon` / `AND` / `OR` / `NOT`) keyed to the field kinds each
+  applies to.
+- **Geo** section split into proper subsections (per-dialect emit table,
+  extensions, fallback mode, coord-order rule, polygon containment).
+- **CLI** section now has subsections for `forge doctor` (with the
+  per-dialect probe table), `--enable-extensions` (with a schema-feature
+  → extension table), schema resolution, and `--ignore`.
+- **Testing** picks up a Driver smoke harness subsection covering
+  `npm run smoke:drivers`.
+- **Wire-compatible databases** table extended with MotherDuck, Azure
+  SQL Database, and Azure SQL Edge.
+- **Built-in drivers** table extended with the DuckDB + MSSQL rows.
+- **Reading data** sample now includes `findFirstOrThrow` /
+  `findUniqueOrThrow` / `aggregate()`.
+- **Limitations** updated with the DuckDB / MSSQL / Mongo geo
+  caveats that landed in 2.3.
+
+The TOC is rebuilt so every heading anchor resolves.
+
 ## 2.3.0 — DuckDB + MSSQL adapters, end-to-end geo, JSON path queries, vector search
 
 **Feature release.** Two new dialects, a complete geo layer (schema, index,
