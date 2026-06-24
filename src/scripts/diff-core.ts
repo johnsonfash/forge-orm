@@ -83,16 +83,46 @@ export function parseIgnoreList(raw: string | undefined | null): IgnoreSpec {
   return out;
 }
 
+interface ExpectedIndexDecl {
+  name?: string;
+  unique: boolean;
+  keys: Record<string, unknown>;
+  method?: string;
+  where?: Record<string, unknown> | string;
+  include?: string[];
+  expression?: string;
+  partialFilterExpression?: Record<string, unknown>;
+  collation?: Record<string, unknown>;
+  wildcardProjection?: Record<string, unknown>;
+}
+
 interface ExpectedTable {
   name: string;
   columns: Map<string, FieldDef>;
   // normalized index signatures: `u:col1,col2` (unique) / `n:col1,col2`
   indexSigs: Set<string>;
+  // Full per-index declarations for deep-field drift detection (method,
+  // where, include, expression, collation, etc.). Only entries with an
+  // explicit `name` participate in the deep comparison so unnamed indexes
+  // don't false-positive.
+  indexDecls: ExpectedIndexDecl[];
   fks: { column: string; refTable: string; refColumn: string }[];
 }
 
 function indexSig(unique: boolean, cols: string[]): string {
   return `${unique ? 'u' : 'n'}:${[...cols].sort().join(',')}`;
+}
+
+// Stable JSON for cross-side comparison — sorts keys recursively so
+// `{ a: 1, b: 2 }` and `{ b: 2, a: 1 }` produce identical strings.
+function canonOrdered(v: unknown): unknown {
+  if (v === null || typeof v !== 'object') return v;
+  if (Array.isArray(v)) return v.map(canonOrdered);
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+    out[k] = canonOrdered((v as Record<string, unknown>)[k]);
+  }
+  return out;
 }
 
 export function expectedFromSchema(schema: Record<string, any>): {
@@ -118,6 +148,7 @@ export function expectedFromSchema(schema: Record<string, any>): {
     }
 
     const indexSigs = new Set<string>();
+    const indexDecls: ExpectedIndexDecl[] = [];
     if (idCol) indexSigs.add(indexSig(true, [idCol]));            // primary key
     for (const [name, fdef] of Object.entries(m.fields)) {
       const fd = fdef as FieldDef;
@@ -127,10 +158,23 @@ export function expectedFromSchema(schema: Record<string, any>): {
     for (const idx of m.indexes ?? []) {
       // Expression indexes have no column list — comparing them by column-set
       // would treat every expression index as a duplicate of every other one
-      // (all "empty cols"). Skip them from the structural diff; `forge:push`
-      // is the source of truth for their lifecycle.
-      if (idx.expression) continue;
-      indexSigs.add(indexSig(idx.unique === true, Object.keys(idx.keys)));
+      // (all "empty cols"). They still participate in the deep per-name
+      // comparison below; only the column-set signature skips them.
+      if (!idx.expression) {
+        indexSigs.add(indexSig(idx.unique === true, Object.keys(idx.keys)));
+      }
+      indexDecls.push({
+        name: idx.name,
+        unique: idx.unique === true,
+        keys: idx.keys,
+        method: idx.method,
+        where: idx.where,
+        include: idx.include,
+        expression: idx.expression,
+        partialFilterExpression: idx.partialFilterExpression,
+        collation: idx.collation as Record<string, unknown> | undefined,
+        wildcardProjection: idx.wildcardProjection,
+      });
     }
 
     const fks: ExpectedTable['fks'] = [];
@@ -144,7 +188,7 @@ export function expectedFromSchema(schema: Record<string, any>): {
       fks.push({ column: r.on, refTable: target.collection, refColumn: r.refs });
     }
 
-    tables.set(m.collection, { name: m.collection, columns, indexSigs, fks });
+    tables.set(m.collection, { name: m.collection, columns, indexSigs, indexDecls, fks });
   }
 
   return { tables, views };
@@ -218,11 +262,14 @@ export function diffIntrospection(
       }
     }
 
-    // Indexes — compare by column-set+uniqueness, ignoring names + FTS shadows.
+    // Indexes — first pass: column-set+uniqueness match (cheap, catches the
+    // common case of "missing index entirely").
     const actSigs = new Set<string>();
+    const actByName = new Map<string, typeof act.indexes[number]>();
     for (const ix of act.indexes) {
       if (/_fts/i.test(ix.name)) continue;
       actSigs.add(indexSig(ix.unique, ix.columns));
+      actByName.set(ix.name, ix);
     }
     for (const sig of exp.indexSigs) {
       if (!actSigs.has(sig)) items.push({ kind: 'index', direction: 'missing', table: name, detail: `index ${sig}` });
@@ -231,6 +278,91 @@ export function diffIntrospection(
     // which usually signal a real divergence.
     for (const sig of actSigs) {
       if (sig.startsWith('u:') && !exp.indexSigs.has(sig)) items.push({ kind: 'index', direction: 'extra', table: name, detail: `unique index ${sig} in DB but not in schema` });
+    }
+
+    // Second pass — when an expected index has an explicit name and the DB
+    // has an index with that name, deep-compare method / where / include /
+    // expression / partial filter / collation / wildcardProjection. Each
+    // mismatch becomes its own drift entry, scoped by index name, so an
+    // operator can see exactly which property drifted instead of just
+    // "something changed".
+    for (const decl of exp.indexDecls) {
+      if (!decl.name) continue;
+      const ix = actByName.get(decl.name);
+      if (!ix) continue; // already reported by the column-set pass
+
+      // Method — only compare when the adapter actually read it back. On
+      // Mongo `method` doesn't exist; on older PG/MySQL the introspect
+      // pass leaves it undefined and we skip the check.
+      if (ix.method !== undefined) {
+        const expM = decl.method ?? 'btree';
+        if (expM !== ix.method) {
+          items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${decl.name}' method: schema=${expM} db=${ix.method}` });
+        }
+      }
+
+      // Partial WHERE / partialFilterExpression. SQL: compare as trimmed
+      // strings. Mongo: compare via stable JSON so key-order doesn't
+      // produce false positives.
+      const expWhereStr = typeof decl.where === 'string' ? decl.where.trim() : undefined;
+      const expPfe = decl.partialFilterExpression ?? (typeof decl.where === 'object' ? decl.where as Record<string, unknown> : undefined);
+      if (ix.where !== undefined && (expWhereStr || ix.where)) {
+        const norm = (s: string) => s.replace(/\s+/g, ' ').toLowerCase().trim().replace(/^\(+|\)+$/g, '').trim();
+        const a = norm(expWhereStr || '');
+        const b = norm(String(ix.where));
+        if (a !== b) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${decl.name}' where: schema=${a || '∅'} db=${b}` });
+      }
+      if (ix.partialFilterExpression !== undefined) {
+        const a = expPfe ? JSON.stringify(canonOrdered(expPfe)) : '∅';
+        const b = JSON.stringify(canonOrdered(ix.partialFilterExpression));
+        if (a !== b) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${decl.name}' partialFilter: schema=${a} db=${b}` });
+      }
+
+      // INCLUDE — PG covering columns.
+      if (ix.include !== undefined) {
+        const a = (decl.include ?? []).join(',');
+        const b = (ix.include ?? []).join(',');
+        if (a !== b) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${decl.name}' include: schema=[${a}] db=[${b}]` });
+      }
+
+      // Expression — strings can differ in whitespace / case (PG echoes
+      // the parsed form, not the user's exact text). Compare normalized.
+      if (ix.expression !== undefined && (decl.expression || ix.expression)) {
+        const norm = (s: string) => s.replace(/\s+/g, ' ').toLowerCase().trim();
+        const a = decl.expression ? norm(decl.expression) : '';
+        const b = ix.expression ? norm(ix.expression) : '';
+        // PG often wraps with extra parens; tolerate.
+        const ap = a.replace(/^\(+|\)+$/g, '');
+        const bp = b.replace(/^\(+|\)+$/g, '');
+        if (ap !== bp) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${decl.name}' expression: schema='${a}' db='${b}'` });
+      }
+
+      // Collation (Mongo) — project the DB's echoed defaults down to the
+      // user-declared keys before comparing.
+      if (ix.collation && decl.collation) {
+        const dk = Object.keys(decl.collation);
+        const projected: Record<string, unknown> = {};
+        for (const k of dk) projected[k] = (ix.collation as any)[k];
+        const a = JSON.stringify(canonOrdered(decl.collation));
+        const b = JSON.stringify(canonOrdered(projected));
+        if (a !== b) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${decl.name}' collation: schema=${a} db=${b}` });
+      }
+
+      // Wildcard projection (Mongo).
+      if (ix.wildcardProjection !== undefined && (decl.wildcardProjection || ix.wildcardProjection)) {
+        const a = JSON.stringify(canonOrdered(decl.wildcardProjection ?? {}));
+        const b = JSON.stringify(canonOrdered(ix.wildcardProjection ?? {}));
+        if (a !== b) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${decl.name}' wildcardProjection: schema=${a} db=${b}` });
+      }
+
+      // Per-key Mongo direction tokens (1, -1, 'text', '2dsphere', '2d',
+      // 'hashed'). Only checked when the introspect adapter populated
+      // keySpec (Mongo).
+      if (ix.keySpec) {
+        const a = JSON.stringify(canonOrdered(decl.keys));
+        const b = JSON.stringify(canonOrdered(ix.keySpec));
+        if (a !== b) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${decl.name}' keys: schema=${a} db=${b}` });
+      }
     }
 
     // Foreign keys — by (column → refTable.refColumn).

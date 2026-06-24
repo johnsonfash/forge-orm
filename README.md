@@ -100,12 +100,12 @@ this out.
 
 Full release history is in [CHANGELOG.md](./CHANGELOG.md). Recent highlights:
 
-- **2.2 — every index gap closed.** One `IndexDef` now expresses every common
-  production index shape: SQL partial (`where: 'deleted_at IS NULL'`), expression
-  indexes (`expression: 'lower(email)'`), PG access methods (`method: 'gin'/'gist'/
-  'brin'/'hash'`) and `INCLUDE` covering columns, Mongo geospatial
-  (`keys: { location: '2dsphere' }`), hashed shard keys, collation, and wildcard
-  projections. See [Indexes and unique constraints](#indexes-and-unique-constraints).
+- **2.2 — `IndexDef` covers the shapes `forge push` couldn't model.** SQL
+  partial indexes (`where: 'deleted_at IS NULL'`), expression indexes
+  (`expression: 'lower(email)'`), Postgres access methods (`gin` / `gist` /
+  `brin` / `hash`) plus `INCLUDE` covering columns, and Mongo geospatial
+  (`'2dsphere'` / `'2d'`), hashed shard keys, collation, and wildcard
+  projection. See [Indexes and unique constraints](#indexes-and-unique-constraints).
 - **2.1 — partial indexes on MongoDB.** A schema `IndexDef` now accepts
   `partialFilterExpression`, so `forge push` can build a partial index — e.g. a
   unique index that only covers documents where the field is a string. MongoDB
@@ -479,136 +479,71 @@ const Post = model('posts', {
 });
 ```
 
-#### Partial indexes — Mongo + SQL
-
-Restrict uniqueness (or any index's coverage) to rows matching a filter. Same
-field, two payloads depending on dialect:
+Beyond the basics, `IndexDef` carries every common production index shape.
+The same field on a dialect that doesn't support it is dropped at push with
+a warning, so a single schema can target both Mongo and SQL.
 
 ```ts
 indexes: [
-  // Mongo — partialFilterExpression accepts a Mongo query document.
-  // (`where` is an alias of the same field on Mongo, kept here for parity.)
-  { keys: { txn: 1 }, unique: true,
-    partialFilterExpression: { txn: { $type: 'string' } } },
-
-  // Postgres / SQLite — `where` accepts a raw SQL string. The same
-  // schema can carry BOTH (each dialect picks the one it understands):
+  // Partial index. Mongo uses partialFilterExpression; Postgres and SQLite
+  // use `where` with a raw SQL string. The same entry can carry both so
+  // the schema works on either side.
   { keys: { sku: 1 }, unique: true,
-    where: 'deleted_at IS NULL',                         // SQL
-    partialFilterExpression: { deleted_at: { $exists: false } }, // Mongo
-    name: 'idx_items_sku_live' },
-]
-```
+    where: 'deleted_at IS NULL',
+    partialFilterExpression: { deleted_at: { $exists: false } } },
 
-`where` and `partialFilterExpression` are interchangeable on Mongo (object
-form). On Postgres / SQLite, `where` must be a SQL string; MySQL does not
-support partial indexes and emits a warning at push time.
+  // TTL (Mongo).
+  { keys: { createdAt: 1 }, expireAfterSeconds: 60 * 60 * 24 },
 
-#### TTL indexes (Mongo)
+  // Mongo geospatial. `$near` / `$geoWithin` queries need this.
+  { keys: { location: '2dsphere' } },
 
-```ts
-indexes: [{ keys: { createdAt: 1 }, expireAfterSeconds: 60 * 60 * 24 }]
-```
+  // Mongo hashed — required for a hashed shard key.
+  { keys: { tenant: 'hashed' } },
 
-#### Geospatial indexes (Mongo)
+  // Mongo case-insensitive unique. strength: 2 = case-insensitive.
+  { keys: { email: 1 }, unique: true,
+    collation: { locale: 'en', strength: 2 } },
 
-```ts
-indexes: [
-  { keys: { location: '2dsphere' } },   // spherical Earth (GeoJSON)
-  { keys: { coords: '2d' } },           // legacy flat geometry
-]
-```
+  // Mongo wildcard index — keys: { '$**': 1 } + wildcardProjection.
+  { keys: { '$**': 1 } as any, wildcardProjection: { 'data.$**': 1 } },
 
-#### Hashed indexes (Mongo — for hashed shard keys)
+  // Postgres GIN over a jsonb column — supports @> containment.
+  { keys: { tags: 1 }, method: 'gin' },
 
-```ts
-indexes: [{ keys: { orgId: 'hashed' } }]
-```
+  // Postgres covering — answers (customer_id) → (status, total) from the index.
+  { keys: { customer_id: 1 }, include: ['status', 'total'] },
 
-#### Collation indexes (Mongo — case- / accent-insensitive uniqueness)
+  // Postgres BRIN for huge append-only tables (logs, analytics).
+  { keys: { received_at: 1 }, method: 'brin' },
 
-```ts
-indexes: [{
-  keys: { email: 1 }, unique: true,
-  collation: { locale: 'en', strength: 2 },    // strength: 2 = case-insensitive
-}]
-```
-
-#### Wildcard indexes (Mongo)
-
-```ts
-indexes: [{ keys: { '$**': 1 } as any, wildcardProjection: { 'data.$**': 1 } }]
-```
-
-#### Postgres index method — `gin` / `gist` / `brin` / `hash`
-
-```ts
-indexes: [
-  { keys: { tags: 1 }, method: 'gin' },   // jsonb / arrays / pg_trgm
-  { keys: { box:  1 }, method: 'gist' },  // PostGIS / ranges
-  { keys: { at:   1 }, method: 'brin' },  // huge append-only tables
-  { keys: { id:   1 }, method: 'hash' },  // equality-only, smaller than btree
-]
-```
-
-The default method is `btree` and is omitted from the emitted SQL. The DB
-itself raises a clear error if the method requires an extension that isn't
-installed (e.g. `pg_trgm` for trigram GIN).
-
-#### Postgres covering indexes — `INCLUDE`
-
-```ts
-indexes: [{
-  keys: { customer_id: 1 },
-  include: ['status', 'total'],     // index-only scans for (customer_id) → (status, total)
-}]
-```
-
-#### Expression indexes — case-insensitive lookups, JSON paths, computed keys
-
-```ts
-indexes: [
+  // Expression index. Postgres / MySQL 8+ / SQLite. Mongo skips with a warning.
   { keys: {}, expression: 'lower(email)' },
-  { keys: {}, expression: "((data->>'sku'))" },
+
+  // MySQL spatial / fulltext. Statement-prefix keywords on MySQL, not USING.
+  { keys: { geom: 1 }, method: 'spatial' },
+  { keys: { body: 1 }, method: 'fulltext' },
 ]
 ```
 
-Supported on Postgres, MySQL 8+, and SQLite. Ignored on Mongo (warn) — for
-Mongo, materialise the computed value as a stored field and index it directly.
+What each field does, per dialect:
 
-#### MySQL spatial + fulltext — `method`
-
-```ts
-indexes: [
-  { keys: { geom: 1 }, method: 'spatial' },   // CREATE SPATIAL INDEX
-  { keys: { body: 1 }, method: 'fulltext' },  // CREATE FULLTEXT INDEX
-]
-```
-
-`.searchable()` on a field still auto-emits a FULLTEXT index on MySQL; `method:
-'fulltext'` is the explicit form when you want to declare it on a non-
-searchable column or pick the columns yourself.
-
-#### What goes where
-
-| Field                       | Mongo                   | Postgres            | MySQL               | SQLite              |
-|-----------------------------|-------------------------|---------------------|---------------------|---------------------|
-| `keys: { col: 1 / -1 }`     | ✓                       | ✓                   | ✓                   | ✓                   |
-| `keys: { col: 'text' }`     | ✓ text index            | text_pattern_ops    | (column kept)       | (column kept)       |
-| `keys: { col: '2dsphere'/'2d'/'hashed' }` | ✓             | ignored             | ignored             | ignored             |
-| `unique`                    | ✓                       | ✓                   | ✓                   | ✓                   |
-| `sparse`                    | ✓                       | (auto on optional)  | n/a                 | n/a                 |
-| `expireAfterSeconds`        | ✓                       | n/a                 | n/a                 | n/a                 |
-| `partialFilterExpression`   | ✓                       | n/a                 | n/a                 | n/a                 |
-| `where` (object)            | ✓ (alias of PFE)        | warn + skip         | warn + skip         | warn + skip         |
-| `where` (SQL string)        | n/a                     | `WHERE …`           | warn + skip         | `WHERE …`           |
-| `include: [cols]`           | n/a                     | `INCLUDE (…)`       | warn + skip         | warn + skip         |
-| `expression: 'sql'`         | warn + skip             | `((expr))`          | `((expr))`          | `(expr)`            |
-| `method: btree`             | n/a (default)           | (default)           | (default)           | (only one)          |
-| `method: gin/gist/brin/hash`| n/a                     | `USING …`           | warn (ignored)      | warn (ignored)      |
-| `method: spatial/fulltext`  | n/a                     | (DB will reject)    | statement prefix    | warn (ignored)      |
-| `collation`                 | ✓                       | n/a (use `expression: 'lower(col)'`) | n/a | n/a |
-| `wildcardProjection`        | ✓                       | n/a                 | n/a                 | n/a                 |
+| Field                       | Mongo                | Postgres            | MySQL               | SQLite              |
+|-----------------------------|----------------------|---------------------|---------------------|---------------------|
+| `keys: { col: 1 / -1 }`     | yes                  | yes                 | yes                 | yes                 |
+| `keys: { col: 'text' }`     | text index           | text_pattern_ops    | column kept         | column kept         |
+| `keys: { col: '2dsphere'/'2d'/'hashed' }` | yes    | ignored             | ignored             | ignored             |
+| `unique` / `sparse`         | yes                  | yes (sparse auto on optional) | yes/n/a   | yes/n/a             |
+| `expireAfterSeconds`        | yes                  | n/a                 | n/a                 | n/a                 |
+| `partialFilterExpression`   | yes                  | n/a                 | n/a                 | n/a                 |
+| `where` (object)            | alias of PFE         | warn + skip         | warn + skip         | warn + skip         |
+| `where` (SQL string)        | n/a                  | WHERE …             | warn + skip         | WHERE …             |
+| `include: [cols]`           | n/a                  | INCLUDE (…)         | warn + skip         | warn + skip         |
+| `expression: 'sql'`         | warn + skip          | ((expr))            | ((expr))            | (expr)              |
+| `method: gin/gist/brin/hash`| n/a                  | USING …             | warn (ignored)      | warn (ignored)      |
+| `method: spatial/fulltext`  | n/a                  | DB rejects          | statement prefix    | warn (ignored)      |
+| `collation`                 | yes                  | n/a (use expression)| n/a                 | n/a                 |
+| `wildcardProjection`        | yes                  | n/a                 | n/a                 | n/a                 |
 
 ### Relations
 
@@ -1188,20 +1123,20 @@ const q = db.user.compile.findMany({ where: { active: true }, take: 20 });
 // Mongo: { collection: 'users', op: 'find', args: { filter: { active: true }, options: { limit: 20 } } }
 ```
 
-Every runtime operation is available on `.compile`, including
-`softDelete` / `softDeleteMany` / `restore` / `restoreMany` for models that
-declare a `.softDeleteAt()` field. They throw at compile-time if the model has
-no soft-delete field.
+Every runtime method on `db.<model>` is on `.compile` too, including
+`softDelete` / `softDeleteMany` / `restore` / `restoreMany`. The compile
+variant throws synchronously if the model has no `.softDeleteAt()` field
+instead of waiting for the runtime check:
 
 ```ts
 const c = db.account.compile.softDelete({ where: { id: 'a1' } });
-// SQL artifact carries an UPDATE setting the soft-delete column.
+// SQL: UPDATE accounts SET deleted_at = $1 WHERE id = $2 …
 ```
 
-For Mongo or SQL adapters, the artifact's `kind`/`dialect` is correct
-automatically. Need to narrow the surface? Use `.compileMongo` (only on
-Mongo) or `.compileSql` (only on SQL dialects); both throw at access if
-the adapter doesn't match, so a misroute is loud instead of silent.
+`compile` returns a `MongoArtifact` on Mongo and a `SQLArtifact` with the
+matching `dialect` on Postgres / MySQL / SQLite. If you want a statically
+narrowed surface, use `.compileMongo` or `.compileSql`; both throw at access
+on the wrong adapter.
 
 ---
 

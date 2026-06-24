@@ -50,6 +50,29 @@ export interface IntrospectedIndex {
   name: string;
   columns: string[];
   unique: boolean;
+  // Optional 2.2-era introspection. Populated when the adapter can read
+  // them back from the live DB; undefined when the adapter can't tell (older
+  // DB versions, MySQL pre-8.0 lacking EXPRESSION column, etc.). The diff
+  // comparator only flags drift on fields it can actually read.
+  /** Index access method — 'btree' / 'gin' / 'gist' / 'brin' / 'hash' (PG),
+   *  'BTREE' / 'FULLTEXT' / 'SPATIAL' (MySQL). Always lower-cased for PG. */
+  method?: string;
+  /** Raw SQL `WHERE` clause as the DB reports it (PG: pg_get_expr(indpred);
+   *  SQLite: parsed out of sqlite_master.sql). */
+  where?: string;
+  /** Postgres covering columns (the tail of pg_index.indkey after indnatts). */
+  include?: string[];
+  /** Postgres expression body (when ix.indexprs is non-null). Null otherwise. */
+  expression?: string;
+  /** Mongo partial filter — same shape as the IndexDef field. */
+  partialFilterExpression?: Record<string, unknown>;
+  /** Mongo collation (echoed by listIndexes). */
+  collation?: Record<string, unknown>;
+  /** Mongo wildcard projection. */
+  wildcardProjection?: Record<string, unknown>;
+  /** Per-key directions / index-type tokens (1 / -1 / 'text' / '2dsphere' /
+   *  '2d' / 'hashed'). Mongo populates this; SQL adapters leave it undefined. */
+  keySpec?: Record<string, unknown>;
 }
 
 export interface IntrospectedForeignKey {
@@ -85,6 +108,11 @@ export interface ExecOpts {
   session?: unknown;
   // Executor emits query/error events when present.
   emitter?: import('../events').ForgeEmitter;
+  // Schema-level semantic op passed through by the wrapper for soft-delete
+  // and restore. When set, executors copy it onto the QueryEvent's
+  // `semanticOp` field so listeners can distinguish a softDelete from a
+  // regular update at the event level. Optional everywhere else.
+  semanticOp?: 'softDelete' | 'softDeleteMany' | 'restore' | 'restoreMany';
 }
 
 export interface Adapter {
