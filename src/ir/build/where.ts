@@ -198,30 +198,17 @@ export function buildWhereTree(
         });
         continue;
       }
-      // Geo polygon containment — { col: { withinPolygon: [{lng,lat}, …] } }.
-      if ('withinPolygon' in value && Array.isArray(value.withinPolygon)) {
-        const ring = value.withinPolygon as Array<{ lng?: number; lat?: number }>;
-        if (ring.length < 3) {
-          throw new Error(
-            `[forge] where.${key}.withinPolygon needs at least 3 vertices.`,
-          );
-        }
-        for (const v of ring) {
-          if (typeof v?.lng !== 'number' || typeof v?.lat !== 'number') {
-            throw new Error(
-              `[forge] where.${key}.withinPolygon vertex requires numeric { lng, lat }.`,
-            );
-          }
-        }
-        // Auto-close: the spec wants the first vertex repeated at the end.
-        const closed = ring[0].lng === ring[ring.length - 1].lng && ring[0].lat === ring[ring.length - 1].lat
-          ? ring
-          : [...ring, ring[0]];
+      // Geo polygon containment — accepts single-ring, Polygon-with-holes,
+      // MultiPolygon, or GeometryCollection. Normalises to a uniform
+      // `{ multiPolygon: Polygon[] }` shape where each Polygon is
+      // `Ring[]` (outer ring + 0..N holes) and each Ring is `Point[]`.
+      if ('withinPolygon' in value && value.withinPolygon != null) {
+        const normalised = normaliseWithinPolygon(key, value.withinPolygon);
         children.push({
           kind: 'leaf',
           field: key,
           op: 'withinPolygon',
-          value: { polygon: closed.map((v) => ({ lng: v.lng!, lat: v.lat! })) },
+          value: { multiPolygon: normalised },
         });
         continue;
       }
@@ -267,6 +254,75 @@ function notUndef<T>(v: T | undefined): v is T {
 
 function isDate(v: any): boolean {
   return v instanceof Date;
+}
+
+// Normalise every accepted withinPolygon input shape to a uniform
+// `Polygon[]` (i.e. MultiPolygon-shaped: array of polygons; each polygon is
+// outer-ring + 0..N holes; each ring is a closed Array<{lng,lat}>).
+//
+//   • Array<{lng,lat}>                            single ring → 1 polygon, 1 ring
+//   • { type: 'Polygon', rings: Ring[] }          1 polygon with holes
+//   • { type: 'MultiPolygon', polygons: ... }     N polygons
+//   • { type: 'GeometryCollection', geometries }  flatten Polygon / MultiPolygon
+//
+// Throws with a clear message on any shape we can't reach.
+type Point = { lng: number; lat: number };
+type Ring = Point[];
+type Polygon = Ring[];
+
+function normaliseWithinPolygon(key: string, raw: unknown): Polygon[] {
+  // Array form — single ring.
+  if (Array.isArray(raw)) {
+    return [[validateAndCloseRing(key, raw)]];
+  }
+  if (!raw || typeof raw !== 'object') {
+    throw new Error(`[forge] where.${key}.withinPolygon must be a ring, Polygon, MultiPolygon, or GeometryCollection.`);
+  }
+  const obj = raw as { type?: string; rings?: unknown[]; polygons?: unknown[]; geometries?: unknown[] };
+  if (obj.type === 'Polygon') {
+    if (!Array.isArray(obj.rings) || obj.rings.length === 0) {
+      throw new Error(`[forge] where.${key}.withinPolygon: Polygon needs at least one ring in 'rings'.`);
+    }
+    return [obj.rings.map((r) => validateAndCloseRing(key, r))];
+  }
+  if (obj.type === 'MultiPolygon') {
+    if (!Array.isArray(obj.polygons) || obj.polygons.length === 0) {
+      throw new Error(`[forge] where.${key}.withinPolygon: MultiPolygon needs at least one polygon in 'polygons'.`);
+    }
+    return obj.polygons.map((p) => {
+      if (!Array.isArray(p) || p.length === 0) {
+        throw new Error(`[forge] where.${key}.withinPolygon: each MultiPolygon entry needs at least one ring.`);
+      }
+      return p.map((r) => validateAndCloseRing(key, r));
+    });
+  }
+  if (obj.type === 'GeometryCollection') {
+    if (!Array.isArray(obj.geometries) || obj.geometries.length === 0) {
+      throw new Error(`[forge] where.${key}.withinPolygon: GeometryCollection needs entries in 'geometries'.`);
+    }
+    const out: Polygon[] = [];
+    for (const g of obj.geometries) {
+      out.push(...normaliseWithinPolygon(key, g));
+    }
+    return out;
+  }
+  throw new Error(`[forge] where.${key}.withinPolygon: unsupported type '${String(obj.type)}'.`);
+}
+
+function validateAndCloseRing(key: string, ring: unknown): Ring {
+  if (!Array.isArray(ring) || ring.length < 3) {
+    throw new Error(`[forge] where.${key}.withinPolygon: each ring needs at least 3 vertices.`);
+  }
+  const pts: Point[] = [];
+  for (const v of ring as Array<{ lng?: number; lat?: number }>) {
+    if (typeof v?.lng !== 'number' || typeof v?.lat !== 'number') {
+      throw new Error(`[forge] where.${key}.withinPolygon vertex requires numeric { lng, lat }.`);
+    }
+    pts.push({ lng: v.lng, lat: v.lat });
+  }
+  const first = pts[0], last = pts[pts.length - 1];
+  if (first.lng !== last.lng || first.lat !== last.lat) pts.push({ lng: first.lng, lat: first.lat });
+  return pts;
 }
 
 // Parse a dotted/indexed JSON path: 'profile.address[0].city' →

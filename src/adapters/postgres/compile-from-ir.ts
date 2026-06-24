@@ -13,6 +13,7 @@ import type { SQLArtifact } from '../../compile';
 import type { ModelDef } from '../../schema/types';
 import { schema } from '../../schema';
 import { PostgresDialect, type Dialect } from './dialect';
+import { multiPolygonBbox } from '../shared/wkt';
 
 // Hard rules:
 //   • Never interpolate values into the SQL string — always via params.
@@ -193,17 +194,25 @@ function compileLeaf(ctx: CompileCtx, leaf: Extract<WhereTree, { kind: 'leaf' }>
       if (!fld || fld.kind !== 'geoPoint') {
         throw new Error(`[forge] where.${leaf.field}.withinPolygon requires a geoPoint field.`);
       }
-      const polygon = (leaf.value as { polygon: Array<{ lng: number; lat: number }> }).polygon;
+      // IR-normalised shape: { multiPolygon: Polygon[] }. A simple ring still
+      // arrives here as a single-polygon-single-ring [[ring]]. Older callers
+      // that hand-wrote leaf.value.polygon (private API) still resolve via
+      // the fallback branch below.
+      const v = leaf.value as { multiPolygon?: Array<Array<Array<{ lng: number; lat: number }>>>; polygon?: Array<{ lng: number; lat: number }> };
+      const multiPolygon = v.multiPolygon ?? (v.polygon ? [[v.polygon]] : []);
+      if (multiPolygon.length === 0) {
+        throw new Error(`[forge] where.${leaf.field}.withinPolygon: empty polygon set.`);
+      }
       if (fld.geo?.fallback) {
         // Fallback storage is JSON {lng, lat}. Emit a bbox prefilter from
-        // the polygon's axis-aligned envelope; the exact point-in-polygon
+        // the union envelope of every ring; the exact point-in-multi-polygon
         // refinement happens in app via ray-casting (see haversine.ts).
-        return polygonBboxPrefilter(ctx, leaf.field, polygon);
+        return polygonBboxPrefilter(ctx, leaf.field, multiPolygon);
       }
       if (!ctx.d.geoWithinPolygonClause) {
         throw new Error(`[forge] dialect '${ctx.d.name}' does not implement geoWithinPolygonClause`);
       }
-      return ctx.d.geoWithinPolygonClause(col, fld, polygon, ctx.params);
+      return ctx.d.geoWithinPolygonClause(col, fld, multiPolygon, ctx.params);
     }
   }
 }
@@ -240,12 +249,9 @@ function coerceJsonOperand(v: unknown): unknown {
 function polygonBboxPrefilter(
   ctx: CompileCtx,
   field: string,
-  polygon: Array<{ lng: number; lat: number }>,
+  multiPolygon: Array<Array<Array<{ lng: number; lat: number }>>>,
 ): string {
-  const lngs = polygon.map((v) => v.lng);
-  const lats = polygon.map((v) => v.lat);
-  const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
-  const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+  const { minLng, maxLng, minLat, maxLat } = multiPolygonBbox(multiPolygon);
   const ph = (v: unknown) => ctx.d.placeholder(ctx.params, v);
   const lngCol = `(${ctx.table}.${ctx.d.quoteIdent(field)}->>'lng')::float8`;
   const latCol = `(${ctx.table}.${ctx.d.quoteIdent(field)}->>'lat')::float8`;

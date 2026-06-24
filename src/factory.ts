@@ -108,6 +108,16 @@ export type ForgeDb<S extends SchemaShape = SchemaMap> = Collections<S> & {
   $migrate(opts?: { logger?: (line: string) => void }): Promise<{
     applied: string[]; skipped: string[]; failures: { name: string; error: string }[];
   }>;
+  // Runtime capability probe — the browser/wasm replacement for `forge doctor`.
+  // On sqlite adapters (including the wasm one) returns the rich
+  // BrowserDoctorReport (environment + sqlite + capabilities + notes); on
+  // other adapters returns the plain adapter DoctorReport. Useful in-app for
+  // rendering "what works on this device" panels.
+  $doctor(): Promise<import('./adapters/types').DoctorReport | import('./wasm/browser-doctor').BrowserDoctorReport>;
+  // Drift detection — the browser/wasm replacement for `forge diff`. Reads
+  // the current DB shape via adapter.introspect(), diffs against the active
+  // schema, returns a structured DriftReport. Works on every adapter.
+  $diff(opts?: { ignore?: import('./scripts/diff-core').IgnoreSpec }): Promise<import('./scripts/diff-core').DriftReport>;
   // Query lifecycle pub/sub. Subscribe before queries run; the returned
   // function unsubscribes. Listener errors never break queries.
   $on: {
@@ -230,6 +240,8 @@ function makeDb(adapter: Adapter, _url: string, runtime: { strict: boolean } = {
       if (key === '$executeRaw') return makeRawCaller((frag) => adapter.$executeRaw(frag));
       if (key === '$disconnect') return () => adapter.close();
       if (key === '$migrate') return $migrate;
+      if (key === '$doctor') return $doctor;
+      if (key === '$diff') return $diff;
       if (key === '$on') return (event: any, cb: any) => adapter.emitter.on(event, cb);
       if (key === '$off') return (event: any, cb: any) => adapter.emitter.off(event, cb);
       const model = (schema as any)[key] as ModelDef<any> | undefined;
@@ -266,6 +278,31 @@ function makeDb(adapter: Adapter, _url: string, runtime: { strict: boolean } = {
     // better-sqlite3 driver.
     const driver = (adapter as unknown as { db: import('./adapters/sqlite/driver').SqliteDriver }).db;
     return runMigrate(driver, opts);
+  }
+
+  // Runtime capability probe. sqlite adapter routes through the rich
+  // browserDoctor (environment + extension presence + remediation notes);
+  // every other adapter falls back to its own adapter.doctor() report.
+  async function $doctor() {
+    if (adapter.kind === 'sqlite') {
+      const { browserDoctor } = await import('./wasm/browser-doctor');
+      const driver = (adapter as unknown as { db: import('./adapters/sqlite/driver').SqliteDriver }).db;
+      return browserDoctor(driver);
+    }
+    return adapter.doctor();
+  }
+
+  // Runtime drift detection — reads live DB shape, diffs against the active
+  // schema. Mirrors the `forge diff` CLI; works on every adapter.
+  async function $diff(opts?: { ignore?: import('./scripts/diff-core').IgnoreSpec }) {
+    const { diffIntrospection } = await import('./scripts/diff-core');
+    if (typeof adapter.introspect !== 'function') {
+      throw new Error(
+        `[forge] $diff(): adapter '${adapter.kind}' does not support introspection.`,
+      );
+    }
+    const introspection = await adapter.introspect();
+    return diffIntrospection(schema as Record<string, any>, introspection, opts?.ignore ?? []);
   }
 
   // Mongo-only — it's the BSON command channel. SQL consumers reach for

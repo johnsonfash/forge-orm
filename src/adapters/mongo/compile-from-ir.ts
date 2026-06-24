@@ -14,6 +14,7 @@ import type { MongoArtifact } from '../../compile';
 import { schema } from '../../schema';
 import type { ModelDef } from '../../schema/types';
 import { appKeyToDbKey, coerceFieldValue, getFieldDef } from './coerce';
+import { toGeoJson } from '../shared/wkt';
 
 // Mongo IR consumer — takes adapter-agnostic IR nodes and emits the exact
 // args object you'd pass to the mongodb driver. The IR builders carry values
@@ -149,15 +150,13 @@ function compileLeaf(
       return out;
     }
     case 'withinPolygon': {
-      const polygon = (leaf.value as { polygon: Array<{ lng: number; lat: number }> }).polygon;
+      // IR-normalised: { multiPolygon: Polygon[] }. Legacy { polygon } also
+      // accepted for forward-compat with hand-built IR nodes.
+      const v = leaf.value as { multiPolygon?: Array<Array<Array<{ lng: number; lat: number }>>>; polygon?: Array<{ lng: number; lat: number }> };
+      const multiPolygon = v.multiPolygon ?? (v.polygon ? [[v.polygon]] : []);
       out[dbKey] = {
         $geoWithin: {
-          $geometry: {
-            type: 'Polygon',
-            // GeoJSON Polygon coordinates: [ outer-ring [, inner-rings…] ].
-            // Each ring is [lng, lat] pairs, closed.
-            coordinates: [polygon.map((v) => [v.lng, v.lat])],
-          },
+          $geometry: toGeoJson(multiPolygon),
         },
       };
       return out;

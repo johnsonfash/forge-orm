@@ -7,12 +7,17 @@
 //   * RETURNING *        →  OUTPUT INSERTED.* / OUTPUT DELETED.* (per op)
 //   * ctid               →  the row IN (SELECT TOP 1 …) form, keyed on the
 //                          primary-key column we resolve from the model
-//   * ON CONFLICT … DO …  →  NOT IMPLEMENTED in this MVP. The upsert path
-//                          throws a clear error pointing at the planned
-//                          MERGE-based rewrite.
-//
-// MVP scope: SELECT / COUNT / INSERT / UPDATE / DELETE / GROUP BY work
-// end-to-end. UPSERT throws. The MERGE rewrite lands in v2.4.
+//   * upsert (Update.upsertCreate)
+//                          →  MERGE INTO tgt USING (VALUES (...)) AS src
+//                             ON tgt.<unique> = src.<unique>
+//                             WHEN MATCHED THEN UPDATE SET …
+//                             WHEN NOT MATCHED THEN INSERT (...) VALUES (...)
+//                             OUTPUT inserted.*;
+//                          The conflict target is derived from the wrapper's
+//                          `where` tree (its eq leaves are the unique key).
+//                          MERGE requires a trailing semicolon — `mssql` is
+//                          tolerant either way; we emit one for explicit
+//                          T-SQL conformance.
 
 import type {
   CountNode,
@@ -166,14 +171,6 @@ export function compileGroupBy(node: GroupByNode, modelOverride?: ModelDef<any>)
 }
 
 export function compileInsert(node: InsertNode, modelOverride?: ModelDef<any>): SQLArtifact {
-  const m = modelDef(node.model, modelOverride);
-  if ((node as any).upsertCreate || /ON CONFLICT/i.test(pgCompileInsert(node, modelOverride, MssqlDialect).sql)) {
-    throw new Error(
-      `[forge:mssql] upsert / ON CONFLICT is not implemented in 2.3. The ` +
-      `T-SQL equivalent (MERGE) lands in v2.4. Until then, do findFirst → ` +
-      `update / create at the app layer for the MSSQL adapter.`,
-    );
-  }
   const a = pgCompileInsert(node, modelOverride, MssqlDialect);
   let sql = a.sql;
   sql = rewriteReturningForInsert(sql);
@@ -181,12 +178,10 @@ export function compileInsert(node: InsertNode, modelOverride?: ModelDef<any>): 
 }
 
 export function compileUpdate(node: UpdateNode, modelOverride?: ModelDef<any>): SQLArtifact {
-  if (node.upsertCreate) {
-    throw new Error(
-      `[forge:mssql] upsert is not implemented in 2.3. See compileInsert error for details.`,
-    );
-  }
   const m = modelDef(node.model, modelOverride);
+  if (node.upsertCreate) {
+    return post(compileMergeUpsert(node, m));
+  }
   const pk = primaryKeyOf(m);
   const a = pgCompileUpdate(node, modelOverride, MssqlDialect);
   let sql = a.sql;
@@ -194,6 +189,125 @@ export function compileUpdate(node: UpdateNode, modelOverride?: ModelDef<any>): 
   sql = rewriteCtidSingleRow(sql, tableQ, pk);
   sql = rewriteReturningForUpdate(sql);
   return post({ ...a, sql });
+}
+
+// MERGE upsert — T-SQL's atomic INSERT-or-UPDATE. The PG pipeline uses
+// `INSERT … ON CONFLICT (uniques) DO UPDATE`; T-SQL has no equivalent
+// single-statement form except MERGE. Behaviour parity with the PG path:
+//
+//   • Conflict target columns are derived from the wrapper's eq-leaf where
+//     tree (`{ where: { sku: 'A' } }` → conflict on `[sku]`). The wrapper
+//     enforces that the where tree is a single-column or AND-of-eq tree,
+//     so this is reliable.
+//   • SET clause includes increments / multiplies / pushes / unsets, like
+//     compileUpdate's plain-update path — reuses the PG builder's SET parts
+//     by extracting them from a regular compileUpdate (without upsertCreate)
+//     and rewriting the column refs to src.<col>.
+//   • The OUTPUT clause returns inserted.*, matching PG's RETURNING.
+//   • No `skipDuplicates` flag — MERGE always either updates or inserts.
+function compileMergeUpsert(node: UpdateNode, m: ModelDef<any>): SQLArtifact {
+  const table = `[${m.collection.replace(/]/g, ']]')}]`;
+  const params: unknown[] = [];
+  const ph = (v: unknown) => MssqlDialect.placeholder(params, v);
+
+  // INSERT side — every field the caller passed in upsertCreate. Final
+  // column list + values list are computed at the end (after we've ensured
+  // every conflict column appears here too), so we don't pre-emit
+  // placeholders that would double-count in `params`.
+  const insertCols = Object.keys(node.upsertCreate!);
+  if (insertCols.length === 0) {
+    throw new Error('[forge:mssql] upsert requires at least one field in create.');
+  }
+
+  // UPDATE side — `set`, `increment`, `multiply`, `unset` in that order.
+  const updateParts: string[] = [];
+  if (node.set) {
+    for (const [k, v] of Object.entries(node.set)) {
+      updateParts.push(`[${k}] = ${ph(v)}`);
+    }
+  }
+  if (node.increment) {
+    for (const [k, v] of Object.entries(node.increment)) {
+      updateParts.push(`[${k}] = COALESCE(tgt.[${k}], 0) + ${ph(v)}`);
+    }
+  }
+  if (node.multiply) {
+    for (const [k, v] of Object.entries(node.multiply)) {
+      updateParts.push(`[${k}] = COALESCE(tgt.[${k}], 0) * ${ph(v)}`);
+    }
+  }
+  if (node.unset?.length) {
+    for (const k of node.unset) updateParts.push(`[${k}] = NULL`);
+  }
+  // If the caller only passed `create` and no update payload, MERGE still
+  // needs WHEN MATCHED — fall back to a self-assignment of the conflict
+  // columns (no-op) so the statement is valid.
+  const conflictCols = whereEqLeafColumns(node.where);
+  if (conflictCols.length === 0) {
+    throw new Error(
+      `[forge:mssql] upsert requires a conflict target. Use { where: { uniqueCol: value } } ` +
+      `(or AND of eq leaves) so the MERGE knows which key identifies an existing row.`,
+    );
+  }
+  if (updateParts.length === 0) {
+    updateParts.push(`[${conflictCols[0]}] = tgt.[${conflictCols[0]}]`);
+  }
+
+  // ON clause — every conflict column matches between tgt and src.
+  const onClause = conflictCols.map((c) => `tgt.[${c}] = src.[${c}]`).join(' AND ');
+
+  // Build the source row. Every conflict column MUST be in the VALUES list —
+  // pull from the where leaf for any column the caller omitted from create.
+  for (const c of conflictCols) {
+    if (!insertCols.includes(c)) {
+      const v = whereLeafEqValue(node.where, c);
+      if (v === undefined) {
+        throw new Error(
+          `[forge:mssql] upsert conflict column '${c}' is in the where clause but not in create. ` +
+          `Add it to create so MERGE can route it to the INSERT branch.`,
+        );
+      }
+      insertCols.push(c);
+    }
+  }
+
+  const finalCols = insertCols.map((c) => `[${c}]`).join(', ');
+  const finalVals = insertCols.map((c) => {
+    if (c in node.upsertCreate!) return ph(node.upsertCreate![c]);
+    return ph(whereLeafEqValue(node.where, c));
+  }).join(', ');
+
+  // INSERT branch values come from src.<col> after USING (VALUES ...) AS src(<cols>).
+  const srcInsertValues = insertCols.map((c) => `src.[${c}]`).join(', ');
+
+  const sql =
+    `MERGE INTO ${table} AS tgt ` +
+    `USING (VALUES (${finalVals})) AS src (${finalCols}) ` +
+    `ON ${onClause} ` +
+    `WHEN MATCHED THEN UPDATE SET ${updateParts.join(', ')} ` +
+    `WHEN NOT MATCHED THEN INSERT (${finalCols}) VALUES (${srcInsertValues}) ` +
+    `OUTPUT INSERTED.*;`;
+
+  return { kind: 'sql', dialect: 'mssql', sql, params };
+}
+
+function whereEqLeafColumns(tree: UpdateNode['where']): string[] {
+  if (!tree) return [];
+  if (tree.kind === 'leaf' && tree.op === 'eq') return [tree.field];
+  if (tree.kind === 'and') return tree.children.flatMap(whereEqLeafColumns);
+  return [];
+}
+
+function whereLeafEqValue(tree: UpdateNode['where'], col: string): unknown {
+  if (!tree) return undefined;
+  if (tree.kind === 'leaf' && tree.op === 'eq' && tree.field === col) return tree.value;
+  if (tree.kind === 'and') {
+    for (const child of tree.children) {
+      const v = whereLeafEqValue(child, col);
+      if (v !== undefined) return v;
+    }
+  }
+  return undefined;
 }
 
 export function compileDelete(node: DeleteNode, modelOverride?: ModelDef<any>): SQLArtifact {

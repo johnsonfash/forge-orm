@@ -51,12 +51,22 @@ export interface FieldDef {
   /**
    * Geo-field options (only meaningful when `kind === 'geoPoint'`):
    *   srid:     Spatial Reference System ID. Default 4326 (WGS84 / GPS).
-   *   fallback: When true, the column is stored as JSON ({lng, lat}) when
-   *             the dialect's spatial extension is not installed. Distance
-   *             queries fall back to a B-tree-prefiltered Haversine. Slow
-   *             for large tables; works without the extension.
+   *             Non-WGS84 SRIDs (e.g. 3857 Web Mercator, 27700 OSGB) are
+   *             stored as declared; the JS-side shape stays { lng, lat[, alt] }
+   *             but the user provides coordinates in the TARGET SRID's units.
+   *             No auto-reprojection is done at the IR layer — apps that
+   *             need 4326 ↔ target should run `proj4` at the call site.
+   *             Mongo only supports 4326 (2dsphere); non-WGS84 SRIDs warn at
+   *             push and run through fallback mode if `fallback: true`.
+   *   fallback: When true, the column is stored as JSON ({lng, lat[, alt]})
+   *             when the dialect's spatial extension is not installed.
+   *             Distance queries fall back to a B-tree-prefiltered Haversine.
+   *             Slow for large tables; works without the extension.
+   *   dims:     2 (default) or 3. dims=3 opts into XYZ storage — point shape
+   *             becomes { lng, lat, alt }. Distance ops still 2D-on-sphere;
+   *             altitude is preserved round-trip but not part of `near`.
    */
-  geo?: { srid?: number; fallback?: boolean };
+  geo?: { srid?: number; fallback?: boolean; dims?: 2 | 3 };
   /**
    * Vector-field options (only meaningful when `kind === 'vector'`):
    *   dims:    Vector dimensionality (must match the embedding model output).

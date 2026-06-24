@@ -4,6 +4,181 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.5.0 — MSSQL `MERGE` upsert, Mongo cross-field `nearTo`, browser `$doctor`/`$diff`, MultiPolygon + GeometryCollection, 3D / Z coordinates, non-WGS84 SRIDs
+
+**Feature release.** Closes the entire "Coming soon" list from 2.4, plus a
+few items previously marked TBD. Drop-in upgrade — no breaking changes; the
+geo IR's `withinPolygon` value shape grew a `multiPolygon` field but the
+legacy `polygon` shape is still accepted by every consumer.
+
+### MSSQL upsert via `MERGE`
+
+`compileUpdate` now emits a real T-SQL `MERGE` when `upsertCreate` is set:
+
+```sql
+MERGE INTO [items] AS tgt
+USING (VALUES (@p1, @p2, @p3)) AS src ([sku], [name], [qty])
+ON tgt.[sku] = src.[sku]
+WHEN MATCHED THEN UPDATE SET [qty] = @p4
+WHEN NOT MATCHED THEN INSERT ([sku], [name], [qty])
+VALUES (src.[sku], src.[name], src.[qty])
+OUTPUT INSERTED.*;
+```
+
+- Conflict target derived from the wrapper's eq-leaf where tree (same
+  rule as the PG path: single-column or AND-of-eq).
+- Conflict columns missing from `upsertCreate` are pulled from the where
+  leaf so the INSERT branch is always complete.
+- Supports `set`, `increment` (`COALESCE(tgt.[col], 0) + …`), `multiply`,
+  and `unset` (`= NULL`) on the UPDATE branch.
+- Returns the row via `OUTPUT INSERTED.*`, matching PG's `RETURNING`.
+
+The previous 2.3 / 2.4 NotImplemented throw is gone. Atomic upsert works
+on every dialect now.
+
+### Mongo `near` + `nearTo` cross-field
+
+A `near` filter on field A combined with a `nearTo` orderBy on field B
+used to drop A (the `$geoNear` stage's `query` clause can't contain
+`$near`). The fix: walk the artifact filter once, and for every cross-
+field `$near` rewrite to:
+
+```js
+{ A: { $geoWithin: { $centerSphere: [[lng, lat], meters / 6_371_008.8] } } }
+```
+
+This is semantically equivalent (`$centerSphere` uses radians on the
+sphere) and IS valid inside a `$geoNear.query` clause, so both filter
+and orderBy fire in the same aggregation. Same-field `$near` still
+collapses to `maxDistance` on the stage as before. Handles `$and` / `$or`
+/ `$nor` walks recursively.
+
+### Browser `$doctor()` and `$diff()`
+
+The runtime equivalents of `forge doctor` and `forge diff`:
+
+```ts
+const doctor = await db.$doctor();   // BrowserDoctorReport on sqlite, DoctorReport elsewhere
+const drift  = await db.$diff();     // DriftReport for every adapter
+```
+
+On sqlite adapters (including the wasm one), `$doctor()` routes through
+the same `browserDoctor()` introduced in 2.4 — environment probe (OPFS,
+SAB, persistent storage) + sqlite probe (FTS5, R-Tree, sqlite-vec) + a
+forge-feature → status table. On other adapters it returns the existing
+`adapter.doctor()` shape.
+
+`$diff()` reads `adapter.introspect()` and runs the existing
+`diffIntrospection` engine, so the same drift detection that backs the
+CLI now works in-browser. Accepts the same `ignore` spec (string or
+RegExp patterns) the CLI takes via `--ignore`.
+
+### MultiPolygon + GeometryCollection
+
+`where: { col: { withinPolygon: … } }` now accepts:
+
+```ts
+// 1. Single ring (legacy — unchanged):
+{ withinPolygon: [{lng, lat}, {lng, lat}, …] }
+
+// 2. Polygon with holes:
+{ withinPolygon: { type: 'Polygon', rings: [outerRing, hole1, hole2, …] } }
+
+// 3. MultiPolygon (multiple disjoint shapes):
+{ withinPolygon: { type: 'MultiPolygon', polygons: [[outer1, …holes], …] } }
+
+// 4. GeometryCollection (flattened to its constituent polygons):
+{ withinPolygon: { type: 'GeometryCollection', geometries: [Polygon | MultiPolygon, …] } }
+```
+
+The IR normalises all four to a uniform `multiPolygon: Polygon[]` shape
+(each Polygon = `Ring[]`, each Ring = closed `Array<{lng,lat}>`). Every
+dialect compiler consumes the normalised shape:
+
+- New `src/adapters/shared/wkt.ts` — `toGeoWKT(mp, axis)` emits `POLYGON((…))`
+  for a single ring or `MULTIPOLYGON(((…)))` for everything else; handles
+  the MySQL lat-first axis-order quirk via the `axis` param.
+- `toGeoJson(mp)` emits GeoJSON Polygon / MultiPolygon for the Mongo path.
+- `multiPolygonBbox(mp)` computes the union envelope for the SQL fallback
+  prefilter.
+
+Fallback ray-cast (`pointInMultiPolygon`) honours holes via the even-odd
+rule — a point inside an outer ring AND inside one of its hole rings is
+NOT considered inside the polygon. MultiPolygons short-circuit as soon as
+any constituent polygon contains the point.
+
+### 3D / Z coordinates
+
+`f.geoPoint({ dims: 3 })` opts into XYZ storage. The TS-side shape becomes
+`{ lng, lat, alt }` and the per-dialect emit:
+
+| Dialect | dims = 2 (default) | dims = 3 |
+|---|---|---|
+| PG | `geography(Point, srid)` | `geography(PointZ, srid)` — PostGIS auto-promotes from `POINT Z(x y z)` WKT |
+| MySQL | `POINT NOT NULL SRID srid` | Same column type; altitude stored alongside in a JSON field per app (MySQL 8 has no native 3D) |
+| SQLite | `GeomFromText('POINT(x y)', srid)` | `GeomFromText('POINT Z(x y z)', srid)` — SpatiaLite |
+| DuckDB | `ST_Point(x, y)` | `ST_Point3D(x, y, z)` — spatial extension's 3D type |
+| MSSQL | `STGeomFromText('POINT(x y)', srid)` | `STGeomFromText('POINT(x y z)', srid)` — geography accepts Z |
+| Mongo | GeoJSON `coordinates: [lng, lat]` | GeoJSON `coordinates: [lng, lat, alt]` — 3-element form |
+
+Distance semantics: `near` / `nearTo` still compute great-circle ground
+distance (2D-on-sphere). Altitude round-trips on read/write but doesn't
+participate in distance — see "3D distance mode" under "Coming soon".
+
+### Non-WGS84 SRIDs
+
+`f.geoPoint({ srid: 3857 })` (Web Mercator, OSGB 27700, NAD83, etc.) is
+honoured at DDL time across every dialect. The PG path routes non-4326
+SRIDs to `geometry(Point, srid)` instead of `geography(Point, srid)`
+(geography is 4326-only). MySQL / SQLite / DuckDB / MSSQL accept the
+declared SRID directly. Mongo only supports 4326 (2dsphere is WGS84-only)
+— non-4326 fields run through fallback mode if `fallback: true`.
+
+User responsibilities:
+
+- Coordinates passed to `create` / `update` / `near` / `withinPolygon`
+  must be in the **target SRID's units** — no auto-transformation at
+  the IR layer.
+- `proj4` (or per-dialect `ST_Transform`) at the call site is the
+  recommended way to convert from 4326 to your storage SRID.
+- A built-in `proj4`-backed transform is on the roadmap.
+
+### Other changes
+
+- New `src/adapters/shared/wkt.ts` — shared `toGeoWKT` / `toGeoJson` /
+  `multiPolygonBbox` so every dialect emits the same WKT/GeoJSON form.
+- `pointInPolygon` renamed to `pointInRing` internally + new
+  `pointInMultiPolygon` honouring holes via even-odd. Legacy export
+  alias preserved.
+- `FallbackGeoOps.withinPolygon` shape extended to `multiPolygon` (the
+  uniform internal form); old `polygon` shape still recognised for any
+  caller building leaves by hand.
+- 20 new jest unit tests covering MSSQL MERGE, MultiPolygon IR + WKT,
+  point-in-multi-polygon with holes, 3D field shape + DDL, non-4326
+  SRID DDL routing. Total: 465 tests, 35 suites, all green.
+
+### Compatibility
+
+- **Drop-in upgrade** for 2.4.x consumers. No schema or API changes for
+  any server-side code path. The geo IR's `withinPolygon` value gained
+  a `multiPolygon` field; the legacy `polygon` field is still accepted
+  by every consumer.
+- The MSSQL `MERGE` is a behaviour change for the upsert path (was a
+  thrown error in 2.3 / 2.4) — apps that had a `try/catch` workaround
+  can remove it.
+
+### Known limitations carried into 2.6
+
+- 3D distance mode — altitude is preserved but doesn't participate in
+  `near` / `nearTo`. A 3D Euclidean or ground+vertical distance mode
+  is the open question (per-dialect implementation choice).
+- Auto SRID reprojection — declared SRID is honoured but coordinates
+  are user-provided in target units. A `proj4`-backed transform at the
+  IR boundary is on the roadmap.
+- Pre-built `@forge-orm/sqlite-wasm-pro` artifact — the custom build is
+  one shell command (`scripts/wasm-pro/build.sh`) today; the pre-built
+  npm artifact is the next gap.
+
 ## 2.4.0 — Browser adapter: sqlite-wasm + OPFS, runtime `$migrate`, Vite/Next/Webpack plugins, browserDoctor, custom-build path for vec0 + R-Tree
 
 **Feature release.** Adds a browser dialect: real SQLite (via

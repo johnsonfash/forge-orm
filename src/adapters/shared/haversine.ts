@@ -18,28 +18,64 @@ const EARTH_R_METERS = 6_371_008.8;
 export interface FallbackGeoOps {
   near: { field: string; point: { lng: number; lat: number }; withinMeters?: number } | null;
   nearTo: { field: string; point: { lng: number; lat: number } } | null;
-  withinPolygon: { field: string; polygon: Array<{ lng: number; lat: number }> } | null;
+  withinPolygon: { field: string; multiPolygon: Array<Array<Array<{ lng: number; lat: number }>>> } | null;
 }
 
 /**
- * Point-in-polygon test via ray-casting. Polygon is a closed ring of
- * { lng, lat } vertices (first = last). Used in fallback mode to refine
- * the SQL-emitted bbox prefilter to the exact polygon shape.
+ * Point-in-ring test via ray-casting. Ring is a closed Array<{lng,lat}>
+ * (first vertex equal to last). Used as the primitive for
+ * pointInMultiPolygon below.
  */
-export function pointInPolygon(
+export function pointInRing(
   point: { lng: number; lat: number },
-  polygon: Array<{ lng: number; lat: number }>,
+  ring: Array<{ lng: number; lat: number }>,
 ): boolean {
   let inside = false;
   const x = point.lng, y = point.lat;
-  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-    const xi = polygon[i].lng, yi = polygon[i].lat;
-    const xj = polygon[j].lng, yj = polygon[j].lat;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i].lng, yi = ring[i].lat;
+    const xj = ring[j].lng, yj = ring[j].lat;
     const intersects = ((yi > y) !== (yj > y))
       && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
     if (intersects) inside = !inside;
   }
   return inside;
+}
+
+/**
+ * Point-in-(multi-)polygon test honouring polygons with holes.
+ *
+ * A point is "inside" the MultiPolygon when:
+ *   • It lies inside at least one outer ring, AND
+ *   • It does NOT lie inside any of that polygon's hole rings.
+ *
+ * Used in fallback mode to refine the SQL-emitted bbox prefilter to the
+ * exact (possibly multi-shape, possibly punched) polygon set.
+ */
+export function pointInMultiPolygon(
+  point: { lng: number; lat: number },
+  multiPolygon: Array<Array<Array<{ lng: number; lat: number }>>>,
+): boolean {
+  for (const polygon of multiPolygon) {
+    if (polygon.length === 0) continue;
+    const inOuter = pointInRing(point, polygon[0]);
+    if (!inOuter) continue;
+    let inHole = false;
+    for (let i = 1; i < polygon.length; i++) {
+      if (pointInRing(point, polygon[i])) { inHole = true; break; }
+    }
+    if (!inHole) return true;
+  }
+  return false;
+}
+
+/** @deprecated — kept for forward-compat with any caller holding a ring
+ *  directly. Routes to pointInRing. */
+export function pointInPolygon(
+  point: { lng: number; lat: number },
+  polygon: Array<{ lng: number; lat: number }>,
+): boolean {
+  return pointInRing(point, polygon);
 }
 
 /**
@@ -65,7 +101,9 @@ export function extractFallbackGeoOps(
       const v = (leaf as any).value;
       near = { field: (leaf as any).field, point: { lng: v.lng, lat: v.lat }, withinMeters: v.withinMeters };
     } else if ((leaf as any).op === 'withinPolygon') {
-      withinPolygon = { field: (leaf as any).field, polygon: (leaf as any).value.polygon };
+      const v = (leaf as any).value;
+      const mp = v.multiPolygon ?? (v.polygon ? [[v.polygon]] : []);
+      withinPolygon = { field: (leaf as any).field, multiPolygon: mp };
     }
   });
   const nt = node.orderBy?.find((e) => e.nearTo);
@@ -112,7 +150,7 @@ interface FallbackOp {
 
 interface PolygonOp {
   field: string;
-  polygon: Array<{ lng: number; lat: number }>;
+  multiPolygon: Array<Array<Array<{ lng: number; lat: number }>>>;
 }
 
 /**
@@ -146,8 +184,8 @@ export function applyHaversinePostFilter(
       if (!filter && !polygon) out.push(row);
       continue;
     }
-    // Polygon refinement (exact point-in-polygon).
-    if (polygon && !pointInPolygon(pt, polygon.polygon)) continue;
+    // Polygon refinement (exact point-in-multi-polygon, honours holes).
+    if (polygon && !pointInMultiPolygon(pt, polygon.multiPolygon)) continue;
     // Distance filter / annotation.
     if (ref) {
       const d = haversineMeters(pt, ref.point);
