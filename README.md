@@ -127,6 +127,19 @@ you usually have to drop to raw SQL for:
 * [Limitations and honest notes](#limitations-and-honest-notes)
 * [Contributing](#contributing)
 
+### Deep-dive companions (`docs/`)
+
+The README is the surface reference. For more depth — extra examples, edge cases, integration patterns — each major surface has its own companion doc.
+
+| Topic | File |
+|---|---|
+| Backend / server integration (hyper-express, Fastify, NestJS, Bun+Hono, pools, tx, BullMQ, multi-tenant, replicas, OTel, health checks, CI) | **[docs/backend.md](docs/backend.md)** |
+| Browser frameworks (React, Next.js, Vue, Nuxt, SvelteKit, Angular, SolidStart, Astro, Remix, React Native, Tauri) | **[docs/browser-frameworks.md](docs/browser-frameworks.md)** |
+| Mobile + cross-platform persistence (RN bare, Expo, Capacitor, Tauri, SQLCipher, sync patterns, background tasks, testing) | **[docs/mobile.md](docs/mobile.md)** |
+| Geo deep-dive (SRIDs, dialect matrix, PostGIS, distance models, 3D, MultiPolygon, GeoJSON, spatial joins, H3, realtime) | **[docs/geo.md](docs/geo.md)** |
+| Vector / embeddings / RAG (dialect picker, pipeline, hybrid BM25, versioning, HNSW/IVFFlat, quantization, multi-modal, eval) | **[docs/vector.md](docs/vector.md)** |
+| JSON path queries (per-dialect emit, indexing, migration, operator matrix, null markers, audit/webhook patterns, common bugs) | **[docs/json-path.md](docs/json-path.md)** |
+
 ---
 
 ## What forge is, and what it is not
@@ -1250,6 +1263,8 @@ Fallback mode emits an axis-aligned bbox prefilter from the polygon's
 envelope; the adapter then runs a ray-casting point-in-polygon refinement
 in app. Concave polygons work correctly.
 
+**See also:** **[docs/geo.md](docs/geo.md)** — SRID picker, full dialect feature matrix, PostGIS deep-dive, distance models (sphere/ellipsoid/planar), 3D coords, MultiPolygon patterns, GeoJSON round-trip, spatial joins, H3 grids, realtime tracking, testing.
+
 ---
 
 ## JSON path queries
@@ -1303,6 +1318,8 @@ Per dialect:
 | DuckDB | `json_extract(col, '$.a.b')` |
 | MSSQL | `JSON_VALUE(col, '$.a.b')` |
 | Mongo | dotted key: `{ 'meta.a.b': … }` |
+
+**See also:** **[docs/json-path.md](docs/json-path.md)** — per-dialect SQL emit, GIN/multi-valued/expression indexes, column ↔ JSON migration, full operator-by-dialect matrix, null-marker semantics, audit-log/webhook patterns, common bugs.
 
 ---
 
@@ -1377,6 +1394,8 @@ DB.
 When the dialect can't host a regular vector index (Mongo, SQLite), the
 `method: 'vector'` index emission warns clearly instead of silently
 emitting a useless btree.
+
+**See also:** **[docs/vector.md](docs/vector.md)** — dialect picker (pgvector / sqlite-vec / Atlas / HeatWave / DuckDB), end-to-end RAG pipeline, hybrid BM25 + vector with RRF, embedding versioning, HNSW/IVFFlat tuning, halfvec/binary quantization, CLIP multi-modal, MRR/nDCG CI gates, cost model.
 
 ---
 
