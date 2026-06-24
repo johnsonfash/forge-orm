@@ -4,6 +4,155 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.4.0 — Browser adapter: sqlite-wasm + OPFS, runtime `$migrate`, Vite/Next/Webpack plugins, browserDoctor, custom-build path for vec0 + R-Tree
+
+**Feature release.** Adds a browser dialect: real SQLite (via
+`@sqlite.org/sqlite-wasm`) running in a Web Worker, persisted on the Origin
+Private File System (OPFS), with the same forge query surface every other
+dialect uses. The IR, dialect emitter, executor, and DDL generator are
+reused unchanged — only the connection backend is new.
+
+### New driver — `wasmSqliteDriver`
+
+`createDb({ schema, driver: wasmSqliteDriver({ worker, url }) })` opens a
+SQLite database in the browser. Implements the existing `SqliteDriver` port
+verbatim — `all` / `get` / `run` / `exec` / `close` — so every adapter call
+path (executor, migrator, `$transaction`, `$queryRaw`) routes through it
+without code changes. Serialises calls through a tiny promise queue, since
+SQLite is single-writer at the file level and OPFS sync handles are
+exclusive per origin.
+
+### New URL schemes
+
+`detectAdapterKind()` now recognises three browser-side prefixes, all
+resolving to the `sqlite` kind:
+
+| URL | VFS | Persistence | Multi-tab |
+|---|---|---|---|
+| `opfs-sahpool:<path>` | SAH-pool (recommended) | Full | Safe |
+| `opfs:<path>` | Plain OPFS | Full | Single-tab writer |
+| `:memory:` | In-memory | None | N/A |
+
+### New worker module — `forge-orm/wasm/worker`
+
+Ships a ready-to-bundle Web Worker that hosts sqlite-wasm. Consumers wire it
+in via the standard `new Worker(new URL('forge-orm/wasm/worker', import.meta.url))`
+pattern — Vite, Next, Webpack 5, Parcel, Rspack all resolve it natively.
+Routes `opfs:` → `oo1.OpfsDb`, `opfs-sahpool:` → `installOpfsSAHPoolVfs() +
+OpfsSAHPoolDb`, `:memory:` → `oo1.DB(':memory:')`. Sets `PRAGMA foreign_keys
+= ON` at open. Best-effort detects sqlite-vec via `vec_version()`.
+
+### Bundler plugins
+
+Three zero-config helpers that take care of worker resolution + COOP/COEP
+headers + the wasm asset rule:
+
+- **`forge-orm/wasm/vite`** — `forgeWasm()` Vite plugin. Adds
+  `optimizeDeps.exclude`, sets `worker.format: 'es'`, attaches COOP/COEP
+  middleware to the dev server.
+- **`forge-orm/wasm/next`** — `withForgeWasm(nextConfig)` wrapper. Enables
+  `experiments.asyncWebAssembly` + `topLevelAwait`, adds a `.wasm`
+  `asset/resource` rule, sets `experimental.esmExternals: 'loose'`, wraps
+  `headers()` to emit COOP/COEP for the matched routes.
+- **`forge-orm/wasm/webpack`** — `forgeWasmWebpack(config)` for webpack 5,
+  CRA (via craco), Rsbuild. Same experiments + asset rule.
+
+All three accept options to disable individual pieces (COOP/COEP, dep
+optimizer exclusion, header injection) if the host app already handles
+them.
+
+### Runtime DDL apply — `db.$migrate()`
+
+`forge push` is a Node CLI; the browser needs a runtime equivalent.
+`db.$migrate()` reads the active schema, calls the same
+`buildSqliteSchemaDDL` emitter `forge push` uses, filters out
+already-existing tables/indexes via a `sqlite_master` lookup, and applies
+the rest in one `BEGIN/COMMIT` batch.
+
+Idempotent — safe to call on every app boot. Returns
+`{ applied, skipped, failures }` matching the CLI report shape exactly.
+Verbose mode via `db.$migrate({ logger: console.log })`.
+
+Lower-level pieces are also exported (`buildSqliteSchemaDDL`,
+`applySqliteMigration`, `runMigrate`) for apps that want to ship DDL as
+a build-time asset.
+
+### Runtime capability probe — `browserDoctor()`
+
+The browser analog of `forge doctor`. Returns a structured
+`BrowserDoctorReport` with:
+
+- **environment**: runtime kind, OPFS availability, sync handle support,
+  SharedArrayBuffer, persistent-storage state (granted / requestable /
+  unavailable), estimated quota + usage.
+- **sqlite**: version, json1, fts5, rtree, sqliteVec, foreign-keys state.
+- **capabilities**: forge-feature → status table (native / fallback /
+  unavailable). Surfaces FTS5 / R-Tree / sqlite-vec presence so apps know
+  whether `f.text().searchable()` / `f.geoPoint()` / `f.vector()` run on
+  the native code path or in fallback mode.
+- **notes**: human-readable remediation hints — including the iOS Safari
+  ITP 7-day eviction warning when persistent storage is requestable but
+  not granted.
+
+### Custom wasm build — `forge-orm/wasm/worker-pro`
+
+The stock `@sqlite.org/sqlite-wasm` ships FTS5 + json1 but NOT R-Tree or
+sqlite-vec, so `f.geoPoint()` and `f.vector()` run in fallback mode there.
+This release adds a `scripts/wasm-pro/build.sh` Emscripten pipeline that
+compiles a custom wasm bundle with **rtree + GeoPoly + sqlite-vec compiled
+in**. The matching `worker-pro.ts` consumes the local artifact instead of
+the npm package.
+
+The build script fetches the SQLite amalgamation
+(default 3.46.1, override via `SQLITE_VERSION`) and sqlite-vec
+(default `v0.1.6`, override via `SQLITE_VEC_VERSION`), then drives `emcc` to
+produce `sqlite3.{mjs,wasm}` (~1.6 MB). Output goes to `dist/wasm-pro/` by
+default. Host the artifacts under your app and point the worker at them via
+`FORGE_WASM_PRO_URL`.
+
+A pre-built `@forge-orm/sqlite-wasm-pro` npm artifact is on the roadmap.
+
+### Other changes
+
+- `encodeParams` in the SQLite executor swaps `Buffer.isBuffer(v)` for a
+  guarded check (`typeof Buffer !== 'undefined' && …`) plus a `Uint8Array`
+  branch — needed so wasm/browser bundles don't blow up at module-eval
+  time when `Buffer` isn't a global.
+- `factory.ts` extends `ForgeDb` with `$migrate()` (sqlite-only — throws
+  with a clear "use the CLI" message on Mongo / PG / MySQL / DuckDB / MSSQL
+  adapters). Lazy-imports the migrator so non-sqlite bundles don't pull
+  in the SQLite DDL emitter.
+- New peer dependency: `@sqlite.org/sqlite-wasm` (`>=3.45.0`, optional).
+- `tsconfig.lib.json` adds `DOM` + `WebWorker` libs so the wasm entrypoints
+  can reference `Worker` / `MessageEvent` / `navigator.storage` / OPFS
+  types.
+- 6 new jest unit tests covering driver round-trips, error mapping, serial
+  request queueing, close-during-pending semantics, and driver type-guards.
+  Total: 445 tests, 34 suites, all green.
+
+### Compatibility
+
+- Existing 2.3.x consumers: drop-in. No schema changes, no API changes for
+  any server-side dialect.
+- Server-side SQLite (`sqlite:./app.db`, expo, op-sqlite, libsql) is
+  unchanged. The Buffer guard tweak is the only runtime touch.
+- Browser builds need the new peer dep `@sqlite.org/sqlite-wasm` and a
+  bundler that supports `new Worker(new URL(...))` — modern Vite / Next /
+  Webpack 5 / Parcel.
+
+### Known limitations
+
+- `db.$migrate()` doesn't yet do drift detection — it skips existing
+  tables/indexes by name but doesn't `ALTER` columns. Hand-roll
+  `$executeRaw` for schema evolution until full in-browser `forge diff`
+  lands in 2.5.
+- COOP/COEP headers are an app-wide concern. If a marketing page or auth
+  callback embeds third-party scripts that don't send
+  `Cross-Origin-Resource-Policy`, the embed breaks — narrow the matcher
+  in `withForgeWasm()` or host the SQLite-using parts on a subdomain.
+- The pro wasm build needs Emscripten installed and a one-time
+  ~10-minute compile. The pre-built npm artifact will close this gap.
+
 ## 2.3.1 — README rewrite: complete field-type + modifier tables, full operator reference
 
 **Docs-only release.** No runtime change. The 2.3.0 README hadn't been

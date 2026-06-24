@@ -4,10 +4,13 @@ export type { ForgeDb, CreateDbOptions, CreateDbOptionsUrl, CreateDbOptionsStruc
 // Pluggable SQLite drivers — wrap your raw driver and pass it as createDb({ driver }).
 //   createDb({ schema, driver: libsqlDriver(client) })          // Turso / edge
 //   createDb({ schema, driver: expoSqliteDriver(SQLite.openDatabaseSync('app.db')) })  // Expo/RN
+//   createDb({ schema, driver: wasmSqliteDriver({ worker }) })  // browser (sqlite-wasm + OPFS)
 export {
   betterSqlite3Driver, expoSqliteDriver, opSqliteDriver, libsqlDriver, isSqliteDriver,
 } from './adapters/sqlite/driver';
 export type { SqliteDriver } from './adapters/sqlite/driver';
+export { wasmSqliteDriver, isWasmSqliteDriver } from './adapters/sqlite/wasm-driver';
+export type { WasmDriverOptions } from './adapters/sqlite/wasm-driver';
 // Pluggable Postgres drivers — pg (default) or postgres.js.
 //   createDb({ schema, driver: postgresJsDriver(postgres(url)) })
 export { pgDriver, postgresJsDriver, isPostgresDriver } from './adapters/postgres/driver';
@@ -160,6 +163,19 @@ export type {
   DriftReport,
   IgnoreSpec,
 } from './scripts/diff-core';
+
+// ─── Runtime DDL apply (browser/wasm replacement for `forge push`) ──────────
+// Also available as `db.$migrate()` on any sqlite-adapter ForgeDb.
+export { runMigrate } from './wasm/migrate';
+export type { RuntimeMigrateOptions } from './wasm/migrate';
+// Browser feature-detection probe — mirror of the CLI doctor for the wasm path.
+export { browserDoctor } from './wasm/browser-doctor';
+export type { BrowserDoctorReport } from './wasm/browser-doctor';
+// Schema → DDL emitter (sqlite dialect). Useful for tools that want to inspect
+// or persist the migration SQL — the runtime $migrate path uses this internally.
+export { buildSchemaDDL as buildSqliteSchemaDDL } from './adapters/sqlite/ddl';
+export { applyMigration as applySqliteMigration } from './adapters/sqlite/migrate';
+export type { ApplyReport } from './adapters/sqlite/migrate';
 
 // Convenience alias for ForgeModels.
 export type { ForgeModels as Forge } from './forge-types';
