@@ -49,6 +49,18 @@ export const MysqlDialect: Dialect = {
       case 'embedMany':  return 'JSON';
       case 'stringArray':return 'JSON';
       case 'intArray':   return 'JSON';
+      case 'geoPoint': {
+        if (field.geo?.fallback) return 'JSON';
+        const srid = field.geo?.srid ?? 4326;
+        return `POINT NOT NULL SRID ${srid}`;
+      }
+      case 'vector': {
+        // MySQL 9.0+ native VECTOR type. Community edition supports brute-
+        // force search; HeatWave Vector Store adds HNSW/IVF.
+        const dims = field.vector?.dims;
+        if (!dims) throw new Error(`[forge:mysql] vector field requires { dims }`);
+        return `VECTOR(${dims})`;
+      }
     }
   },
 
@@ -67,5 +79,69 @@ export const MysqlDialect: Dialect = {
     // Requires a FULLTEXT index on the column — emitted automatically when
     // the field is declared `.searchable()`. Without it, MySQL throws.
     return `MATCH(${quotedColumn}) AGAINST (${paramExpr} IN NATURAL LANGUAGE MODE)`;
+  },
+
+  valueExpr(field, params, value) {
+    if (field.kind === 'geoPoint' && !field.geo?.fallback && value && typeof value === 'object') {
+      const v = value as { lng: number; lat: number };
+      const srid = field.geo?.srid ?? 4326;
+      const ph = this.placeholder(params, `POINT(${v.lat} ${v.lng})`);
+      return `ST_GeomFromText(${ph}, ${srid})`;
+    }
+    if (field.kind === 'vector' && Array.isArray(value)) {
+      // MySQL's STRING_TO_VECTOR parses a JSON array string into VECTOR.
+      const ph = this.placeholder(params, `[${(value as number[]).join(',')}]`);
+      return `STRING_TO_VECTOR(${ph})`;
+    }
+    return this.placeholder(params, value);
+  },
+
+  geoNearClause(quotedCol, field, point, params) {
+    const srid = field.geo?.srid ?? 4326;
+    // Axis-order quirk: lat-first for SRID 4326.
+    const wkt = `POINT(${point.lat} ${point.lng})`;
+    const pp = this.placeholder(params, wkt);
+    const ref = `ST_GeomFromText(${pp}, ${srid})`;
+    if (point.withinMeters === undefined) return 'TRUE';
+    const wm = this.placeholder(params, point.withinMeters);
+    return `ST_Distance_Sphere(${quotedCol}, ${ref}) < ${wm}`;
+  },
+
+  geoDistanceExpr(quotedCol, field, point, params) {
+    const srid = field.geo?.srid ?? 4326;
+    const wkt = `POINT(${point.lat} ${point.lng})`;
+    const pp = this.placeholder(params, wkt);
+    return `ST_Distance_Sphere(${quotedCol}, ST_GeomFromText(${pp}, ${srid}))`;
+  },
+
+  vectorDistanceClause(quotedCol, field, query, params) {
+    const metric = (field.vector?.metric ?? 'cosine').toUpperCase();
+    const ph = this.placeholder(params, `[${query.vector.join(',')}]`);
+    if (query.withinDistance === undefined) return 'TRUE';
+    const wd = this.placeholder(params, query.withinDistance);
+    return `DISTANCE(${quotedCol}, STRING_TO_VECTOR(${ph}), '${metric}') < ${wd}`;
+  },
+
+  vectorDistanceExpr(quotedCol, field, vector, params) {
+    const metric = (field.vector?.metric ?? 'cosine').toUpperCase();
+    const ph = this.placeholder(params, `[${vector.join(',')}]`);
+    return `DISTANCE(${quotedCol}, STRING_TO_VECTOR(${ph}), '${metric}')`;
+  },
+
+  jsonPathExpr(quotedCol, path) {
+    // MySQL JSON_EXTRACT returns JSON-encoded values; for strings that means
+    // a wrapping `"…"`. Wrap with JSON_UNQUOTE so equality against a plain
+    // string param works.
+    const pathSpec = '$' + path.map((s) => /^\d+$/.test(s) ? `[${s}]` : `.${s.replace(/[`'"\\]/g, '\\$&')}`).join('');
+    return `JSON_UNQUOTE(JSON_EXTRACT(${quotedCol}, '${pathSpec.replace(/'/g, "''")}'))`;
+  },
+
+  geoWithinPolygonClause(quotedCol, field, polygon, params) {
+    const srid = field.geo?.srid ?? 4326;
+    // Axis-order quirk: lat first.
+    const ring = polygon.map((v) => `${v.lat} ${v.lng}`).join(', ');
+    const wkt = `POLYGON((${ring}))`;
+    const pp = this.placeholder(params, wkt);
+    return `ST_Within(${quotedCol}, ST_GeomFromText(${pp}, ${srid}))`;
   },
 };

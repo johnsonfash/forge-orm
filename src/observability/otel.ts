@@ -58,7 +58,12 @@ export function wireOtel(db: ForgeDb, opts: WireOtelOptions): () => void {
   // duration. (Most OTel APIs accept startTime in span options.)
   const offQ = db.$on('query', (e: QueryEvent) => {
     const sys = opts.dbSystem ?? SYSTEM_BY_ADAPTER[e.adapter];
-    const span = opts.tracer.startSpan(`forge.${e.op}`, {
+    // Span name reflects the schema-level intent when the wrapper passed
+    // one through (softDelete / restore / etc.). Falls back to the
+    // adapter-level op name so plain updates / finds still span as
+    // forge.update / forge.find.
+    const spanName = e.semanticOp ? `forge.${e.semanticOp}` : `forge.${e.op}`;
+    const span = opts.tracer.startSpan(spanName, {
       attributes: {
         'db.system': sys,
         'db.operation': e.op,
@@ -67,6 +72,7 @@ export function wireOtel(db: ForgeDb, opts: WireOtelOptions): () => void {
         'forge.model': e.model || undefined,
         'forge.row_count': e.rowCount,
         'forge.duration_ms': e.duration_ms,
+        ...(e.semanticOp ? { 'forge.semantic_op': e.semanticOp } : {}),
         ...(recordStmt && typeof e.sql === 'string' ? { 'db.statement': truncate(e.sql, maxLen) } : {}),
       },
     });

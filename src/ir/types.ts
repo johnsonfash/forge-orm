@@ -55,6 +55,14 @@ export interface UpdateNode {
   upsertCreate?: Record<string, any>;
   returning?: ProjectionPlan;
   hydration?: RelationPlan[];
+  /**
+   * Schema-level intent for the update. Set by the wrapper / compile API
+   * when the caller invoked softDelete / restore so replay / audit tools
+   * can distinguish a soft-delete from a regular update by inspecting the
+   * IR alone, without parsing the `set` payload to look for the soft-delete
+   * column. Optional; absent for plain update / upsert calls.
+   */
+  semantic?: 'softDelete' | 'softDeleteMany' | 'restore' | 'restoreMany';
 }
 
 export interface DeleteNode {
@@ -117,6 +125,11 @@ export interface WhereLeaf {
   // is ignored. Produced by `col('rhsField')`. Only the comparison ops
   // (eq/ne/lt/lte/gt/gte) are valid here — enforced at IR-build time.
   rhsField?: string;
+  // For `jsonPath`: the dotted/indexed path inside the JSON column, plus the
+  // SCALAR sub-op (`eq`, `gte`, etc.) to apply at that path. The IR shape is
+  // separated from the outer `op` because the dialect compilers need both
+  // the path AND the comparison together to emit native JSON operators.
+  jsonPath?: { path: string[]; subOp: 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte' | 'contains' | 'in' | 'has' };
 }
 
 export interface WhereAnd { kind: 'and'; children: WhereTree[] }
@@ -138,7 +151,27 @@ export type WhereOp =
   | 'contains' | 'startsWith' | 'endsWith'
   | 'has' | 'hasSome' | 'hasEvery' | 'isEmpty'
   | 'jsonPath'                    // reserved (Postgres jsonb)
-  | 'search';                     // reserved (full-text)
+  | 'search'                      // reserved (full-text)
+  // Geo — distance-based filter on a geoPoint field. `value` carries
+  // { lng, lat, withinMeters } (also called the "search circle"). Per
+  // dialect:
+  //   PG     → ST_DWithin(loc, ST_GeogFromText('SRID=4326;POINT(lng lat)'), N)
+  //   MySQL  → ST_Distance_Sphere(loc, ST_GeomFromText('POINT(lat lng)', 4326)) < N
+  //   SQLite → Distance(loc, MakePoint(lng, lat, 4326), 1) < N  (SpatiaLite)
+  //   DuckDB → ST_Distance(loc, ST_Point(lng, lat)) < N         (spatial ext)
+  //   MSSQL  → loc.STDistance(geography::STGeomFromText('POINT(lng lat)', 4326)) < N
+  //   Mongo  → { $near: { $geometry: …Point…, $maxDistance: N } }
+  | 'near'
+  // Geo polygon containment — `value` carries `{ polygon: [{lng,lat}, ...] }`.
+  // The point is considered inside when the polygon is closed (first vertex
+  // equal to last); the IR builder auto-closes if needed. Per dialect:
+  //   PG     → ST_Within(loc, ST_GeogFromText('SRID=4326;POLYGON((…))'))
+  //   MySQL  → ST_Within(loc, ST_GeomFromText('POLYGON((lat lng,…))', 4326))
+  //   SQLite → Within(loc, GeomFromText('POLYGON((…))', 4326))   (SpatiaLite)
+  //   DuckDB → ST_Within(loc, ST_GeomFromText('POLYGON((…))'))
+  //   MSSQL  → geography::STGeomFromText('POLYGON((…))').STContains(loc) = 1
+  //   Mongo  → { $geoWithin: { $geometry: Polygon } }
+  | 'withinPolygon';
 
 export interface ProjectionPlan {
   // Scalar field names (schema-side). Empty array + exclusive=true means
@@ -171,6 +204,12 @@ export interface OrderByEntry {
   direction: 'asc' | 'desc';
   // SQL-only; ignored by Mongo. 'first' = NULLS FIRST.
   nulls?: 'first' | 'last';
+  // Geo or vector — when `field` is a geoPoint, rows are ordered by distance
+  // to {lng, lat} with a synthetic `_distanceMeters` column. When `field` is
+  // a vector, rows are ordered by vector distance to {vector} with a
+  // synthetic `_distance` column. On Mongo, geo uses $geoNear (first stage),
+  // vector uses $vectorSearch (first stage); the executor routes either.
+  nearTo?: { lng: number; lat: number } | { vector: number[] };
 }
 
 export interface CursorSpec {

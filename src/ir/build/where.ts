@@ -120,8 +120,116 @@ export function buildWhereTree(
       });
     } else if (value && typeof value === 'object' && !Array.isArray(value) && !isDate(value)) {
       const insensitive = value.mode === 'insensitive';
+      // Geo near — user shape `{ location: { near: { lng, lat, withinMeters } } }`.
+      // Recognise and translate before the SCALAR_OPS loop so an unknown op
+      // ('near') doesn't get silently dropped.
+      if ('near' in value && value.near && typeof value.near === 'object') {
+        const fdef = (model.fields as any)?.[key];
+        // Vector near: { embedding: { near: { vector: number[], withinDistance?: number } } }
+        if (fdef?.kind === 'vector') {
+          const n = value.near as { vector?: number[]; withinDistance?: number };
+          if (!Array.isArray(n.vector) || n.vector.length === 0) {
+            throw new Error(
+              `[forge] where.${key}.near.vector must be a non-empty number[].`,
+            );
+          }
+          if (fdef.vector?.dims && n.vector.length !== fdef.vector.dims) {
+            throw new Error(
+              `[forge] where.${key}.near.vector length ${n.vector.length} ` +
+              `does not match the column dims ${fdef.vector.dims}.`,
+            );
+          }
+          children.push({
+            kind: 'leaf',
+            field: key,
+            op: 'near',
+            value: { vector: n.vector, withinDistance: n.withinDistance },
+          });
+          continue;
+        }
+        // Geo near: { location: { near: { lng, lat, withinMeters? } } }
+        const n = value.near as { lng?: number; lat?: number; withinMeters?: number };
+        if (typeof n.lng !== 'number' || typeof n.lat !== 'number') {
+          throw new Error(
+            `[forge] where.${key}.near requires numeric { lng, lat } for geo OR { vector: [...] } for vector fields.`,
+          );
+        }
+        children.push({
+          kind: 'leaf',
+          field: key,
+          op: 'near',
+          value: { lng: n.lng, lat: n.lat, withinMeters: n.withinMeters },
+        });
+        continue;
+      }
+      // JSON path query — { meta: { path: 'profile.age', gte: 18 } } OR
+      // { meta: { path: ['profile', 'age'], gte: 18 } }. Works on json /
+      // embed / embedMany columns; emits a dialect-native path read +
+      // comparison. The sub-op is whichever scalar op the user pairs with
+      // the `path` key — eq is the default when only path is set.
+      if ('path' in value && (typeof value.path === 'string' || Array.isArray(value.path))) {
+        const fdef = model.fields?.[key];
+        if (!fdef || !['json', 'embed', 'embedMany', 'stringArray', 'intArray'].includes((fdef as any).kind)) {
+          throw new Error(
+            `[forge] where.${key}.path can only be used on json / embed / array fields. ` +
+            `'${key}' is kind=${(fdef as any)?.kind ?? 'unknown'}.`,
+          );
+        }
+        const pathArr: string[] = typeof value.path === 'string'
+          ? parseJsonPath(value.path)
+          : value.path.map(String);
+        type JsonSubOp = 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte' | 'contains' | 'in' | 'has';
+        let subOp: JsonSubOp = 'eq';
+        let subValue: any = null;
+        const subOpKeys: JsonSubOp[] = ['eq', 'ne', 'lt', 'lte', 'gt', 'gte', 'contains', 'in', 'has'];
+        for (const k of subOpKeys) {
+          if (k in value) {
+            subOp = k;
+            subValue = (value as any)[k];
+            break;
+          }
+        }
+        children.push({
+          kind: 'leaf',
+          field: key,
+          op: 'jsonPath',
+          value: subValue,
+          jsonPath: { path: pathArr, subOp },
+        });
+        continue;
+      }
+      // Geo polygon containment — { col: { withinPolygon: [{lng,lat}, …] } }.
+      if ('withinPolygon' in value && Array.isArray(value.withinPolygon)) {
+        const ring = value.withinPolygon as Array<{ lng?: number; lat?: number }>;
+        if (ring.length < 3) {
+          throw new Error(
+            `[forge] where.${key}.withinPolygon needs at least 3 vertices.`,
+          );
+        }
+        for (const v of ring) {
+          if (typeof v?.lng !== 'number' || typeof v?.lat !== 'number') {
+            throw new Error(
+              `[forge] where.${key}.withinPolygon vertex requires numeric { lng, lat }.`,
+            );
+          }
+        }
+        // Auto-close: the spec wants the first vertex repeated at the end.
+        const closed = ring[0].lng === ring[ring.length - 1].lng && ring[0].lat === ring[ring.length - 1].lat
+          ? ring
+          : [...ring, ring[0]];
+        children.push({
+          kind: 'leaf',
+          field: key,
+          op: 'withinPolygon',
+          value: { polygon: closed.map((v) => ({ lng: v.lng!, lat: v.lat! })) },
+        });
+        continue;
+      }
       for (const op of Object.keys(value)) {
         if (op === 'mode') continue;
+        if (op === 'near') continue; // handled above
+        if (op === 'withinPolygon') continue; // handled above
+        if (op === 'path') continue; // handled above (jsonPath)
         const irOp = SCALAR_OPS[op];
         if (!irOp) continue;
         const operand = value[op];
@@ -159,4 +267,25 @@ function notUndef<T>(v: T | undefined): v is T {
 
 function isDate(v: any): boolean {
   return v instanceof Date;
+}
+
+// Parse a dotted/indexed JSON path: 'profile.address[0].city' →
+// ['profile', 'address', '0', 'city']. Array indexes become numeric strings
+// so the per-dialect compiler can emit native indexing syntax.
+function parseJsonPath(s: string): string[] {
+  const out: string[] = [];
+  const tokens = s.split('.');
+  for (const t of tokens) {
+    // Split `addresses[0]` into 'addresses' and '0'.
+    const match = t.match(/^([^[\]]+)((?:\[\d+\])*)$/);
+    if (!match) {
+      throw new Error(`[forge] invalid JSON path segment: '${t}' in '${s}'`);
+    }
+    if (match[1]) out.push(match[1]);
+    if (match[2]) {
+      const idxs = match[2].match(/\[(\d+)\]/g) ?? [];
+      for (const idx of idxs) out.push(idx.slice(1, -1));
+    }
+  }
+  return out;
 }

@@ -253,15 +253,32 @@ export function collectIndexSpecs(modelName: string, model: ModelDef<any>): Inde
       (idx.where && typeof idx.where === 'object'
         ? (idx.where as Record<string, unknown>)
         : undefined);
+    // 'spatial' is the portable cross-dialect index method. On Mongo it
+    // resolves to a 2dsphere key.
+    // 'vector' on Mongo is NOT a regular createIndex — Atlas Vector Search
+    // uses a separate Search Index API. Skip and tell the user.
+    if (idx.method === 'vector') {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[forge:push:mongo] index '${idx.name ?? '(unnamed)'}' uses method:'vector' — ` +
+        `Mongo vector indexes live in Atlas Search (createSearchIndex), not the ` +
+        `regular createIndex API. Skipped. Create via the Atlas UI / CLI: ` +
+        `https://www.mongodb.com/docs/atlas/atlas-vector-search/`,
+      );
+      continue;
+    }
+    const keys = idx.method === 'spatial'
+      ? Object.fromEntries(Object.keys(idx.keys).map((k) => [k, '2dsphere']))
+      : idx.keys;
     specs.push({
-      keys: idx.keys,
+      keys: keys as Record<string, 1 | -1 | 'text' | '2dsphere' | '2d' | 'hashed'>,
       unique: idx.unique,
       sparse: idx.sparse,
       expireAfterSeconds: idx.expireAfterSeconds,
       partialFilterExpression: pfe,
       collation: idx.collation as Record<string, unknown> | undefined,
       wildcardProjection: idx.wildcardProjection,
-      name: idx.name || indexNameFor(modelName, idx.keys, idx.unique),
+      name: idx.name || indexNameFor(modelName, keys, idx.unique),
     });
   }
 

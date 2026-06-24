@@ -23,7 +23,7 @@ function buildMessage(kind: AdapterKind, pkg: string, url?: string): string {
   return (
     `[forge] ${kind} adapter needs the '${pkg}' driver, but it's not installed.${inferLine}` +
     `\n  Install:     npm install ${pkg}` +
-    `\n  Or override: createDb({ type: 'mongo' | 'postgres' | 'mysql' | 'sqlite', url: '...' })`
+    `\n  Or override: createDb({ type: 'mongo' | 'postgres' | 'mysql' | 'sqlite' | 'duckdb' | 'mssql', url: '...' })`
   );
 }
 

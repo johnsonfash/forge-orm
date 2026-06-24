@@ -25,8 +25,22 @@ async function main() {
     process.exit(1);
   }
 
+  const ENABLE_EXTENSIONS = process.argv.includes('--enable-extensions');
+
   const { schema, source } = loadConsumerSchema();
   console.log(`[forge:push] ${kind} — schema: ${source}`);
+
+  // Phase 5 — extension auto-install. When the schema declares geoPoint
+  // fields with `fallback: false` (the default), the relevant dialect needs
+  // its spatial extension. We auto-install at push time when the user
+  // passes `--enable-extensions`; otherwise we warn and continue (push will
+  // fail with a clear DB-side error if the extension is missing).
+  const needsSpatial = schemaNeedsSpatial(schema);
+  if (needsSpatial && ENABLE_EXTENSIONS) {
+    console.log(`[forge:push] schema requires spatial — will auto-install extension`);
+  } else if (needsSpatial) {
+    console.log(`[forge:push] schema declares geoPoint fields — pass --enable-extensions to auto-install the dialect's spatial extension (PostGIS / SpatiaLite). DuckDB auto-loads always.`);
+  }
 
   switch (kind) {
     case 'mongo': {
@@ -43,6 +57,16 @@ async function main() {
       const pg = loadDriver('postgres', url);
       const pool = new pg.Pool({ connectionString: url });
       try {
+        if (needsSpatial && ENABLE_EXTENSIONS) {
+          try {
+            await pool.query('CREATE EXTENSION IF NOT EXISTS postgis');
+            console.log(`[forge:push:pg] ✓ PostGIS ready`);
+          } catch (err: any) {
+            console.error(`[forge:push:pg] ✗ failed to install PostGIS: ${err?.message ?? err}`);
+            console.error(`  (the role may lack CREATE EXTENSION privilege; ask a superuser to run it once)`);
+            process.exit(2);
+          }
+        }
         const ddl = buildSchemaDDL(schema);
         const plan = await planMigration(pool, ddl);
         console.log(`[forge:push] ${plan.summary}`);
@@ -112,6 +136,19 @@ async function main() {
       return;
     }
   }
+}
+
+// Does any model in the schema declare a non-fallback geoPoint field?
+// We use this to know whether we should auto-install the spatial extension.
+function schemaNeedsSpatial(schema: unknown): boolean {
+  if (!schema || typeof schema !== 'object') return false;
+  for (const model of Object.values(schema as Record<string, any>)) {
+    if (!model?.fields) continue;
+    for (const fdef of Object.values(model.fields as Record<string, any>)) {
+      if (fdef?.kind === 'geoPoint' && !fdef.geo?.fallback) return true;
+    }
+  }
+  return false;
 }
 
 main()

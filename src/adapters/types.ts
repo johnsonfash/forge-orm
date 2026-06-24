@@ -4,7 +4,7 @@
 // each adapter inside `connect()` — never imported at module top level — so
 // that `npm install forge` doesn't force a peer the consumer hasn't chosen.
 
-export type AdapterKind = 'mongo' | 'postgres' | 'mysql' | 'sqlite';
+export type AdapterKind = 'mongo' | 'postgres' | 'mysql' | 'sqlite' | 'duckdb' | 'mssql';
 
 export interface AdapterCapabilities {
   // Whether the dialect can enforce ON DELETE / FK constraints natively.

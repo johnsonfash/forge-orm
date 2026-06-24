@@ -14,6 +14,8 @@ import { MongoAdapter } from './adapters/mongo/adapter';
 import { PostgresAdapter } from './adapters/postgres/adapter';
 import { MysqlAdapter } from './adapters/mysql/adapter';
 import { SqliteAdapter } from './adapters/sqlite/adapter';
+import { DuckdbAdapter } from './adapters/duckdb/adapter';
+import { MssqlAdapter } from './adapters/mssql/adapter';
 
 // createDb() — adapter-agnostic factory. Three call shapes, all returning the
 // same Db handle: URL only (adapter inferred), explicit type + URL, or
@@ -166,6 +168,10 @@ function instantiateAdapter(kind: AdapterKind, driver?: ForgeDriver): Adapter {
       return new MysqlAdapter(driver as import('./adapters/mysql/driver').MysqlDriver | undefined);
     case 'sqlite':
       return new SqliteAdapter(driver as import('./adapters/sqlite/driver').SqliteDriver | undefined);
+    case 'duckdb':
+      return new DuckdbAdapter(driver as import('./adapters/duckdb/driver').DuckdbDriver | undefined);
+    case 'mssql':
+      return new MssqlAdapter(driver as import('./adapters/mssql/driver').MssqlDriver | undefined);
   }
 }
 

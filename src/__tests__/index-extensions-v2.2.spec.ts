@@ -107,7 +107,7 @@ describe('Postgres — IndexDef extensions (2.2.0)', () => {
     expect(stmt.sql).toMatch(/WHERE deleted_at IS NULL$/);
   });
 
-  it('where (object form) is rejected on SQL — warns and skips', () => {
+  it('where (object form) is translated to SQL on Postgres (2.2.2+)', () => {
     const M = model('w', { id: f.id(), col: f.string() }, {
       indexes: [{
         keys: { col: 1 },
@@ -116,8 +116,38 @@ describe('Postgres — IndexDef extensions (2.2.0)', () => {
       }],
     }) as unknown as ModelDef<any>;
     const stmt = findIdx({ M }, 'idx_w_obj')!;
+    // The translator handles the common partial-filter operators; no warning.
+    expect(stmt.sql).toMatch(/WHERE "col" IS NOT NULL/);
+    expect(warnSpy).not.toHaveBeenCalledWith(expect.stringMatching(/object-form 'where'/));
+  });
+
+  it('partialFilterExpression on a Mongo-shaped schema lands on SQL too (2.2.2+)', () => {
+    // Single schema, single field — both Mongo and Postgres push the same
+    // partial intent without an explicit where: 'sql…' alias.
+    const M = model('items', { id: f.id(), sku: f.string(), deletedAt: f.dateTime().optional() }, {
+      indexes: [{
+        keys: { sku: 1 },
+        unique: true,
+        name: 'idx_items_sku_live',
+        partialFilterExpression: { deletedAt: { $exists: false } },
+      }],
+    }) as unknown as ModelDef<any>;
+    const stmt = findIdx({ M }, 'idx_items_sku_live')!;
+    expect(stmt.sql).toMatch(/WHERE "deletedAt" IS NULL/);
+  });
+
+  it('where (object form) with unsupported operator falls back to warn + skip', () => {
+    const M = model('w', { id: f.id(), tags: f.json() }, {
+      indexes: [{
+        keys: { tags: 1 },
+        // $elemMatch isn't in the translator's coverage — falls back to skip.
+        where: { tags: { $elemMatch: { x: 1 } } } as any,
+        name: 'idx_w_unsupported',
+      }],
+    }) as unknown as ModelDef<any>;
+    const stmt = findIdx({ M }, 'idx_w_unsupported')!;
     expect(stmt.sql).not.toMatch(/WHERE/);
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/object-form 'where'/));
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/operators outside the translator's coverage/));
   });
 
   it('compound: method + include + where together', () => {
@@ -186,13 +216,42 @@ describe('MySQL — IndexDef extensions (2.2.0)', () => {
     expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/INCLUDE is a Postgres-only/));
   });
 
-  it('where is unsupported — warned + ignored on MySQL', () => {
+  it('where on a non-unique index — warned + ignored on MySQL (no partial-index workaround for non-unique)', () => {
     const M = model('o', { id: f.id(), col: f.string() }, {
       indexes: [{ keys: { col: 1 }, where: 'col IS NOT NULL', name: 'idx_o_w' }],
     }) as unknown as ModelDef<any>;
     const stmt = findIdx({ M }, 'idx_o_w')!;
     expect(stmt.sql).not.toMatch(/WHERE/);
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/MySQL does not support partial/));
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/MySQL has no partial-index equivalent/));
+  });
+
+  it('where on a unique index — rewritten as a CASE-expression functional index on MySQL', () => {
+    const M = model('items', { id: f.id(), sku: f.string(), deletedAt: f.dateTime().optional() }, {
+      indexes: [{
+        keys: { sku: 1 }, unique: true,
+        where: '`deletedAt` IS NULL',
+        name: 'idx_items_sku_live',
+      }],
+    }) as unknown as ModelDef<any>;
+    const stmt = findIdx({ M }, 'idx_items_sku_live')!;
+    // The unique partial is expressed as a functional UNIQUE INDEX over a
+    // CASE expression — NULLs collide-exempt so non-matching rows are out
+    // of the constraint.
+    expect(stmt.sql).toMatch(/CREATE UNIQUE INDEX/);
+    expect(stmt.sql).toMatch(/CASE WHEN .* THEN `sku` ELSE NULL END/);
+  });
+
+  it('Mongo-shaped partialFilterExpression also rewrites into the MySQL CASE form (unique)', () => {
+    const M = model('items', { id: f.id(), sku: f.string(), deletedAt: f.dateTime().optional() }, {
+      indexes: [{
+        keys: { sku: 1 }, unique: true,
+        partialFilterExpression: { deletedAt: { $exists: false } },
+        name: 'idx_items_sku_live',
+      }],
+    }) as unknown as ModelDef<any>;
+    const stmt = findIdx({ M }, 'idx_items_sku_live')!;
+    expect(stmt.sql).toMatch(/CREATE UNIQUE INDEX/);
+    expect(stmt.sql).toMatch(/CASE WHEN \(`deletedAt` IS NULL\) THEN `sku` ELSE NULL END/);
   });
 });
 
@@ -614,6 +673,27 @@ describe('diff-core deep drift detection (2.2.1)', () => {
     };
     const r = diffIntrospection({ M }, actual, []);
     expect(r.items.some((i: any) => i.detail.includes('partialFilter'))).toBe(true);
+  });
+});
+
+describe('Compile artifacts carry semanticOp (2.2.2)', () => {
+  it('Mongo compile.softDelete sets semanticOp on the artifact', () => {
+    const { buildMongoCompileApi } = require('../adapters/mongo/compile');
+    const M = model('docs', { id: f.id(), deletedAt: f.dateTime().optional().softDeleteAt() }) as unknown as ModelDef<any>;
+    const art = buildMongoCompileApi(M).softDelete({ where: { id: 'x' } });
+    expect(art.semanticOp).toBe('softDelete');
+  });
+  it('Postgres compile.restoreMany sets semanticOp on the artifact', () => {
+    const { buildPostgresCompileApi } = require('../adapters/postgres/compile');
+    const M = model('docs', { id: f.id(), deletedAt: f.dateTime().optional().softDeleteAt() }) as unknown as ModelDef<any>;
+    const art = buildPostgresCompileApi(M).restoreMany({ where: { id: 'x' } });
+    expect(art.semanticOp).toBe('restoreMany');
+  });
+  it('Plain update artifact has no semanticOp', () => {
+    const { buildPostgresCompileApi } = require('../adapters/postgres/compile');
+    const M = model('docs', { id: f.id(), name: f.string() }) as unknown as ModelDef<any>;
+    const art = buildPostgresCompileApi(M).update({ where: { id: 'x' }, data: { name: 'new' } });
+    expect(art.semanticOp).toBeUndefined();
   });
 });
 

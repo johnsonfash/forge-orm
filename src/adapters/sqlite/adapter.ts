@@ -55,6 +55,20 @@ export class SqliteAdapter implements Adapter {
       await this._db.exec('PRAGMA journal_mode = WAL');  // file driver only
     }
     await this._db.exec('PRAGMA foreign_keys = ON');      // required for cascades
+    // Best-effort SpatiaLite load — silently skip when unavailable so
+    // non-geo schemas keep working. The doctor probe surfaces the absence
+    // when geoPoint fields are declared.
+    await this._tryLoadSpatialite();
+  }
+
+  private async _tryLoadSpatialite(): Promise<void> {
+    if (!this._db) return;
+    try {
+      await this._db.exec("SELECT load_extension('mod_spatialite')");
+    } catch {
+      // SpatiaLite not available — geo fields fall back to fallback-mode
+      // storage and Haversine post-filter.
+    }
   }
 
   async close(): Promise<void> {

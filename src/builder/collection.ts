@@ -23,6 +23,8 @@ import { buildMongoCompileApi } from '../adapters/mongo/compile';
 import { buildPostgresCompileApi } from '../adapters/postgres/compile';
 import { buildMysqlCompileApi } from '../adapters/mysql/compile';
 import { buildSqliteCompileApi } from '../adapters/sqlite/compile';
+import { buildDuckdbCompileApi } from '../adapters/duckdb/compile';
+import { buildMssqlCompileApi } from '../adapters/mssql/compile';
 import type { CompileApi, MongoCompileApi, SQLCompileApi } from '../compile';
 import { buildCount, buildDelete, buildGroupBy, buildInsert, buildProjection, buildSelect, buildUpdate } from '../ir/build';
 import type { Adapter } from '../adapters/types';
@@ -134,6 +136,8 @@ export class CollectionWrapper<
         case 'postgres': this._compileApi = buildPostgresCompileApi(this.model); break;
         case 'mysql':    this._compileApi = buildMysqlCompileApi(this.model);    break;
         case 'sqlite':   this._compileApi = buildSqliteCompileApi(this.model);   break;
+        case 'duckdb':   this._compileApi = buildDuckdbCompileApi(this.model);   break;
+        case 'mssql':    this._compileApi = buildMssqlCompileApi(this.model);    break;
         case 'mongo':
         default:         this._compileApi = buildMongoCompileApi(this.model);    break;
       }
@@ -142,26 +146,30 @@ export class CollectionWrapper<
   }
   /**
    * Narrowed compile API for Mongo callers — same getter as `compile`, just
-   * statically typed. Throws at access if the adapter isn't Mongo so the
-   * mismatched dialect surfaces loudly instead of silently returning the wrong
-   * artifact shape.
+   * statically typed. Throws at access if the resolved adapter isn't Mongo
+   * so the mismatched dialect surfaces loudly instead of silently returning
+   * the wrong artifact shape. When no adapter has been injected the
+   * resolved kind is Mongo (the default singleton), so the getter returns
+   * the Mongo compile API.
    */
   get compileMongo(): MongoCompileApi {
-    if (this._adapter?.kind !== 'mongo' && this._adapter?.kind !== undefined) {
+    const kind = this.adapter.kind;
+    if (kind !== 'mongo') {
       throw new Error(
         `[forge] .compileMongo is only available on a Mongo adapter ` +
-        `(current adapter: ${this._adapter?.kind}). Use .compile or ` +
-        `.compileSql instead.`,
+        `(current adapter: ${kind}). Use .compile or .compileSql instead.`,
       );
     }
     return this.compile as MongoCompileApi;
   }
   /**
    * Narrowed compile API for SQL callers — returns SQLArtifact with the
-   * correct dialect. Throws at access if the adapter is Mongo.
+   * correct dialect. Throws at access if the resolved adapter is Mongo
+   * (including the default singleton when no adapter was injected).
    */
   get compileSql(): SQLCompileApi {
-    if (this._adapter?.kind === 'mongo') {
+    const kind = this.adapter.kind;
+    if (kind === 'mongo') {
       throw new Error(
         `[forge] .compileSql is not available on a Mongo adapter. Use .compile ` +
         `or .compileMongo instead.`,
@@ -459,7 +467,14 @@ export class CollectionWrapper<
     const { scalar, nested } = this._splitNestedWrites(args.data, /*forCreate*/ false);
     const node = buildUpdate(
       mk, this.model,
-      { where: args.where, data: this._applyUpdatedAt(scalar), many: false },
+      {
+        where: args.where,
+        data: this._applyUpdatedAt(scalar),
+        many: false,
+        // Mirror the wrapper-level hint onto the IR so consumers can detect
+        // soft-deletes from the compiled artifact alone.
+        semantic: _internal?.semanticOp,
+      },
       schema as any,
     );
     const { doc } = await this.adapter.executeUpdate(node, this.model, {
@@ -483,7 +498,12 @@ export class CollectionWrapper<
     const mk = this._modelKey();
     const node = buildUpdate(
       mk, this.model,
-      { where: args.where, data: this._applyUpdatedAt(args.data), many: true },
+      {
+        where: args.where,
+        data: this._applyUpdatedAt(args.data),
+        many: true,
+        semantic: _internal?.semanticOp,
+      },
       schema as any,
     );
     const r = await this.adapter.executeUpdate(node, this.model, {

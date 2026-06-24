@@ -133,6 +133,8 @@ export interface BuildUpdateArgs {
   many?: boolean;
   upsertCreate?: Record<string, any>;
   returning?: { select?: any; include?: any; omit?: any };
+  /** Schema-level intent set by the wrapper (softDelete / restore call-sites). */
+  semantic?: UpdateNode['semantic'];
 }
 
 export function buildUpdate(
@@ -158,6 +160,7 @@ export function buildUpdate(
     upsertCreate: args.upsertCreate,
     returning: projection,
     hydration: hydration ? materialiseHydration(hydration, schema) : undefined,
+    semantic: args.semantic,
   };
 }
 

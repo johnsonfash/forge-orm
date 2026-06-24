@@ -132,10 +132,146 @@ function compileLeaf(ctx: CompileCtx, leaf: Extract<WhereTree, { kind: 'leaf' }>
         baseTable: ctx.model.collection,
         quoteIdent: (s: string) => ctx.d.quoteIdent(s),
       });
-    case 'jsonPath':
-      // Not yet implemented — placeholder so the compiler doesn't error.
+    case 'jsonPath': {
+      if (!leaf.jsonPath) return 'TRUE';
+      const { path, subOp } = leaf.jsonPath;
+      const rawCol = `${ctx.table}.${ctx.d.quoteIdent(leaf.field)}`;
+      const rendered = ctx.d.jsonPathExpr
+        ? ctx.d.jsonPathExpr(rawCol, path, leaf.value)
+        : pgJsonPath(rawCol, path, leaf.value);
+      // Compare the extracted value against the user-supplied operand using
+      // the same operator vocabulary as scalar leaves.
+      const ph = (v: unknown) => ctx.d.placeholder(ctx.params, v);
+      switch (subOp) {
+        case 'eq':  return leaf.value === null ? `${rendered} IS NULL` : `${rendered} = ${ph(coerceJsonOperand(leaf.value))}`;
+        case 'ne':  return leaf.value === null ? `${rendered} IS NOT NULL` : `${rendered} <> ${ph(coerceJsonOperand(leaf.value))}`;
+        case 'lt':  return `${rendered} < ${ph(coerceJsonOperand(leaf.value))}`;
+        case 'lte': return `${rendered} <= ${ph(coerceJsonOperand(leaf.value))}`;
+        case 'gt':  return `${rendered} > ${ph(coerceJsonOperand(leaf.value))}`;
+        case 'gte': return `${rendered} >= ${ph(coerceJsonOperand(leaf.value))}`;
+        case 'contains': {
+          const v = String(leaf.value);
+          return `${rendered} LIKE ${ph('%' + escapeForLike(v) + '%')}`;
+        }
+        case 'in': {
+          const arr = leaf.value as unknown[];
+          if (!arr.length) return 'FALSE';
+          return `${rendered} IN (${arr.map((v) => ph(coerceJsonOperand(v))).join(', ')})`;
+        }
+        case 'has': {
+          // Array containment — the extracted value is itself a JSON array.
+          // Cheapest cross-dialect: cast to text + LIKE on the JSON repr.
+          return `${rendered}::text LIKE ${ph('%' + JSON.stringify(leaf.value) + '%')}`;
+        }
+      }
       return 'TRUE';
+    }
+    case 'near': {
+      const fld = ctx.model.fields[leaf.field];
+      if (!fld) throw new Error(`[forge] where.${leaf.field}.near: unknown field.`);
+      if (fld.kind === 'vector') {
+        const v = leaf.value as { vector: number[]; withinDistance?: number };
+        if (!ctx.d.vectorDistanceClause) {
+          throw new Error(`[forge] dialect '${ctx.d.name}' does not implement vectorDistanceClause`);
+        }
+        return ctx.d.vectorDistanceClause(col, fld, v, ctx.params);
+      }
+      if (fld.kind !== 'geoPoint') {
+        throw new Error(`[forge] where.${leaf.field}.near requires a geoPoint or vector field.`);
+      }
+      const point = leaf.value as { lng: number; lat: number; withinMeters?: number };
+      if (fld.geo?.fallback) {
+        return haversineBboxPrefilter(ctx, leaf.field, point);
+      }
+      if (!ctx.d.geoNearClause) {
+        throw new Error(`[forge] dialect '${ctx.d.name}' does not implement geoNearClause`);
+      }
+      return ctx.d.geoNearClause(col, fld, point, ctx.params);
+    }
+    case 'withinPolygon': {
+      const fld = ctx.model.fields[leaf.field];
+      if (!fld || fld.kind !== 'geoPoint') {
+        throw new Error(`[forge] where.${leaf.field}.withinPolygon requires a geoPoint field.`);
+      }
+      const polygon = (leaf.value as { polygon: Array<{ lng: number; lat: number }> }).polygon;
+      if (fld.geo?.fallback) {
+        // Fallback storage is JSON {lng, lat}. Emit a bbox prefilter from
+        // the polygon's axis-aligned envelope; the exact point-in-polygon
+        // refinement happens in app via ray-casting (see haversine.ts).
+        return polygonBboxPrefilter(ctx, leaf.field, polygon);
+      }
+      if (!ctx.d.geoWithinPolygonClause) {
+        throw new Error(`[forge] dialect '${ctx.d.name}' does not implement geoWithinPolygonClause`);
+      }
+      return ctx.d.geoWithinPolygonClause(col, fld, polygon, ctx.params);
+    }
   }
+}
+
+// PG jsonb path extraction. Numeric path segments stay text-keyed (PG's
+// `->`/`->>` always treats string keys; numeric segments index into arrays).
+// We emit ->> at the LEAF (text extraction) and cast based on the operand
+// type for the comparison.
+function pgJsonPath(rawCol: string, path: string[], operand: unknown): string {
+  if (path.length === 0) return rawCol;
+  // Build the navigation chain with -> for all but the last, ->> for the last
+  // so we get text back.
+  let expr = rawCol;
+  for (let i = 0; i < path.length - 1; i++) {
+    const seg = path[i];
+    expr = /^\d+$/.test(seg) ? `${expr}->${Number(seg)}` : `${expr}->'${seg.replace(/'/g, "''")}'`;
+  }
+  const last = path[path.length - 1];
+  expr = /^\d+$/.test(last) ? `${expr}->>${Number(last)}` : `${expr}->>'${last.replace(/'/g, "''")}'`;
+  // Cast based on the operand type so comparisons make sense.
+  if (typeof operand === 'number') return `(${expr})::numeric`;
+  if (typeof operand === 'boolean') return `(${expr})::boolean`;
+  if (operand instanceof Date) return `(${expr})::timestamptz`;
+  return expr; // text
+}
+
+function coerceJsonOperand(v: unknown): unknown {
+  if (v === null || v === undefined) return null;
+  if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return v;
+  if (v instanceof Date) return v.toISOString();
+  return JSON.stringify(v);
+}
+
+function polygonBboxPrefilter(
+  ctx: CompileCtx,
+  field: string,
+  polygon: Array<{ lng: number; lat: number }>,
+): string {
+  const lngs = polygon.map((v) => v.lng);
+  const lats = polygon.map((v) => v.lat);
+  const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
+  const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+  const ph = (v: unknown) => ctx.d.placeholder(ctx.params, v);
+  const lngCol = `(${ctx.table}.${ctx.d.quoteIdent(field)}->>'lng')::float8`;
+  const latCol = `(${ctx.table}.${ctx.d.quoteIdent(field)}->>'lat')::float8`;
+  return `(${lngCol} BETWEEN ${ph(minLng)} AND ${ph(maxLng)} AND ` +
+         `${latCol} BETWEEN ${ph(minLat)} AND ${ph(maxLat)})`;
+}
+
+// Bounding-box prefilter for fallback geoPoint columns (JSON {lng, lat}).
+// Uses degrees-per-meter approximation: 1 deg latitude ≈ 111_320 m, 1 deg
+// longitude ≈ 111_320 * cos(lat) m. The post-filter runs in app code.
+function haversineBboxPrefilter(
+  ctx: CompileCtx,
+  field: string,
+  point: { lng: number; lat: number; withinMeters?: number },
+): string {
+  const radiusM = point.withinMeters ?? 1e9;
+  const latDeg = radiusM / 111_320;
+  const lngDeg = radiusM / (111_320 * Math.cos(point.lat * Math.PI / 180) || 1e-9);
+  const ph = (v: unknown) => ctx.d.placeholder(ctx.params, v);
+  // PG: extract lng/lat from the jsonb. SQLite/MySQL use the same expression
+  // via the dialect's quoteIdent + ->> path operator (dialect-specific).
+  // For PG we use `->>` to get text and cast to float8.
+  const lngCol = `(${ctx.table}.${ctx.d.quoteIdent(field)}->>'lng')::float8`;
+  const latCol = `(${ctx.table}.${ctx.d.quoteIdent(field)}->>'lat')::float8`;
+  return `(${lngCol} BETWEEN ${ph(point.lng - lngDeg)} AND ${ph(point.lng + lngDeg)} AND ` +
+         `${latCol} BETWEEN ${ph(point.lat - latDeg)} AND ${ph(point.lat + latDeg)})`;
 }
 
 function likeOp(ctx: CompileCtx, col: string, pattern: string, ci: boolean): string {
@@ -228,11 +364,17 @@ function compileProjectionCols(
   return Object.keys(model.fields).map((f) => `${table}.${d.quoteIdent(f)}`).join(', ');
 }
 
-function compileOrder(d: Dialect, table: string, orderBy: OrderByEntry[] | undefined): string {
+function compileOrder(d: Dialect, table: string, orderBy: OrderByEntry[] | undefined, model?: ModelDef<any>): string {
   if (!orderBy?.length) return '';
-  const parts = orderBy.map((e) =>
-    d.orderClause(`${table}.${d.quoteIdent(e.field)}`, e.direction, e.nulls),
-  );
+  const parts = orderBy.map((e) => {
+    if (e.nearTo) {
+      // Reference the synthetic alias emitted in SELECT.
+      const fld = model?.fields?.[e.field];
+      const alias = fld?.kind === 'vector' ? '_distance' : '_distanceMeters';
+      return d.orderClause(d.quoteIdent(alias), e.direction);
+    }
+    return d.orderClause(`${table}.${d.quoteIdent(e.field)}`, e.direction, e.nulls);
+  });
   return `ORDER BY ${parts.join(', ')}`;
 }
 
@@ -266,10 +408,47 @@ export function compileSelect(
   const table = dialect.quoteIdent(m.collection);
   const ctx: CompileCtx = { d: dialect, model: m, table, params, aliasCount: { n: 0 }, schemaOverride };
 
-  const cols = compileProjectionCols(dialect, table, m, node.projection);
+  let cols = compileProjectionCols(dialect, table, m, node.projection);
   const distinctClause = node.distinct?.length
     ? `DISTINCT ON (${node.distinct.map((f) => `${table}.${dialect.quoteIdent(f)}`).join(', ')}) `
     : '';
+
+  // Geo / vector: if any orderBy entry has `nearTo`, synthesize a distance
+  // column. Geo → `_distanceMeters` from geoDistanceExpr; vector → `_distance`
+  // from vectorDistanceExpr. Render BEFORE WHERE so placeholders end up in
+  // natural-read order ($1, $2 first; $3+ = WHERE params).
+  const nearToEntry = node.orderBy?.find((e) => e.nearTo);
+  if (nearToEntry?.nearTo) {
+    const fld = m.fields[nearToEntry.field];
+    if (!fld) {
+      throw new Error(`[forge] orderBy.${nearToEntry.field}.nearTo: unknown field.`);
+    }
+    if (fld.kind === 'vector') {
+      const nt = nearToEntry.nearTo as { vector?: number[] };
+      if (!Array.isArray(nt.vector)) {
+        throw new Error(`[forge] orderBy.${nearToEntry.field}.nearTo for vector fields requires a vector array.`);
+      }
+      if (!dialect.vectorDistanceExpr) {
+        throw new Error(`[forge] dialect '${dialect.name}' does not implement vectorDistanceExpr`);
+      }
+      const distExpr = dialect.vectorDistanceExpr(
+        `${table}.${dialect.quoteIdent(nearToEntry.field)}`,
+        fld, nt.vector, params,
+      );
+      cols = `${cols}, ${distExpr} AS _distance`;
+    } else if (fld.kind === 'geoPoint') {
+      if (!dialect.geoDistanceExpr) {
+        throw new Error(`[forge] dialect '${dialect.name}' does not implement geoDistanceExpr`);
+      }
+      const distExpr = dialect.geoDistanceExpr(
+        `${table}.${dialect.quoteIdent(nearToEntry.field)}`,
+        fld, nearToEntry.nearTo as { lng: number; lat: number }, params,
+      );
+      cols = `${cols}, ${distExpr} AS _distanceMeters`;
+    } else {
+      throw new Error(`[forge] orderBy.${nearToEntry.field}.nearTo requires a geoPoint or vector field.`);
+    }
+  }
 
   const whereParts: string[] = [];
   const w = compileWhere(ctx, node.where);
@@ -278,7 +457,7 @@ export function compileSelect(
   if (c) whereParts.push(c);
   const whereClause = whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : '';
 
-  const orderClause = compileOrder(dialect, table, node.orderBy);
+  const orderClause = compileOrder(dialect, table, node.orderBy, m);
   const limit = node.limit != null ? `LIMIT ${Number(node.limit)}` : '';
   const offset = node.offset != null ? `OFFSET ${Number(node.offset)}` : '';
 
@@ -331,7 +510,13 @@ export function compileInsert(
 
   const colList = cols.map((c) => dialect.quoteIdent(c)).join(', ');
   const valueRows = node.rows.map((row) => {
-    const vals = cols.map((c) => dialect.placeholder(params, row[c] ?? null));
+    const vals = cols.map((c) => {
+      const fld = m.fields[c];
+      // valueExpr is the dialect's per-field value emitter (handles geoPoint
+      // wrapping etc.); fall back to a plain placeholder for older dialects.
+      if (fld && dialect.valueExpr) return dialect.valueExpr(fld, params, row[c] ?? null);
+      return dialect.placeholder(params, row[c] ?? null);
+    });
     return `(${vals.join(', ')})`;
   }).join(', ');
 
@@ -359,9 +544,15 @@ export function compileUpdate(
   // first (more intuitive $1, $2, $3 ordering in the emitted SQL).
   const buildSet = (): string[] => {
     const parts: string[] = [];
+    // Per-field value emitter — wraps geoPoint, falls through to placeholder.
+    const valExpr = (col: string, v: unknown): string => {
+      const fld = m.fields[col];
+      if (fld && dialect.valueExpr) return dialect.valueExpr(fld, params, v);
+      return dialect.placeholder(params, v);
+    };
     if (node.set) {
       for (const [k, v] of Object.entries(node.set)) {
-        parts.push(`${dialect.quoteIdent(k)} = ${dialect.placeholder(params, v)}`);
+        parts.push(`${dialect.quoteIdent(k)} = ${valExpr(k, v)}`);
       }
     }
     if (node.increment) {
