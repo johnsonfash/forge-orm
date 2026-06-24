@@ -7,11 +7,6 @@ generation step, no Rust query engine, and no framework to adopt — just
 readable TypeScript over the official drivers, organised one adapter per
 database.
 
-Geo (`f.geoPoint()` + `near` / `nearTo` / `withinPolygon`), vector similarity
-(`f.vector(N)` + the same `near` / `nearTo` vocabulary), JSON path queries
-(`{ meta: { path: 'profile.age', gte: 18 } }`), and full-text search
-(`.searchable()`) all work cross-dialect through the same wrapper API.
-
 ```
 npm install forge-orm
 ```
@@ -35,10 +30,30 @@ const alice = await db.user.create({ data: { email: 'a@x.co', name: 'Alice' } })
 const users = await db.user.findMany({ where: { name: { contains: 'Ali' } }, take: 10 });
 ```
 
-That same code works whether `DATABASE_URL` is a Postgres, MySQL, SQLite,
+The same code works whether `DATABASE_URL` is a Postgres, MySQL, SQLite,
 DuckDB, SQL Server, or Mongo connection string. forge picks the right
 driver from the URL prefix (`postgres:`, `mysql:`, `sqlite:`, `duckdb:`,
 `mssql:`, `mongodb:`).
+
+Beyond the basics, forge ships first-class typed support for the things
+you usually have to drop to raw SQL for:
+
+* **Geo** — `f.geoPoint()` + `near` / `nearTo` / `withinPolygon`,
+  compiling to PostGIS / MySQL spatial / SpatiaLite / DuckDB spatial /
+  MSSQL `GEOGRAPHY` / Mongo `2dsphere`. App-side Haversine fallback when
+  no spatial extension is installed.
+* **Vector similarity** — `f.vector(1536, { metric: 'cosine' })` + the
+  same `near` / `nearTo` vocabulary, compiling to pgvector / DuckDB vss
+  HNSW / MSSQL `VECTOR_DISTANCE` / MySQL 9 `DISTANCE` / sqlite-vec /
+  Mongo Atlas `$vectorSearch`.
+* **JSON path queries** — `where: { meta: { path: 'profile.age', gte: 18 } }`
+  on any `f.json()` / `f.embed()` / `f.embedMany()` / array column,
+  compiling to PG `->/->>`, MySQL `JSON_EXTRACT`, SQLite / DuckDB
+  `json_extract`, MSSQL `JSON_VALUE`, Mongo dotted-key form.
+* **Full-text search** — `f.text().searchable()` builds the right index
+  per dialect (Postgres GIN tsvector, MySQL `FULLTEXT`, SQLite FTS5 with
+  shadow-table triggers, Mongo `text`, DuckDB `fts`) and the `search`
+  operator queries it.
 
 ---
 
@@ -49,8 +64,11 @@ driver from the URL prefix (`postgres:`, `mysql:`, `sqlite:`, `duckdb:`,
 * [Install and pick your driver](#install-and-pick-your-driver)
 * [Connecting](#connecting)
   * [Pluggable drivers](#pluggable-drivers)
+  * [Wire-compatible databases (no new code needed)](#wire-compatible-databases-no-new-code-needed)
+  * [Coming soon](#coming-soon)
 * [Defining a schema](#defining-a-schema)
   * [Models and automatic values (id, timestamps)](#models-and-automatic-values-id-timestamps)
+  * [Picking a primary-key strategy](#picking-a-primary-key-strategy)
   * [Field types](#field-types)
   * [Field modifiers](#field-modifiers)
   * [Indexes and unique constraints](#indexes-and-unique-constraints)
@@ -58,19 +76,21 @@ driver from the URL prefix (`postgres:`, `mysql:`, `sqlite:`, `duckdb:`,
   * [Embedded objects](#embedded-objects)
 * [Reading data](#reading-data)
   * [Filtering with `where`](#filtering-with-where)
-    * [Comparing two columns: `col()`](#comparing-two-columns-col)
+  * [Operator reference](#operator-reference)
+  * [Comparing two columns: `col()`](#comparing-two-columns-col)
   * [Choosing fields: `select` and `include`](#choosing-fields-select-and-include)
   * [Sorting and pagination](#sorting-and-pagination)
 * [Writing data](#writing-data)
-  * [Number and field updates](#number-and-field-updates)
+  * [Atomic number ops](#atomic-number-ops)
   * [Writing related records in one call](#writing-related-records-in-one-call)
   * [Deletes and cascades](#deletes-and-cascades)
 * [Grouping and aggregates](#grouping-and-aggregates)
+  * [Distinct](#distinct)
 * [Transactions](#transactions)
 * [Running raw SQL](#running-raw-sql)
 * [Errors](#errors)
 * [Full-text search](#full-text-search)
-* [Geo (geoPoint, near, nearTo)](#geo-geopoint-near-nearto)
+* [Geo (geoPoint, near, nearTo, withinPolygon)](#geo-geopoint-near-nearto-withinpolygon)
 * [JSON path queries](#json-path-queries)
 * [Vector similarity search](#vector-similarity-search)
 * [Streaming large results](#streaming-large-results)
@@ -78,12 +98,17 @@ driver from the URL prefix (`postgres:`, `mysql:`, `sqlite:`, `duckdb:`,
 * [Views and materialised views](#views-and-materialised-views)
 * [Watching queries](#watching-queries)
 * [Creating tables and migrations](#creating-tables-and-migrations)
+  * [Pointing the CLI at your schema](#pointing-the-cli-at-your-schema)
+  * [Ignoring drift on `forge diff`](#ignoring-drift-on-forge-diff)
+  * [`forge doctor` — live capability probe](#forge-doctor--live-capability-probe)
+  * [Extensions and `forge push --enable-extensions`](#extensions-and-forge-push---enable-extensions)
 * [Dropping to raw queries with `.compile`](#dropping-to-raw-queries-with-compile)
 * [Type safety](#type-safety)
   * [Row + db helpers](#row--db-helpers)
   * [Direct-from-model inference (`Infer*`)](#direct-from-model-inference-infer)
 * [Performance](#performance)
 * [Testing](#testing)
+  * [Driver smoke harness](#driver-smoke-harness)
 * [Limitations and honest notes](#limitations-and-honest-notes)
 * [Contributing](#contributing)
 
@@ -94,8 +119,8 @@ driver from the URL prefix (`postgres:`, `mysql:`, `sqlite:`, `duckdb:`,
 forge is a thin wrapper. It turns a Prisma-style call such as
 `db.user.findMany({ where: { active: true } })` into the right query for your
 database and runs it through the official driver (`pg`, `mysql2`,
-`better-sqlite3`, or `mongodb`). The drivers do the actual work; forge builds
-the queries and shapes the results.
+`better-sqlite3`, `mongodb`, `@duckdb/node-api`, `mssql`). The drivers do the
+actual work; forge builds the queries and shapes the results.
 
 Reach for forge when you want one query API across more than one database, a
 dependency small enough to read and fork, full TypeScript autocomplete with no
@@ -113,62 +138,42 @@ Full release history is in [CHANGELOG.md](./CHANGELOG.md). Recent highlights:
 
 - **2.3 — DuckDB + MSSQL adapters, end-to-end geo, JSON path queries, vector search.**
   Two new dialects (`duckdb:` and `mssql:` URL prefixes); typed geo
-  (`f.geoPoint()` + `near` / `nearTo` / `withinPolygon` across all 6 dialects
-  with a fallback mode for envs without the spatial extension); typed JSON
+  (`f.geoPoint()` + `near` / `nearTo` / `withinPolygon` across all 6 dialects,
+  plus a fallback mode for envs without the spatial extension); typed JSON
   path reads (`where: { meta: { path: 'profile.age', gte: 18 } }`); typed
   vector similarity (`f.vector(1536, { metric: 'cosine' })` + the same
   `near` / `nearTo` vocabulary, compiling to pgvector / DuckDB vss / MSSQL
   `VECTOR_DISTANCE` / Mongo `$vectorSearch`); `forge doctor` live
   capability probe; `forge push --enable-extensions`; a throwaway driver
-  smoke harness (`npm run smoke:drivers`). See the new sections below.
+  smoke harness (`npm run smoke:drivers`).
 - **2.2 — `IndexDef` covers the shapes `forge push` couldn't model.** SQL
   partial indexes (`where: 'deleted_at IS NULL'`), expression indexes
   (`expression: 'lower(email)'`), Postgres access methods (`gin` / `gist` /
-  `brin` / `hash`) plus `INCLUDE` covering columns, and Mongo geospatial
-  (`'2dsphere'` / `'2d'`), hashed shard keys, collation, and wildcard
-  projection. See [Indexes and unique constraints](#indexes-and-unique-constraints).
+  `brin` / `hash`) plus `INCLUDE` covering columns, MySQL `FULLTEXT` parser
+  plugins / invisible indexes / multi-valued JSON indexes, and Mongo
+  geospatial (`'2dsphere'` / `'2d'`), hashed shard keys, collation, and
+  wildcard projection.
 - **2.1 — partial indexes on MongoDB.** A schema `IndexDef` now accepts
   `partialFilterExpression`, so `forge push` can build a partial index — e.g. a
-  unique index that only covers documents where the field is a string. MongoDB
-  only; ignored by the SQL dialects. See [Indexes and unique constraints](#indexes-and-unique-constraints).
-- **2.0.1 — upsert bug fix (MongoDB).** `upsert()` no longer emits the same path
-  in both `$setOnInsert` and an update operator (which Mongo rejected with
-  "would create a conflict"). Fields the update writes are dropped from
-  `$setOnInsert`; create/update overlap (counter `increment`, set-on-both) now
-  just works. See [Transactions](#transactions) note and the CHANGELOG.
+  unique index that only covers documents where the field is a string.
 - **2.0 — `delete()` is always a hard delete.** Breaking change: `delete()` /
   `deleteMany()` permanently remove rows on every model; the recoverable path is
   the explicit `softDelete()` / `restore()` verbs. See [Soft delete](#soft-delete).
 - **1.9 — pluggable MySQL + Mongo.** MySQL adds `mariadbDriver` and
   `planetscaleDriver` alongside the default `mysql2`; Mongo lets you bring your
   own `MongoClient` (`mongoDriver`) for DocumentDB / Cosmos / FerretDB / custom
-  options. All four databases are now pluggable. (Also fixed a latent bug: a
-  `col()`/non-eq guard on a MySQL `update`/`delete` referenced IR internals as
-  columns.) See [Pluggable drivers](#pluggable-drivers).
+  options.
 - **1.8 — pluggable Postgres drivers.** Use `postgres.js` (porsager) instead of
   `node-postgres`, or any client you wrap, via `createDb({ driver: postgresJsDriver(...) })`.
-  Same port idea as 1.7. See [Pluggable drivers](#pluggable-drivers).
 - **1.7 — pluggable SQLite drivers.** Run forge in React Native (`expo-sqlite`,
-  `op-sqlite`), on the edge / Turso (`libsql`), or over any driver you wrap —
-  not just Node's `better-sqlite3`. Pass `createDb({ driver })`; everything
-  routes through one normalized async port. See
-  [Pluggable drivers](#pluggable-drivers).
-- **1.6 — richer aggregates.** `groupBy`'s `having` now accepts both Prisma's
-  field-first shape (`{ total: { _sum: { gte: 1 } } }`) **and** the bucket-first
-  shape (`{ _sum: { total: { gte: 1 } } }`), and `count({ distinct: [...] })` is
-  fixed on MongoDB (it now counts distinct combinations, matching the SQL
-  dialects). See [Grouping and aggregates](#grouping-and-aggregates).
+  `op-sqlite`), on the edge / Turso (`libsql`), or over any driver you wrap.
+- **1.6 — richer aggregates.** `groupBy`'s `having` accepts both Prisma's
+  field-first shape and the bucket-first shape; `count({ distinct: [...] })`
+  is fixed on MongoDB.
 - **1.5 — `col()` for field-to-field comparison.** Compare one column against
   another inside a `where` (`{ currentUsage: { lt: col('globalLimit') } }`),
-  portable across every dialect — Mongo `$expr`, SQL `a <op> b`. This makes an
-  atomic, race-safe guarded counter expressible through the normal `update()`
-  API. See [Comparing two columns](#comparing-two-columns-col). (1.5.1 also
-  fixed a `findOneAndUpdate` result-unwrap bug that affected `update()` on
-  models with a field literally named `value`.)
+  portable across every dialect.
 - **1.4 — primary-key strategies on `f.id()`** (`auto` / `uuid` / `bigserial`).
-  SQL-only services can pick a classic auto-incrementing integer PK without raw
-  DDL; UUIDs and ObjectIds are unchanged. See
-  [Picking a primary-key strategy](#picking-a-primary-key-strategy).
 
 ---
 
@@ -194,7 +199,7 @@ npm install pg             # add the one you need
 ```
 
 The driver loads lazily, the first time you actually run a query against that
-database. So importing forge, defining a schema, or using one database never
+database. Importing forge, defining a schema, or using one database never
 needs the other databases' drivers installed. If a driver is missing when you
 connect, you get a clear message telling you what to install rather than a
 crash.
@@ -229,7 +234,7 @@ Options:
 * `schema` is your model map. `db.<key>` exists for each key (for example
   `db.user`, `db.post`).
 * `type` (optional) forces the database type if the URL is ambiguous:
-  `'postgres' | 'mysql' | 'sqlite' | 'mongo'`.
+  `'postgres' | 'mysql' | 'sqlite' | 'mongo' | 'duckdb' | 'mssql'`.
 * `strict` (optional, default `false`). When `true`, a query that filters on an
   unknown field name throws instead of silently matching nothing. Useful for
   catching typos.
@@ -242,8 +247,8 @@ await createDb({ type: 'postgres', host: 'localhost', database: 'app', user: 'me
 
 ### Pluggable drivers
 
-All four databases ship a sensible default driver, and all four let you swap in
-another client — for React Native, edge/serverless runtimes, or a managed /
+All six databases ship a sensible default driver, and all six let you swap in
+another client — for React Native, edge / serverless runtimes, or a managed /
 API-compatible backend. Instead of a URL you open the client yourself (you own
 its config and lifecycle), wrap it with one of forge's driver factories, and
 pass it as `driver`. The query API is identical whichever client backs it.
@@ -310,6 +315,8 @@ Each port is a small interface, so any other client fits too:
 * **SQLite** (`SqliteDriver`) — `all`, `get`, `run`, `exec`, `close`, optional `iterate`.
 * **Postgres** (`PostgresDriver`) / **MySQL** (`MysqlDriver`) — `query` + `transaction` + `close`, optional `stream`.
 * **MongoDB** (`MongoDriver`) — a pre-built `MongoClient` (plus an optional database name).
+* **DuckDB** (`DuckdbDriver`) — `run` / `all` over the `@duckdb/node-api` connection.
+* **MSSQL** (`MssqlDriver`) — `query` + `transaction` over a `mssql` pool.
 
 One caveat: `forge push` / `applyMigration` (DDL) still assume each database's
 **default** driver. With an injected driver, run runtime queries through forge
@@ -317,7 +324,7 @@ and manage schema/DDL with the default client (or separately).
 
 ### Wire-compatible databases (no new code needed)
 
-Several databases speak the wire protocol of one of the four forge supports.
+Several databases speak the wire protocol of one of the six forge supports.
 They work today through the matching adapter — point the existing driver at
 them:
 
@@ -335,18 +342,23 @@ them:
 | **FerretDB** | mongo | `mongoDriver(new MongoClient(ferretUri), dbName)` |
 | **Turso** | sqlite | `libsqlDriver` — built in |
 | **Cloudflare D1** | sqlite | Wrap the D1 client in a thin `SqliteDriver` port (`all`/`get`/`run`/`exec`) |
+| **MotherDuck** | duckdb | `duckdbDriver` against the MotherDuck token URL |
+| **Azure SQL Database** | mssql | `mssqlDriver` against the Azure SQL URL |
+| **Azure SQL Edge** | mssql | `mssqlDriver` — used as the ARM-Mac test fallback for SQL Server 2022 |
 
-If your database isn't on the list and doesn't speak one of the four wire
+If your database isn't on the list and doesn't speak one of the six wire
 protocols, the answer is "implement the matching port interface" — same
 ~5-method surface every built-in driver implements.
 
 ### Coming soon
 
-| Database | Status | Tracking |
+| Item | Status | Target |
 |---|---|---|
-| **MSSQL upsert via `MERGE`** | INSERT/UPDATE/DELETE/SELECT work today; upsert throws NotImplemented in 2.3. | 2.4.0 |
-| **Mongo `nearTo` cross-field** | If a `near` filter targets field A and a `nearTo` orderBy targets field B, the `$geoNear` stage only honors B. | 2.4.0 |
+| **MSSQL upsert via `MERGE`** | INSERT / UPDATE / DELETE / SELECT work today; upsert throws `NotImplemented` in 2.3 with a pointer at v2.4. | 2.4.0 |
+| **Mongo `nearTo` cross-field** | If a `near` filter targets field A and a `nearTo` orderBy targets field B, the `$geoNear` stage only honors B (single-stage limit). | 2.4.0 |
 | **MultiPolygon / GeometryCollection** | Single-polygon `withinPolygon` works. Multi-ring / hole shapes need raw queries. | TBD |
+| **3D / Z coordinates** | Not modeled — store altitude as a separate scalar. | TBD |
+| **SRID reprojection** | WGS84 only — UTM / state-plane need raw queries. | TBD |
 
 If you need another database, file an issue. The bar to add a new adapter is
 ~10 small files: `dialect`, `driver`, `ddl`, `compile-from-ir`, `execute`,
@@ -392,27 +404,13 @@ from the schema literal — TypeScript already preserves the model types and
 the literal keys, so `db.user.findFirst({ where: { … } })` autocompletes
 either way.
 
-Why we still suggest writing it:
-
-- It future-proofs the call site if you ever inline a model literal or add a
-  string discriminator next to the models (string literals widen to `string`
-  without `as const`).
-- It keeps the schema readable as a fixed set of keys for downstream tooling
-  that does `keyof typeof schema`.
-- It costs nothing.
-
-The library's `SchemaShape` accepts both mutable and readonly schemas — so
-omitting `as const` won't change what types you get for `db.*` accessors or
-for `Row<typeof User>` / `InferCreate<typeof Post>`. It's a habit, not a
-load-bearing token.
-
 ### Models and automatic values (id, timestamps)
 
 `model(tableName, fields)` declares a table (or a Mongo collection). The first
 argument is the real table name in the database; the object key you give it in
 the schema (`user`, `post`) is what you type as `db.user`.
 
-forge fills in three kinds of value for you, so you do not have to:
+forge fills in three kinds of value for you so you don't have to:
 
 **Primary key (`f.id()`).** Every model has one. When you create a row without
 passing an `id`, forge generates one automatically on **every** database:
@@ -422,74 +420,21 @@ await db.user.create({ data: { email: 'a@x.co', name: 'A' } });  // id is genera
 ```
 
 The default id is a **string**: an `ObjectId` on Mongo, and a UUID on
-Postgres, MySQL, and SQLite. It's a string (not a sequential number) so the
-same model is portable across all four databases. You can still pass your own
-`id` if you want to control it, and you can let the database generate it
-instead with a UUID default:
+Postgres, MySQL, SQLite, DuckDB, and MSSQL. It's a string (not a sequential
+number) so the same model is portable across all six databases. You can
+still pass your own `id` if you want to control it, and you can let the
+database generate it instead with a UUID default:
 
 ```ts
 id: f.uuid({ default: 'gen_random_uuid' })   // Postgres/MySQL fill it in server-side
 ```
-
-#### Picking a primary-key strategy
-
-If you want something other than the default, pass `f.id({ type })`:
-
-```ts
-id: f.id()                            // default — app-generated string id (string in TS)
-id: f.id({ type: 'auto' })            // same as the default; explicit form
-id: f.id({ type: 'uuid' })            // DB-typed UUID column (PG `uuid`, MySQL `CHAR(36)`)
-id: f.id({ type: 'bigserial' })       // auto-incrementing integer PK — number in TS
-```
-
-What each one emits per dialect:
-
-| Strategy     | Postgres                       | MySQL                              | SQLite                                  | Mongo            | JS type  |
-| ------------ | ------------------------------ | ---------------------------------- | --------------------------------------- | ---------------- | -------- |
-| `auto` (default) | `text`                     | `VARCHAR(64)`                      | `TEXT`                                  | `ObjectId`       | `string` |
-| `uuid`       | `uuid`                         | `CHAR(36)`                         | `TEXT`                                  | (same as `auto`) | `string` |
-| `bigserial`  | `BIGSERIAL`                    | `BIGINT NOT NULL AUTO_INCREMENT`   | `INTEGER PRIMARY KEY AUTOINCREMENT`     | **throws at push** | `number` |
-
-`bigserial` is the SQL-only opt-in. Forge runs `forge push` on Mongo with a
-clear error if you use it (`'bigserial' has no Mongo equivalent`), so a
-schema mistake fails fast instead of half-applying. Use it when you're
-running a SQL-only service and you want classic integer keys; stay on
-`auto` or `uuid` for cross-DB portability.
-
-With `bigserial`, the DB assigns the id — you don't pass one at create time,
-and `Row<typeof Model>['id']` is typed as `number`:
-
-```ts
-// 1. declare it in your schema
-const Order = model('orders', {
-  id:     f.id({ type: 'bigserial' }),    // PG fills with nextval, MySQL with AUTO_INCREMENT, SQLite with the rowid alias
-  total:  f.int(),
-});
-```
-
-```sh
-# 2. push the schema to your database
-npx forge push
-# emits the right DDL per dialect; on Mongo this errors with a clear message
-```
-
-```ts
-// 3. use it from the typed client
-const o = await db.order.create({ data: { total: 5_000 } });
-o.id;          // ✓ number — TypeScript knows
-await db.order.findFirst({ where: { id: 47 } });
-```
-
-Adding `bigserial` to an existing table? `forge diff` shows you the column
-change before you push, and `forge diff apply` writes a timestamped
-reconciliation migration if you'd rather review the SQL first.
 
 **Created-at (`f.dateTime().default('now')`).** Set to the current time when the
 row is created. You never pass it.
 
 **Updated-at (`f.dateTime().default('now').updatedAt()`).** Set when the row is
 created and **automatically bumped to the current time on every update**, on all
-four databases. You never pass it.
+six databases. You never pass it.
 
 ```ts
 const post = await db.post.create({ data: { title: 'Hi' } });
@@ -502,45 +447,113 @@ await db.post.update({ where: { id: post.id }, data: { title: 'Hello' } });
 `f.objectId()` is for a column that holds another row's id (a foreign key). On
 Mongo it stores an `ObjectId`; on SQL it is plain text.
 
+### Picking a primary-key strategy
+
+If you want something other than the default, pass `f.id({ type })`:
+
+```ts
+id: f.id()                            // default — app-generated string id (string in TS)
+id: f.id({ type: 'auto' })            // same as the default; explicit form
+id: f.id({ type: 'uuid' })            // DB-typed UUID column (PG `uuid`, MySQL `CHAR(36)`)
+id: f.id({ type: 'bigserial' })       // auto-incrementing integer PK — number in TS
+```
+
+What each one emits per dialect:
+
+| Strategy     | Postgres                       | MySQL                              | SQLite                                  | DuckDB / MSSQL | Mongo            | JS type  |
+| ------------ | ------------------------------ | ---------------------------------- | --------------------------------------- | -------------- | ---------------- | -------- |
+| `auto` (default) | `text`                     | `VARCHAR(64)`                      | `TEXT`                                  | `TEXT` / `NVARCHAR(64)` | `ObjectId`       | `string` |
+| `uuid`       | `uuid`                         | `CHAR(36)`                         | `TEXT`                                  | (same as `auto`) | (same as `auto`) | `string` |
+| `bigserial`  | `BIGSERIAL`                    | `BIGINT NOT NULL AUTO_INCREMENT`   | `INTEGER PRIMARY KEY AUTOINCREMENT`     | `BIGINT … IDENTITY` (MSSQL) | **throws at push** | `number` |
+
+`bigserial` is the SQL-only opt-in. Forge runs `forge push` on Mongo with a
+clear error if you use it (`'bigserial' has no Mongo equivalent`), so a
+schema mistake fails fast instead of half-applying. Use it when you're
+running a SQL-only service and you want classic integer keys; stay on
+`auto` or `uuid` for cross-DB portability.
+
+With `bigserial`, the DB assigns the id — you don't pass one at create time,
+and `Row<typeof Model>['id']` is typed as `number`:
+
+```ts
+const Order = model('orders', {
+  id:     f.id({ type: 'bigserial' }),
+  total:  f.int(),
+});
+
+const o = await db.order.create({ data: { total: 5_000 } });
+o.id;          // ✓ number — TypeScript knows
+await db.order.findFirst({ where: { id: 47 } });
+```
+
+Adding `bigserial` to an existing table? `forge diff` shows you the column
+change before you push, and `forge diff apply` writes a timestamped
+reconciliation migration if you'd rather review the SQL first.
+
 ### Field types
 
-| Builder                              | Type in your code | Notes                                                                 |
-| ------------------------------------ | ----------------- | --------------------------------------------------------------------- |
-| `f.id()`                             | `string`          | Primary key, auto-generated when omitted. Pass `{ type: 'uuid' \| 'bigserial' }` to switch strategy. |
-| `f.objectId()`                       | `string`          | A reference to another row's id (foreign key).                        |
-| `f.string()`                         | `string`          | Short text. On MySQL this is `VARCHAR(255)` so it can be indexed.     |
-| `f.text()`                           | `string`          | Long text. On MySQL this is `TEXT`.                                   |
-| `f.int()`                            | `number`          | 32-bit integer.                                                       |
-| `f.float()`                          | `number`          | Floating point number.                                                |
-| `f.decimal({ precision, scale })`    | `string`          | Exact numbers like money. Returned as a string so digits are exact.   |
-| `f.bigint()`                         | `bigint`          | 64-bit integer.                                                       |
-| `f.uuid({ default })`                | `string`          | UUID. Pass `{ default: 'gen_random_uuid' }` for a database default.   |
-| `f.bool()`                           | `boolean`         | Stored as 0 or 1 on MySQL and SQLite, decoded back to a boolean.      |
-| `f.dateTime()`                       | `Date`            | Timestamp. Accepts a `Date` or an ISO string on input.                |
-| `f.json()`                           | `any`             | Arbitrary JSON. `jsonb` on Postgres, `JSON` on MySQL.                 |
-| `f.enumOf(['A','B'] as const)`       | `'A' \| 'B'`      | A fixed set of string values, checked by the database.                |
-| `f.embed(MyShape)`                   | object            | One nested object. Stored as JSON on SQL, a sub-document on Mongo.    |
-| `f.embedMany(MyShape)`               | object[]          | A list of nested objects.                                             |
-| `f.stringArray()` / `f.intArray()`   | `string[]` / `number[]` | A list of scalars. A native array on Postgres, JSON elsewhere.  |
+Every field builder. Chain modifiers (`.optional()`, `.unique()`, `.default(…)`,
+`.searchable()`, `.softDeleteAt()`, `.dbgenerated(…)`, `.updatedAt()`) onto any
+of them.
+
+| Builder                              | TS type                          | Storage per dialect / notes                                                                 |
+| ------------------------------------ | -------------------------------- | ------------------------------------------------------------------------------------------- |
+| `f.id()`                             | `string`                         | Primary key, auto-generated when omitted. Pass `{ type: 'auto' \| 'uuid' \| 'bigserial' }`. |
+| `f.objectId()`                       | `string`                         | Foreign-key style. Mongo `ObjectId`; SQL `TEXT`.                                            |
+| `f.string()`                         | `string`                         | Short text. MySQL `VARCHAR(255)` (indexable). PG/SQLite/DuckDB `TEXT`, MSSQL `NVARCHAR(255)`. |
+| `f.text()`                           | `string`                         | Long text. MySQL `TEXT`. PG `text`, MSSQL `NVARCHAR(MAX)`, DuckDB `TEXT`.                   |
+| `f.int()`                            | `number`                         | 32-bit integer.                                                                             |
+| `f.float()`                          | `number`                         | Floating point.                                                                             |
+| `f.decimal({ precision, scale })`    | `string`                         | Exact numerics (money). PG `numeric(p,s)` / MySQL `DECIMAL(p,s)` / SQLite `NUMERIC` / Mongo `Decimal128`. Returned as a string to avoid float-precision loss. |
+| `f.bigint()`                         | `bigint`                         | 64-bit integer. Use `1n` literals. PG `bigint` / MySQL `BIGINT` / SQLite `INTEGER` / Mongo `Long`. |
+| `f.uuid({ default? })`               | `string`                         | UUID. Pass `{ default: 'gen_random_uuid' }` for a server-side default on PG / MySQL.        |
+| `f.bool()`                           | `boolean`                        | Stored as 0/1 on MySQL and SQLite, decoded back to a boolean.                               |
+| `f.dateTime()`                       | `Date`                           | Timestamp. Accepts a `Date` or an ISO string on input.                                      |
+| `f.json()`                           | `any`                            | Arbitrary JSON. `jsonb` on Postgres, `JSON` on MySQL / MSSQL, `TEXT` on SQLite.             |
+| `f.enumOf(['A','B'] as const)`       | `'A' \| 'B'`                     | A fixed set of string values, checked by the database where supported.                     |
+| `f.embed(Shape)`                     | `Shape`                          | One nested object. Stored as JSON on SQL, sub-document on Mongo.                            |
+| `f.embedMany(Shape)`                 | `Shape[]`                        | A list of nested objects. Defaults to `[]`.                                                 |
+| `f.stringArray()` / `f.intArray()`   | `string[]` / `number[]`          | A list of scalars. Native array on Postgres, JSON elsewhere.                                |
+| **`f.geoPoint({ srid?, fallback? })`** | **`{ lng: number; lat: number }`** | **2D geographic point (WGS84 / SRID 4326). PG `geography(Point, 4326)` (PostGIS) / MySQL `POINT NOT NULL SRID 4326` / SpatiaLite geometry / DuckDB `GEOMETRY` (spatial) / MSSQL `GEOGRAPHY` / Mongo GeoJSON. Pair with `method: 'spatial'`. `fallback: true` stores JSON + Haversine post-filter when no extension is installed.** |
+| **`f.vector(dims, { metric? })`**    | **`number[]`**                    | **Dense numeric vector for embeddings / semantic search. PG `vector(N)` (pgvector) / MySQL `VECTOR(N)` (9.0+) / SQLite JSON+`sqlite-vec` / DuckDB `FLOAT[N]` (vss HNSW) / MSSQL `VECTOR(N)` (2025+) / Mongo plain array + Atlas Vector Search. `metric` is `'cosine'` (default), `'l2'`, or `'dot'`. Pair with `method: 'vector'`.** |
 
 ### Field modifiers
 
-Chain these onto any field.
+Chain these onto any field builder. Modifiers are immutable — they return a
+new `Field` with the modifier applied.
+
+| Modifier                            | What it does                                                                                          | Notes / dialect quirks                                                          |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `.optional()`                       | Allows `null`. The TS type becomes `T \| null`.                                                       | Maps to `NULL` in SQL DDL, no required-presence check on Mongo.                 |
+| `.unique()`                         | Adds a unique index on the column.                                                                    | Sparse-on-optional is automatic on Mongo.                                       |
+| `.default(value)`                   | Static default applied at create when no value is passed.                                              | The `value` is literal — strings, numbers, booleans, objects, arrays.           |
+| `.default('now')`                   | Current timestamp at create. Use on `f.dateTime()`.                                                    | Drives the `created_at` pattern.                                                |
+| `.default('autoId')`                | Server-generated id (used internally by `f.id()`).                                                     | Rarely needed by hand.                                                          |
+| `.updatedAt()`                      | Auto-bumped to the current time on every update.                                                       | Combine with `.default('now')` for the canonical `updated_at`.                  |
+| `.searchable()`                     | Tells `forge push` to build the right full-text index for this column (see [Full-text search](#full-text-search)). | Postgres `GIN` tsvector, MySQL `FULLTEXT`, SQLite `FTS5` shadow table + triggers, Mongo `text`, DuckDB `fts`. MSSQL: out-of-band (manual `FULLTEXT CATALOG`). |
+| `.softDeleteAt()`                   | Marks this `f.dateTime()` column as the soft-delete column (see [Soft delete](#soft-delete)).         | Forces optional. Reads auto-filter `WHERE col IS NULL`. One per model.          |
+| `.dbgenerated('expr')`              | Database-computed column. The wrapper never writes it; the DB evaluates `<expr>` on every change.     | PG / MySQL emit `GENERATED ALWAYS AS (<expr>) STORED`; SQLite uses the same shape; Mongo warns and skips. |
 
 ```ts
-f.string().optional()                 // the value can be null
-f.string().unique()                   // a unique index on this column
-f.dateTime().default('now')           // default to the current time (created-at)
-f.dateTime().default('now').updatedAt()  // set on create and auto-bumped on every update
-f.string().default('pending')         // a fixed default value
-f.text().searchable()                 // build a full-text index (see Full-text search)
-f.dateTime().softDeleteAt()           // mark this as the soft-delete column (see Soft delete)
-f.decimal({ precision: 12, scale: 2 }).dbgenerated('price * qty')  // computed by the database
+f.string().optional()                                       // value can be null
+f.string().unique()                                         // unique index on this column
+f.string().default('pending')                               // static default
+f.bool().default(true)                                      // bool default
+f.dateTime().default('now')                                 // created-at
+f.dateTime().default('now').updatedAt()                     // updated-at (set on create AND auto-bumped on update)
+f.text().searchable()                                       // build a full-text index
+f.dateTime().softDeleteAt()                                 // mark as the soft-delete column
+f.decimal({ precision: 12, scale: 2 })
+  .dbgenerated('"price" * "qty"')                           // computed by the DB
 ```
 
 ### Indexes and unique constraints
 
-Pass an options object as the third argument to `model`.
+Pass an options object as the third argument to `model`. The same `IndexDef`
+shape carries every common production index family — partial, expression,
+covering, geospatial, vector, hashed, wildcard, full-text, and more. Each
+field that doesn't apply on a given dialect is dropped at push with a clear
+warning, so one schema can target Mongo and SQL.
 
 ```ts
 const Post = model('posts', {
@@ -554,9 +567,7 @@ const Post = model('posts', {
 });
 ```
 
-Beyond the basics, `IndexDef` carries every common production index shape.
-The same field on a dialect that doesn't support it is dropped at push with
-a warning, so a single schema can target both Mongo and SQL.
+The full index vocabulary:
 
 ```ts
 indexes: [
@@ -570,8 +581,19 @@ indexes: [
   // TTL (Mongo).
   { keys: { createdAt: 1 }, expireAfterSeconds: 60 * 60 * 24 },
 
-  // Mongo geospatial. `$near` / `$geoWithin` queries need this.
+  // Mongo geospatial — `$near` / `$geoWithin` queries need this.
   { keys: { location: '2dsphere' } },
+
+  // Spatial index — portable across dialects. Forge resolves the right
+  // native family per dialect (PostGIS GIST, MySQL SPATIAL, DuckDB RTREE,
+  // MSSQL CREATE SPATIAL INDEX, Mongo 2dsphere, SQLite virtual rtree).
+  // Pair with f.geoPoint().
+  { keys: { location: 1 }, method: 'spatial' },
+
+  // Vector index — pgvector HNSW / DuckDB vss HNSW / MSSQL VECTOR HNSW.
+  // Mongo and SQLite log a clean warning (their vector index is created
+  // out-of-band). Pair with f.vector(N, { metric }).
+  { keys: { embedding: 1 }, method: 'vector' },
 
   // Mongo hashed — required for a hashed shard key.
   { keys: { tenant: 'hashed' } },
@@ -595,14 +617,10 @@ indexes: [
   // Expression index. Postgres / MySQL 8+ / SQLite. Mongo skips with a warning.
   { keys: {}, expression: 'lower(email)' },
 
-  // MySQL spatial / fulltext. Statement-prefix keywords on MySQL, not USING.
-  { keys: { geom: 1 }, method: 'spatial' },
-  { keys: { body: 1 }, method: 'fulltext' },
-
-  // MySQL FULLTEXT parser plugin — `'ngram'` for CJK, `'mecab'` for Japanese.
+  // MySQL fulltext with parser plugin — `'ngram'` for CJK, `'mecab'` for Japanese.
   { keys: { body: 1 }, method: 'fulltext', parser: 'ngram' },
 
-  // MySQL 8+ invisible index — visible: false. The optimizer ignores it,
+  // MySQL 8+ invisible index — the optimizer ignores it,
   // useful for canary-testing whether an index is load-bearing before drop.
   { keys: { obsolete: 1 }, visible: false },
 
@@ -614,24 +632,26 @@ indexes: [
 
 What each field does, per dialect:
 
-| Field                       | Mongo                | Postgres            | MySQL               | SQLite              |
-|-----------------------------|----------------------|---------------------|---------------------|---------------------|
-| `keys: { col: 1 / -1 }`     | yes                  | yes                 | yes                 | yes                 |
-| `keys: { col: 'text' }`     | text index           | text_pattern_ops    | column kept         | column kept         |
-| `keys: { col: '2dsphere'/'2d'/'hashed' }` | yes    | ignored             | ignored             | ignored             |
-| `unique` / `sparse`         | yes                  | yes (sparse auto on optional) | yes/n/a   | yes/n/a             |
-| `expireAfterSeconds`        | yes                  | n/a                 | n/a                 | n/a                 |
-| `partialFilterExpression`   | yes                  | n/a                 | n/a                 | n/a                 |
-| `where` (object)            | alias of PFE         | translated to SQL   | warn + skip         | translated to SQL   |
-| `where` (SQL string)        | n/a                  | WHERE …             | warn + skip         | WHERE …             |
-| `include: [cols]`           | n/a                  | INCLUDE (…)         | warn + skip         | warn + skip         |
-| `expression: 'sql'`         | warn + skip          | ((expr))            | ((expr))            | (expr)              |
-| `method: gin/gist/brin/hash`| n/a                  | USING …             | warn (ignored)      | warn (ignored)      |
-| `method: spatial/fulltext`  | n/a                  | DB rejects          | statement prefix    | warn (ignored)      |
-| `parser: 'ngram'/'mecab'`   | n/a                  | warn (ignored)      | WITH PARSER … (only on fulltext) | warn (ignored) |
-| `visible: false`            | n/a                  | warn (ignored)      | INVISIBLE (MySQL 8) | warn (ignored)      |
-| `collation`                 | yes                  | n/a (use expression)| n/a                 | n/a                 |
-| `wildcardProjection`        | yes                  | n/a                 | n/a                 | n/a                 |
+| Field                              | Mongo                | Postgres            | MySQL               | SQLite              | DuckDB              | MSSQL               |
+|------------------------------------|----------------------|---------------------|---------------------|---------------------|---------------------|---------------------|
+| `keys: { col: 1 / -1 }`            | yes                  | yes                 | yes                 | yes                 | yes                 | yes                 |
+| `keys: { col: 'text' }`            | text index           | `text_pattern_ops`  | column kept         | column kept         | column kept         | column kept         |
+| `keys: { col: '2dsphere'/'2d'/'hashed' }` | yes           | ignored             | ignored             | ignored             | ignored             | ignored             |
+| `unique` / `sparse`                | yes                  | yes (sparse auto on optional) | yes/n/a   | yes/n/a             | yes/n/a             | yes/n/a             |
+| `expireAfterSeconds`               | yes                  | n/a                 | n/a                 | n/a                 | n/a                 | n/a                 |
+| `partialFilterExpression`          | yes                  | n/a                 | n/a                 | n/a                 | n/a                 | n/a                 |
+| `where` (object)                   | alias of PFE         | translated to SQL   | warn + skip         | translated to SQL   | warn + skip         | translated to SQL   |
+| `where` (SQL string)               | n/a                  | `WHERE …`           | warn + skip         | `WHERE …`           | warn + skip         | `WHERE …`           |
+| `include: [cols]`                  | n/a                  | `INCLUDE (…)`       | warn + skip         | warn + skip         | warn + skip         | `INCLUDE (…)`       |
+| `expression: 'sql'`                | warn + skip          | `((expr))`          | `((expr))`          | `(expr)`            | `((expr))`          | warn + skip         |
+| `method: gin/gist/brin/hash`       | n/a                  | `USING …`           | warn (ignored)      | warn (ignored)      | warn (ignored)      | warn (ignored)      |
+| `method: 'spatial'`                | resolves to 2dsphere | `USING GIST`        | `SPATIAL INDEX`     | virtual rtree       | `USING RTREE`       | `CREATE SPATIAL INDEX` |
+| `method: 'vector'`                 | warn (Atlas search)  | `USING hnsw (... opclass)` | warn (community = exact) | warn (use sqlite-vec) | `USING HNSW`     | `USING VECTOR WITH (algorithm='HNSW')` |
+| `method: 'fulltext'`               | n/a                  | DB rejects          | statement prefix    | warn (ignored)      | n/a                 | warn (ignored)      |
+| `parser: 'ngram'/'mecab'`          | n/a                  | warn (ignored)      | `WITH PARSER …` (only on fulltext) | warn (ignored) | warn (ignored) | warn (ignored)      |
+| `visible: false`                   | n/a                  | warn (ignored)      | `INVISIBLE` (MySQL 8) | warn (ignored)    | warn (ignored)      | warn (ignored)      |
+| `collation`                        | yes                  | n/a (use expression)| n/a                 | n/a                 | n/a                 | n/a                 |
+| `wildcardProjection`               | yes                  | n/a                 | n/a                 | n/a                 | n/a                 | n/a                 |
 
 ### Relations
 
@@ -658,13 +678,11 @@ The options mean:
 ```ts
 const User = model('users', { id: f.id(), name: f.string() })
   .relate(() => ({
-    // a user has many posts; posts find their user via posts.author_id
     posts: rel.many('post', { on: 'author_id', refs: 'id' }),
   }));
 
 const Post = model('posts', { id: f.id(), author_id: f.objectId(), title: f.string() })
   .relate(() => ({
-    // a post has one author; the foreign key author_id lives on the post row
     author: rel.one('user', { on: 'author_id', refs: 'id', onDelete: 'Cascade' }),
   }));
 ```
@@ -708,6 +726,14 @@ const User = model('users', {
 await db.user.create({ data: { name: 'A', address: { street: '1 Main', city: 'SF', zip: '94110' } } });
 ```
 
+You can read into embedded fields with [JSON path queries](#json-path-queries):
+
+```ts
+await db.user.findMany({
+  where: { address: { path: 'city', eq: 'SF' } },
+});
+```
+
 ---
 
 ## Reading data
@@ -716,10 +742,16 @@ Every model has the read methods you expect.
 
 ```ts
 await db.user.findMany({ where: { active: true }, take: 20 });
-await db.user.findFirst({ where: { email: 'a@x.co' } });   // first match or null
-await db.user.findUnique({ where: { id: 'u1' } });          // by a unique field
+await db.user.findFirst({ where: { email: 'a@x.co' } });          // first match or null
+await db.user.findUnique({ where: { id: 'u1' } });                 // by a unique field
+await db.user.findFirstOrThrow({ where: { email: 'a@x.co' } });    // throws if missing
+await db.user.findUniqueOrThrow({ where: { id: 'u1' } });          // throws if missing
 await db.user.count({ where: { active: true } });
-await db.user.findFirstOrThrow({ where: { email: 'a@x.co' } });  // throws if missing
+await db.user.aggregate({                                          // bucketed stats
+  where: { active: true },
+  _avg:  { age: true },
+  _sum:  { credits: true },
+});
 ```
 
 ### Filtering with `where`
@@ -742,16 +774,33 @@ await db.post.findMany({
 });
 ```
 
-Available operators:
+### Operator reference
 
-* All types: `equals`, `not`, `in`, `notIn`.
-* Numbers and dates: `lt`, `lte`, `gt`, `gte`.
-* Strings: `contains`, `startsWith`, `endsWith`, and `mode: 'insensitive'`.
-* List fields: `has`, `hasEvery`, `hasSome`, `isEmpty`.
-* Text columns marked `.searchable()`: `search` (see
-  [Full-text search](#full-text-search)).
+All operators, with the field kinds they apply to.
 
-#### Comparing two columns: `col()`
+| Operator        | Applies to                              | Meaning                                                                 |
+| --------------- | --------------------------------------- | ----------------------------------------------------------------------- |
+| `equals` / `=`  | every field                             | exact match (same as passing a value directly)                          |
+| `not`           | every field                             | inverse of `equals` (accepts a value or a nested filter)                |
+| `in`            | every field                             | value is one of an array                                                |
+| `notIn`         | every field                             | value is not in an array                                                |
+| `lt` / `lte` / `gt` / `gte` | numbers, dates, strings    | range comparisons                                                       |
+| `contains`      | strings                                 | substring match (`LIKE %x%`)                                            |
+| `startsWith`    | strings                                 | prefix match (`LIKE x%`)                                                |
+| `endsWith`      | strings                                 | suffix match (`LIKE %x`)                                                |
+| `mode: 'insensitive'` | strings                           | case-insensitive variant of the text operators                          |
+| `has`           | `stringArray` / `intArray` / `embedMany` | the list contains the given value                                       |
+| `hasEvery`      | array fields                             | the list contains all of the given values                               |
+| `hasSome`       | array fields                             | the list contains at least one of the given values                      |
+| `isEmpty`       | array fields                             | `length === 0`                                                          |
+| `some` / `every` / `none` | `embedMany` / relations         | quantified filter on the nested rows                                    |
+| `search`        | `f.text().searchable()` columns         | full-text search (see [Full-text search](#full-text-search))            |
+| `path` + sub-op | `f.json()` / `f.embed()` / `f.embedMany()` / arrays | typed JSON path read (see [JSON path queries](#json-path-queries)) |
+| `near`          | `f.geoPoint()` / `f.vector()`            | within distance (see [Geo](#geo-geopoint-near-nearto-withinpolygon) / [Vector](#vector-similarity-search)) |
+| `withinPolygon` | `f.geoPoint()`                          | point lies inside a polygon                                             |
+| `AND` / `OR` / `NOT` | top level                          | boolean combinators (accept arrays or single objects)                   |
+
+### Comparing two columns: `col()`
 
 Use `col('otherField')` on the right-hand side of `equals`/`not`/`lt`/`lte`/
 `gt`/`gte` to compare one column against another column **of the same row**,
@@ -798,6 +847,10 @@ const full = await db.user.findFirst({
 await db.user.findFirst({
   include: { posts: { where: { status: 'PUBLISHED' }, orderBy: { created_at: 'desc' }, take: 5 } },
 });
+
+// _count returns relation cardinalities
+await db.user.findMany({ include: { _count: { select: { posts: true, comments: true } } } });
+// → user.{_count: { posts: 5, comments: 12 }}
 ```
 
 ### Sorting and pagination
@@ -841,10 +894,10 @@ await db.user.deleteMany({ where: { active: false } });
 Create and update can also return only selected fields or include relations,
 the same way reads do, by passing `select` or `include` alongside `data`.
 
-### Number and field updates
+### Atomic number ops
 
 For number columns you can apply an operation instead of setting a value
-outright:
+outright. All four are compiled to a single atomic write per dialect.
 
 ```ts
 await db.post.update({
@@ -852,10 +905,14 @@ await db.post.update({
   data: {
     views:     { increment: 1 },     // also: decrement, multiply, divide, set
     score:     { multiply: 2 },
+    rank:      { divide: 2 },
     published: true,
   },
 });
 ```
+
+Pair an atomic op with `col()` in `where` for a single-statement, race-safe
+guard (see [Comparing two columns](#comparing-two-columns-col)).
 
 ### Writing related records in one call
 
@@ -874,7 +931,8 @@ await db.user.create({
 ```
 
 Supported on a relation: `create`, `createMany`, `connect`, `connectOrCreate`
-(find one or make it), `disconnect`, `set`, `delete`, `deleteMany`.
+(find one or make it), `disconnect`, `set`, `delete`, `deleteMany`, `update`,
+`updateMany`, `upsert`.
 
 ### Deletes and cascades
 
@@ -953,6 +1011,9 @@ forge rolls the transaction back cleanly and reports the original error, but the
 catch-and-continue pattern will not work. Check first, use `upsert`, or let the
 transaction fail and retry it.
 
+**DuckDB** doesn't support `SAVEPOINT`, so nested transactions degrade to a
+single outer one. Migration batches that abort can't partially recover.
+
 ---
 
 ## Running raw SQL
@@ -994,17 +1055,37 @@ The codes follow Prisma's familiar set (`P2002` unique, `P2003` foreign key,
 ## Full-text search
 
 Mark a text column `.searchable()`. When you create the tables, forge builds the
-right full-text index for each database (a GIN index on Postgres, a FULLTEXT
-index on MySQL, a text index on Mongo, an FTS5 table on SQLite). Then query it
-with the `search` operator.
+right full-text index for each database:
+
+| Dialect  | What forge emits                                                                    |
+| -------- | ----------------------------------------------------------------------------------- |
+| Postgres | `CREATE INDEX … USING gin(to_tsvector('simple', col))`                              |
+| MySQL    | `ALTER TABLE … ADD FULLTEXT(col)` (plus `WITH PARSER ngram` / `mecab` if requested) |
+| SQLite   | `CREATE VIRTUAL TABLE <table>_fts USING fts5(...)` + insert/update/delete triggers  |
+| DuckDB   | `PRAGMA create_fts_index(...)` (fts extension)                                      |
+| Mongo    | `createIndex({ col: 'text' })`                                                      |
+| MSSQL    | Manual — requires a full-text catalog (out-of-band). Schema field is kept.          |
+
+Then query it with the `search` operator. The operator is portable; the
+ranking and tokenisation behind it is whatever the dialect provides.
 
 ```ts
-const Post = model('posts', { id: f.id(), body: f.text().searchable() });
+const Post = model('posts', {
+  id:   f.id(),
+  body: f.text().searchable(),
+});
 
 await db.post.findMany({ where: { body: { search: 'database wrapper' } } });
 ```
 
-## Geo (geoPoint, near, nearTo)
+On SQLite, queries through the shadow FTS5 table are joined automatically —
+you don't have to know it exists. On Postgres, the index is over
+`to_tsvector('simple', col)`; you can pass a custom configuration via a raw
+`expression:` index for language-specific stemming.
+
+---
+
+## Geo (geoPoint, near, nearTo, withinPolygon)
 
 Declare a `f.geoPoint()` field and pair it with `method: 'spatial'`. The
 column type and the spatial index family come out right per dialect:
@@ -1045,8 +1126,8 @@ const nearby = await db.place.findMany({
 
 ### Extensions
 
-- **Postgres** — needs PostGIS. Run `npm run forge:push -- --enable-extensions`
-  to have forge issue `CREATE EXTENSION IF NOT EXISTS postgis;` before the
+- **Postgres** — needs PostGIS. Run `npx forge push --enable-extensions` to
+  have forge issue `CREATE EXTENSION IF NOT EXISTS postgis;` before the
   schema push, or install it once by hand.
 - **SQLite** — needs SpatiaLite (`brew install libspatialite` /
   `apt install libsqlite3-mod-spatialite`). The adapter calls
@@ -1078,10 +1159,10 @@ const Place = model('places', {
 The column is stored as `{lng, lat}` JSON, the SQL emits a bounding-box
 prefilter on the JSON-extracted lng/lat, and the adapter post-filters via
 Haversine in app to produce the exact distance + circle. Works without
-any extension; ~50× slower than the native path on large tables. Document
-the tradeoff and migrate to a real extension when traffic justifies it.
+any extension; ~50× slower than the native path on large tables (fine to
+~50k rows; migrate to a real extension past 100k).
 
-### Coordinate-order — always lng, lat
+### Coordinate order — always lng, lat
 
 The forge API is `{ lng, lat }` everywhere. Per-dialect order differences
 (MySQL 8 axis-order, GeoJSON order, MSSQL geography ordering) are handled
@@ -1118,6 +1199,8 @@ Fallback mode emits an axis-aligned bbox prefilter from the polygon's
 envelope; the adapter then runs a ray-casting point-in-polygon refinement
 in app. Concave polygons work correctly.
 
+---
+
 ## JSON path queries
 
 Read into nested JSON columns directly from `where`. Same scalar comparison
@@ -1145,9 +1228,14 @@ await db.doc.findMany({
   where: { meta: { path: 'bio', contains: 'engineer' } },
 });
 
-// Explicit array form.
+// Explicit array form (skips the dotted-path parser).
 await db.doc.findMany({
   where: { meta: { path: ['tags', '0'], eq: 'urgent' } },
+});
+
+// Works on embedded objects too.
+await db.user.findMany({
+  where: { address: { path: 'city', eq: 'SF' } },
 });
 ```
 
@@ -1158,12 +1246,14 @@ Per dialect:
 
 | Dialect | Compiles to |
 |---|---|
-| Postgres | `(col->'a'->>'b')::numeric` (cast by operand type) |
+| Postgres | `(col->'a'->>'b')::numeric` (cast by operand type — string / numeric / boolean) |
 | MySQL | `JSON_UNQUOTE(JSON_EXTRACT(col, '$.a.b'))` |
 | SQLite | `json_extract(col, '$.a.b')` (JSON1 — built-in) |
 | DuckDB | `json_extract(col, '$.a.b')` |
 | MSSQL | `JSON_VALUE(col, '$.a.b')` |
 | Mongo | dotted key: `{ 'meta.a.b': … }` |
+
+---
 
 ## Vector similarity search
 
@@ -1174,14 +1264,15 @@ same `near` / `nearTo` vocabulary as geo.
 const Doc = model('docs', {
   id: f.id(),
   body: f.text(),
-  // Match the dims to your embedding model (OpenAI text-embedding-3-small = 1536).
+  // Match the dims to your embedding model
+  // (OpenAI text-embedding-3-small = 1536; Cohere embed-v3 = 1024; etc.).
   embedding: f.vector(1536, { metric: 'cosine' }),
 }, {
   indexes: [{ keys: { embedding: 1 }, method: 'vector' }],
 });
 
 await db.doc.create({
-  data: { id: 'a', body: 'cat', embedding: queryAnEmbeddingModel('cat') },
+  data: { id: 'a', body: 'cat', embedding: await embedText('cat') },
 });
 
 // "Top-10 most semantically similar documents to my query vector,
@@ -1196,22 +1287,22 @@ const matches = await db.doc.findMany({
 
 Metrics — match to your embedding model's docs:
 
-| Metric | When |
-|---|---|
-| `'cosine'` (default) | Most text embedding models (OpenAI, Voyage, Cohere) |
-| `'l2'` | Image embeddings (CLIP), some classical models |
-| `'dot'` | Normalized vectors where you want max speed |
+| Metric             | When                                                                |
+| ------------------ | ------------------------------------------------------------------- |
+| `'cosine'` (default) | Most text embedding models (OpenAI, Voyage, Cohere)                |
+| `'l2'`             | Image embeddings (CLIP), some classical models                      |
+| `'dot'`            | Normalized vectors where you want max speed                         |
 
 Per dialect:
 
-| Dialect | Column | Vector index | Query |
+| Dialect | Column | Vector index | Query operator |
 |---|---|---|---|
-| Postgres | `vector(N)` (pgvector) | `USING hnsw (col vector_cosine_ops)` | `col <=> $vec` operator |
-| MySQL 9 | `VECTOR(N)` | basic (community = exact only) | `DISTANCE(col, STRING_TO_VECTOR(...), 'COSINE')` |
-| SQLite | TEXT (JSON) | needs `sqlite-vec` vec0 vtab (out-of-band) | brute-force or vec0 |
+| Postgres | `vector(N)` (pgvector) | `USING hnsw (col vector_cosine_ops)` | `col <=> $vec` / `<->` / `<#>` |
+| MySQL 9 | `VECTOR(N)` | community = exact only | `DISTANCE(col, STRING_TO_VECTOR(...), 'COSINE')` |
+| SQLite | `TEXT` (JSON) | needs `sqlite-vec` vec0 vtab (out-of-band) | brute-force or vec0 |
 | DuckDB | `FLOAT[N]` | `USING HNSW` (vss extension) | `array_cosine_distance(col, [...])` |
 | MSSQL | `VECTOR(N)` | `USING VECTOR WITH (algorithm = 'HNSW')` | `VECTOR_DISTANCE('cosine', col, ...)` |
-| Mongo | plain array | Atlas Search Index (createSearchIndex) | `$vectorSearch` (auto-routed) |
+| Mongo | plain array | Atlas Search Index (`createSearchIndex`) | `$vectorSearch` (auto-routed) |
 
 **Dimension validation**: `f.vector(1536)` rejects a 1024-dim query vector
 at IR build time — catches embedding-model mismatches before they hit the
@@ -1220,9 +1311,9 @@ DB.
 **Required setup** per dialect:
 
 - **Postgres** — `CREATE EXTENSION vector;` (pgvector — available on every
-  managed PG host: Supabase, Neon, RDS, Crunchy, …)
-- **DuckDB** — `INSTALL vss; LOAD vss;` (load explicitly at adapter
-  connect; `spatial` auto-loads, `vss` is one extra `connection.run`)
+  managed PG host: Supabase, Neon, RDS, Crunchy, …).
+- **DuckDB** — `INSTALL vss; LOAD vss;` (load explicitly after connect;
+  `spatial` auto-loads, `vss` is one extra `connection.run`).
 - **SQLite** — install `sqlite-vec` extension; the `vec0` mirror table is
   created out-of-band (forge doesn't manage it). Use brute-force JSON
   scanning for small datasets.
@@ -1310,9 +1401,9 @@ const PublishedPosts = model('published_posts', {
 ```
 
 Add `materialised: true` to store the results physically and refresh them on
-demand. On Postgres this is a real materialised view; on MySQL and SQLite it is
-a table that gets repopulated; on Mongo it is a collection filled by the
-pipeline.
+demand. On Postgres this is a real materialised view; on MySQL, SQLite, DuckDB,
+and MSSQL it is a table that gets repopulated; on Mongo it is a collection
+filled by the pipeline.
 
 ```ts
 const Stats = model('post_stats', { /* … */ }).asView({ materialised: true, sql, /* … */ });
@@ -1345,38 +1436,19 @@ forge can create your tables from the schema and reconcile changes later. After
 installing `forge-orm`, the `forge` binary is on your `PATH` via `npx`:
 
 ```sh
-npx forge push                              # create or update tables, indexes, and constraints to match the schema
+npx forge push                              # create or update tables, indexes, constraints
+npx forge push --enable-extensions          # also emits CREATE EXTENSION for the extensions your schema needs
 npx forge diff                              # report differences between the live database and the schema
 npx forge diff --json                       # the same as machine-readable JSON
 npx forge diff --check                      # exit non-zero if there is drift (useful in CI)
-npx forge diff --ignore=logs,/^_atlas_/i    # skip noisy meta-collections (see "Ignoring drift" below)
+npx forge diff --ignore=logs,/^_atlas_/i    # skip noisy meta-collections (see below)
 npx forge diff apply                        # generate and run a migration that reconciles the difference
 npx forge rollback                          # undo the most recent applied migration
-npx forge doctor                            # adapter pre-flight checks
+npx forge doctor                            # adapter pre-flight + live capability probe (see below)
 npx forge --help
 ```
 
 `DATABASE_URL` is read from your `.env` or environment.
-
-### Ignoring drift on `forge diff`
-
-The migration ledger (`_forge_migrations`) and engine-generated FTS shadows
-(`*_fts`) are always skipped. Anything else you want hidden from the report —
-Atlas metadata, system collections, tables managed by a sibling service — goes
-through `--ignore=` or the `FORGE_DIFF_IGNORE` env var:
-
-```sh
-# exact names + a regex pattern, comma-separated
-npx forge diff --ignore=sessions,logs,/^_atlas_/i
-
-# env var works the same way; CLI flag stacks on top
-export FORGE_DIFF_IGNORE='/^_/i,external_events'
-npx forge diff
-```
-
-Patterns wrapped in `/.../flags` are treated as regex; everything else is an
-exact-match string. Ignored tables are summarised at the end of the report
-(`ignored 2 tables: logs, sessions`) so silent filtering can't hide real drift.
 
 ### Pointing the CLI at your schema
 
@@ -1429,6 +1501,63 @@ section into a `migrations/` folder and records it in a `_forge_migrations`
 table, so applying is repeatable and reversible. Migrations are SQL only; on
 Mongo, `forge:push` manages indexes and views.
 
+### Ignoring drift on `forge diff`
+
+The migration ledger (`_forge_migrations`) and engine-generated FTS shadows
+(`*_fts`) are always skipped. Anything else you want hidden from the report —
+Atlas metadata, system collections, tables managed by a sibling service — goes
+through `--ignore=` or the `FORGE_DIFF_IGNORE` env var:
+
+```sh
+# exact names + a regex pattern, comma-separated
+npx forge diff --ignore=sessions,logs,/^_atlas_/i
+
+# env var works the same way; CLI flag stacks on top
+export FORGE_DIFF_IGNORE='/^_/i,external_events'
+npx forge diff
+```
+
+Patterns wrapped in `/.../flags` are treated as regex; everything else is an
+exact-match string. Ignored tables are summarised at the end of the report
+(`ignored 2 tables: logs, sessions`) so silent filtering can't hide real drift.
+
+### `forge doctor` — live capability probe
+
+`forge doctor` connects to your live database (best-effort), reads version +
+extension list, and prints actionable install commands for whatever's
+missing. Per-dialect probes:
+
+| Dialect  | Probes                                                                       |
+| -------- | ---------------------------------------------------------------------------- |
+| Postgres | server version, PostGIS, pgvector, pg_trgm, pg_stat_statements              |
+| MySQL    | server version (5.7 vs 8 vs 9), spatial functions, JSON support              |
+| SQLite   | library version, FTS5 availability, SpatiaLite load attempt                  |
+| DuckDB   | extension list, `spatial` + `vss` availability                              |
+| MSSQL    | server version, `GEOGRAPHY` smoke check, `VECTOR(N)` smoke check            |
+| Mongo    | `buildInfo` + topology (replica set / sharded / standalone)                 |
+
+The probe never throws — if it can't connect or a probe fails, it reports
+"unknown" and moves on. Output ends with a copy-pasteable `Action items`
+section for any gaps.
+
+### Extensions and `forge push --enable-extensions`
+
+`--enable-extensions` makes `forge push` emit the right `CREATE EXTENSION`
+statements before the table DDL, based on what your schema declares:
+
+| Schema feature              | Extension emitted                                          |
+| --------------------------- | ---------------------------------------------------------- |
+| any `f.geoPoint()`          | PG: `CREATE EXTENSION IF NOT EXISTS postgis;`              |
+| any `f.vector(N)`           | PG: `CREATE EXTENSION IF NOT EXISTS vector;` (pgvector)    |
+| any `.searchable()` on PG   | PG: `CREATE EXTENSION IF NOT EXISTS pg_trgm;` (where used) |
+| any `f.geoPoint()` on DuckDB | bundled `spatial` auto-loaded at connect                  |
+| any `f.vector()` on DuckDB  | requires `INSTALL vss; LOAD vss;` (run at connect)         |
+| SpatiaLite (SQLite)         | `SELECT load_extension('mod_spatialite')` at connect       |
+
+`--enable-extensions` is opt-in so a managed host that doesn't allow
+extension installs from app code doesn't fail at first push. Without the
+flag, the push works as long as the extensions are already installed.
+
 ---
 
 ## Dropping to raw queries with `.compile`
@@ -1454,9 +1583,9 @@ const c = db.account.compile.softDelete({ where: { id: 'a1' } });
 ```
 
 `compile` returns a `MongoArtifact` on Mongo and a `SQLArtifact` with the
-matching `dialect` on Postgres / MySQL / SQLite. If you want a statically
-narrowed surface, use `.compileMongo` or `.compileSql`; both throw at access
-on the wrong adapter.
+matching `dialect` on Postgres / MySQL / SQLite / DuckDB / MSSQL. If you want
+a statically narrowed surface, use `.compileMongo` or `.compileSql`; both
+throw at access on the wrong adapter.
 
 ---
 
@@ -1553,19 +1682,43 @@ performance. Run `forge:bench` and `forge:bench:compare` to see for yourself.
 
 ## Testing
 
-The repository's own test suite (run from a clone) has 260 unit tests and 164
-live integration scenarios across all four databases, plus dedicated regression
-scripts (e.g. `regression-mongo-value-field.ts`, `regression-groupby-distinct.ts`)
-wired into the Mongo integration run.
+The repository's own test suite (run from a clone) has **439 unit tests** plus
+live integration scenarios across every database, plus dedicated regression
+scripts (e.g. `regression-mongo-value-field.ts`, `regression-groupby-distinct.ts`,
+`regression-geo-duckdb.ts`, `regression-vector-duckdb.ts`) wired into the
+per-dialect integration runs.
 
 ```sh
 npm run forge:check         # unit tests, type checks, and autocomplete checks (no database needed)
 npm run forge:integration   # full CRUD against live Postgres, MySQL, SQLite, and Mongo
+npm run forge:integration:duckdb   # DuckDB CRUD + geo + vector through the vss extension
 npm run forge:bench         # speed against the raw driver
 npm run forge:all           # all of the above
 ```
 
 Each integration run creates a throwaway database and drops it when finished.
+
+### Driver smoke harness
+
+To verify the drivers themselves install and connect on a fresh machine,
+without touching your project's `node_modules`, run the throwaway smoke
+harness:
+
+```sh
+npm run smoke:drivers              # install every driver + run connect/SELECT 1/close
+npm run smoke:drivers -- --only=pg # filter to a single dialect
+npm run smoke:drivers -- --keep    # leave the tmpdir + containers around for inspection
+```
+
+It creates a throwaway tmpdir, `npm install`s every driver forge-orm supports
+plus `testcontainers`, runs `connect → SELECT 1 → close` per driver, then
+tears the tmpdir + containers down. Covers `better-sqlite3` / `@libsql/client` /
+`@duckdb/node-api` (embedded); `pg` / `postgres` / `mysql2` / `mariadb` /
+`mongodb` / `mssql` (server, via Testcontainers); `expo-sqlite` /
+`@op-engineering/op-sqlite` (install-only — exec needs the RN runtime).
+
+ARM Macs swap `mssql/server:2022` (AMD64-only) for `azure-sql-edge`
+(multi-arch) automatically.
 
 ---
 
@@ -1574,14 +1727,32 @@ Each integration run creates a throwaway database and drops it when finished.
 * **It is young.** No long production history, one main author. Treat it as
   early-stage. If a quiet data bug would be costly, test your own queries
   against it thoroughly first.
-* **Primary keys are auto-generated strings, not sequential numbers.** forge
-  fills in a UUID (or ObjectId on Mongo) when you omit `id`. An
-  auto-incrementing integer key is SQL-only and not built in.
+* **Primary keys are auto-generated strings, not sequential numbers, by default.**
+  forge fills in a UUID (or ObjectId on Mongo) when you omit `id`. An
+  auto-incrementing integer key is SQL-only via `f.id({ type: 'bigserial' })`.
 * **One schema per process.** `createDb({ schema })` sets the active schema for
   the whole process. That fits one schema per service. For several different
   schemas at once, run them in separate processes.
 * **Some nested writes are partial.** Deeply nested `upsert`, `update`, and
   `set` cover the common cases but not every Prisma shape.
+* **MSSQL upsert is not implemented in 2.3** — it throws `NotImplemented`
+  pointing at v2.4 (`MERGE` rewrite). INSERT / UPDATE / DELETE / SELECT work
+  today.
+* **Mongo cross-field geo `nearTo`** — a `near` filter on field A combined
+  with a `nearTo` orderBy on field B will only honor B (single `$geoNear`
+  stage limit). Same field on both sides works fine.
+* **MultiPolygon, GeometryCollection, holes** — single-polygon
+  `withinPolygon` works. Multi-ring shapes need raw queries.
+* **3D / Z coordinates** — not modelled. Store altitude as a separate scalar.
+* **SRID reprojection** — WGS84 only. UTM, state-plane, or other CRSes need
+  raw queries.
+* **MySQL 5.7** — spatial works but without SRID enforcement; `forge doctor`
+  warns.
+* **DuckDB** — no FK enforcement (forge's app-side cascade walker handles
+  it); no `SAVEPOINT` (a failing migration batch can't partially recover);
+  no partial indexes / `INCLUDE` columns / `ctid` (replaced with `rowid`
+  where needed); unique constraints cover soft-deleted rows since there are
+  no partial indexes.
 * **No GUI, no plugin system.** If you need a data browser or middleware, this
   is not that.
 
