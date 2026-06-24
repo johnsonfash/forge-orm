@@ -129,26 +129,42 @@ you usually have to drop to raw SQL for:
 
 ### Deep-dive companions (`docs/`)
 
-The README is the surface reference. For more depth — extra examples, edge cases, integration patterns — each major surface has its own companion doc. Twenty in total, ~20,000 lines of reference material.
+The README is the surface reference. For more depth — extra examples, edge cases, integration patterns — each major surface has its own companion doc. Eighty files in total, ~80,000 lines of reference material.
 
 **Schema and data model**
 
 | Topic | File |
 |---|---|
 | Model definition — full field catalogue, id strategies, enums, views, generated columns, schema namespacing, 5 worked schemas | **[docs/MODEL.md](docs/MODEL.md)** |
-| Embeds — `f.embed`/`f.embedMany`/`f.json` storage, indexing into embeds, Mongo `$elemMatch`, JSON-null markers, shape migration, 5 worked patterns | **[docs/EMBED.md](docs/EMBED.md)** |
+| Embeds — `f.embed`/`f.embedMany`/`f.json`, indexing into embeds, Mongo `$elemMatch`, JSON-null markers, shape migration, 5 worked patterns | **[docs/EMBED.md](docs/EMBED.md)** |
 | Relations — one/many/inverse/cascade, join tables, polymorphic, self-ref, deep includes, 6 worked patterns | **[docs/RELATIONS.md](docs/RELATIONS.md)** |
 | Indexes — every `IndexDef` field, partial-filter, expression, INCLUDE, method matrix, drift detection, 6 worked patterns | **[docs/INDEXES.md](docs/INDEXES.md)** |
 | Type safety — `Row`, every `Infer*` helper, `ForgeOf` / `ForgeModels`, autocomplete tricks, generics, 5 worked patterns | **[docs/TYPES.md](docs/TYPES.md)** |
+| Primary keys — UUIDv4 vs v7 vs ULID vs Snowflake vs serial, fragmentation, per-dialect emit, migration | **[docs/PRIMARY-KEYS.md](docs/PRIMARY-KEYS.md)** |
+| Foreign keys — REFERENCES emit, onDelete/onUpdate, deferred checking, composite, online add, per-dialect quirks | **[docs/FOREIGN-KEYS.md](docs/FOREIGN-KEYS.md)** |
+| Enums — `f.enum(...)`, per-dialect emit, evolution (adding values online, expand/contract), lookup-table alternative | **[docs/ENUMS.md](docs/ENUMS.md)** |
+| CHECK constraints — DB-enforced row invariants, `NOT VALID`+`VALIDATE`, NULL semantics, vs zod, Mongo `$jsonSchema` | **[docs/CHECKS.md](docs/CHECKS.md)** |
+| Generated columns — STORED vs VIRTUAL, indexable JSON extracts, per-dialect matrix, common patterns | **[docs/GENERATED-COLUMNS.md](docs/GENERATED-COLUMNS.md)** |
+| Views — `CREATE VIEW`, updatable rules, SECURITY_BARRIER, indexed views, Mongo collection views | **[docs/VIEWS.md](docs/VIEWS.md)** |
+| Materialized views — refresh strategies, CONCURRENTLY, MSSQL indexed views, Mongo `$merge`/`$out`, MySQL/SQLite emulation | **[docs/MATERIALIZED-VIEWS.md](docs/MATERIALIZED-VIEWS.md)** |
+| Triggers — DB-side procedural code, audit-log trigger, per-dialect model, Mongo change-stream alternative | **[docs/TRIGGERS.md](docs/TRIGGERS.md)** |
 
 **Reads, writes, transactions**
 
 | Topic | File |
 |---|---|
 | Queries — every operator with per-dialect SQL/Mongo emit, cursor pagination, distinct, streaming, common bugs, 8 worked queries | **[docs/QUERIES.md](docs/QUERIES.md)** |
-| Mutations — create/update/upsert/delete asymmetry, atomic ops, nested writes, idempotency, optimistic+pessimistic concurrency, batching, 8 worked patterns | **[docs/MUTATIONS.md](docs/MUTATIONS.md)** |
+| Mutations — create/update/upsert/delete asymmetry, atomic ops, nested writes, idempotency, optimistic+pessimistic concurrency, 8 worked patterns | **[docs/MUTATIONS.md](docs/MUTATIONS.md)** |
 | Transactions — callback vs array, per-dialect mechanics, savepoints, isolation, deadlock retry, Mongo replica-set, outbox, 5 worked patterns | **[docs/TRANSACTIONS.md](docs/TRANSACTIONS.md)** |
 | Raw SQL — `forgeSql` composition, identifier-vs-value safety, per-dialect placeholders, `$runCommandRaw`, per-dialect worked patterns | **[docs/RAW-SQL.md](docs/RAW-SQL.md)** |
+| Upsert — `ON CONFLICT` / `ON DUPLICATE KEY` / `MERGE` / `findOneAndUpdate` per dialect, partial updates, race semantics | **[docs/UPSERT.md](docs/UPSERT.md)** |
+| Batch ops — `createMany`/`updateMany`/`deleteMany`, bind-parameter limits, chunking, ordered vs unordered, RETURNING | **[docs/BATCH.md](docs/BATCH.md)** |
+| Aggregations — count/sum/avg/groupBy/having/distinct, per-dialect emit, decimal precision, dashboard patterns | **[docs/AGGREGATIONS.md](docs/AGGREGATIONS.md)** |
+| Window functions — ROW_NUMBER/RANK/LAG/LEAD/SUM OVER, per-dialect matrix, top-N per group, moving averages, sessionization | **[docs/WINDOWS.md](docs/WINDOWS.md)** |
+| Pagination — cursor / offset / numbered / infinite-scroll, total-count strategies, Relay/REST shapes, per-dialect | **[docs/PAGINATION.md](docs/PAGINATION.md)** |
+| Streaming — `findManyStream` per-driver internals, memory profile, backpressure, HTTP streaming, transactions+streaming | **[docs/STREAMING.md](docs/STREAMING.md)** |
+| Locking — SELECT FOR UPDATE, advisory locks, SKIP LOCKED work queues, NOWAIT, deadlock prevention | **[docs/LOCKING.md](docs/LOCKING.md)** |
+| Concurrency control — optimistic version columns, ETag/If-Match, retry strategies, per-dialect isolation quirks | **[docs/CONCURRENCY.md](docs/CONCURRENCY.md)** |
 
 **Cross-cutting surfaces**
 
@@ -161,6 +177,88 @@ The README is the surface reference. For more depth — extra examples, edge cas
 | Migrations — push-style model, every CLI flag, drift rules, per-dialect emit, three CI snippets, blue/green, monorepo, runtime split | **[docs/MIGRATIONS.md](docs/MIGRATIONS.md)** |
 | Drivers — bring-your-own-driver pattern, every shipped wrapper, six worked wrappers (Neon, Turso, D1, Atlas Data API, Bun, decorator) | **[docs/DRIVERS.md](docs/DRIVERS.md)** |
 
+**CLI and operations**
+
+| Topic | File |
+|---|---|
+| CLI reference — every `forge` subcommand and flag, exit codes, env config, CI snippets, programmatic equivalents | **[docs/CLI.md](docs/CLI.md)** |
+| `forge push` — push semantics, `--enable-extensions`, `--fallback`, idempotency, dry-run, per-dialect DDL ordering | **[docs/PUSH.md](docs/PUSH.md)** |
+| `forge diff` — drift detection rules, DriftItem taxonomy, drift apply, per-dialect quirks, CI gating, the 2.5.1 auto-apply pass | **[docs/DIFF.md](docs/DIFF.md)** |
+| `forge doctor` — live capability probe, per-dialect checks, fix recipes, browserDoctor, K8s readinessProbe | **[docs/DOCTOR.md](docs/DOCTOR.md)** |
+| Rollback — snapshot rollback, forward-only, blue/green, per-dialect destructive-DDL limits, emergency restore | **[docs/ROLLBACK.md](docs/ROLLBACK.md)** |
+| Seeding — idempotent upserts, bootstrap/dev/demo split, large seeds, faker, deterministic random, 3 worked seed programs | **[docs/SEED.md](docs/SEED.md)** |
+| Deployment — env-per-stage, zero-downtime patterns, blue/green, containerized vs serverless, RDS Proxy, multi-region | **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** |
+| Backup and restore — per-dialect primitives (`pg_dump`, MariaBackup, litestream, Atlas snapshots), PITR, restore drills, encryption | **[docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md)** |
+| Schema versioning — additive-only rules, expand/contract for breaking changes, multi-app coordination, snapshot diffs | **[docs/VERSIONING.md](docs/VERSIONING.md)** |
+
+**Per-dialect deep dives**
+
+| Topic | File |
+|---|---|
+| PostgreSQL — pg/postgres.js/Neon HTTP matrix, type round-trip, JSONB, arrays, extensions, CONCURRENTLY, RLS, pgbouncer caveats | **[docs/POSTGRES.md](docs/POSTGRES.md)** |
+| MySQL / MariaDB — mysql2/mariadb drivers, 5.7 vs 8.x matrix, charset, FULLTEXT, native spatial, online DDL, replication | **[docs/MYSQL.md](docs/MYSQL.md)** |
+| SQLite (server) — better-sqlite3/libsql/bun:sqlite, PRAGMAs, WAL, ALTER TABLE limits, extensions, litestream, sharding | **[docs/SQLITE.md](docs/SQLITE.md)** |
+| MongoDB — relational-to-document mapping, index types, Atlas Search/Vector, change streams, transactions, sharding | **[docs/MONGO.md](docs/MONGO.md)** |
+| DuckDB — analytical workloads, Parquet/CSV ingestion, S3 httpfs, ATTACH cross-DB joins, EXPORT DATABASE, window funcs | **[docs/DUCKDB.md](docs/DUCKDB.md)** |
+| SQL Server — `MERGE` upsert, snapshot isolation, geography vs geometry, OPENJSON, Azure SQL specifics | **[docs/MSSQL.md](docs/MSSQL.md)** |
+
+**Observability and errors**
+
+| Topic | File |
+|---|---|
+| Events — `QueryEvent` shape, `semanticOp`, subscribers, Pino/Sentry/OTel/Prometheus integrations, custom sinks | **[docs/EVENTS.md](docs/EVENTS.md)** |
+| Logging — Pino/Winston/Bunyan wiring, redaction, sampling, request correlation, rotation | **[docs/LOGGING.md](docs/LOGGING.md)** |
+| Tracing — OpenTelemetry SDK, span propagation, W3C traceparent, exporters (Jaeger, Tempo, Honeycomb, DataDog) | **[docs/TRACING.md](docs/TRACING.md)** |
+| Metrics — Prometheus, histogram buckets, cardinality discipline, RED/USE dashboards, alerting rules | **[docs/METRICS.md](docs/METRICS.md)** |
+| Errors — every error class, per-dialect code mapping, retry classes, backoff, Sentry/Bugsnag wiring | **[docs/ERRORS.md](docs/ERRORS.md)** |
+
+**Performance**
+
+| Topic | File |
+|---|---|
+| Connection pooling — sizing per dialect, per-runtime constraints (Lambda, Workers, Bun), pgbouncer/RDS Proxy caveats | **[docs/POOLING.md](docs/POOLING.md)** |
+| Benchmarks — `forge:bench` methodology, scenarios, Prisma/Drizzle compare mode, profiling, CI regression gating | **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)** |
+| Caching — DataLoader per-request, Redis cache-aside, CDN headers, event-driven invalidation, stampede prevention | **[docs/CACHING.md](docs/CACHING.md)** |
+| Preventing N+1 — `include` vs DataLoader, GraphQL resolvers, detection via event hook, per-dialect cross-product gotchas | **[docs/N-PLUS-ONE.md](docs/N-PLUS-ONE.md)** |
+
+**Patterns**
+
+| Topic | File |
+|---|---|
+| Soft delete — `softDelete`/`restore`, partial-filter uniques, query defaults, retention purge, GDPR caveats | **[docs/SOFT-DELETE.md](docs/SOFT-DELETE.md)** |
+| Audit log — three shapes (single table, per-model history, append-only event), actor capture, hash-chain tamper resistance | **[docs/AUDIT-LOG.md](docs/AUDIT-LOG.md)** |
+| Multi-tenant — shared-schema/schema-per-tenant/DB-per-tenant trade-offs, `scopedDb`, RLS, per-tenant migration orchestration | **[docs/MULTI-TENANT.md](docs/MULTI-TENANT.md)** |
+| Sharding — shard-key choice, routing, cross-shard query patterns, resharding, native helpers (Vitess, Citus, Mongo) | **[docs/SHARDING.md](docs/SHARDING.md)** |
+| Idempotency keys — Stripe-style model, atomic upsert primitive, TTL, webhook receivers, BullMQ jobIds, saga compensation | **[docs/IDEMPOTENCY.md](docs/IDEMPOTENCY.md)** |
+| Watch / change feeds — Mongo change streams, Postgres LISTEN/NOTIFY + logical replication, MySQL binlog, WebSocket fan-out | **[docs/WATCH.md](docs/WATCH.md)** |
+
+**Testing**
+
+| Topic | File |
+|---|---|
+| Testing — in-memory better-sqlite3, FakeWorker for browser, transaction-rollback reset, event-hook assertions | **[docs/TESTING.md](docs/TESTING.md)** |
+| Integration testing — testcontainers, Docker Compose, `forge:integration:*`, parallel-safe schema reset, GH Actions matrix | **[docs/INTEGRATION-TESTING.md](docs/INTEGRATION-TESTING.md)** |
+| Fixtures and factories — static fixtures, typed factories, seeded random, snapshot fixtures, browser OPFS fixtures | **[docs/FIXTURES.md](docs/FIXTURES.md)** |
+
+**Security**
+
+| Topic | File |
+|---|---|
+| Security — parameterized queries, RLS, column masking, field-level encryption, audit log, GDPR/HIPAA/PCI patterns | **[docs/SECURITY.md](docs/SECURITY.md)** |
+| Encryption — at-rest (TDE, native), in-transit (TLS/mTLS), field-level (AES-GCM, CSFLE), KMS-backed key rotation | **[docs/ENCRYPTION.md](docs/ENCRYPTION.md)** |
+| SQLCipher — encrypted SQLite, driver matrix, key derivation, rekey, mobile lock-screen patterns | **[docs/SQLCIPHER.md](docs/SQLCIPHER.md)** |
+| Database auth — password vs IAM vs mTLS vs SSH-tunnel, IAM token refresh, secret rotation, RDS Proxy / Cloud SQL Auth | **[docs/AUTH.md](docs/AUTH.md)** |
+
+**Type-level reference**
+
+| Topic | File |
+|---|---|
+| Runtime validation (zod) — boundary parsing, two-schema asymmetry, transforms, OpenAPI gen, form-lib resolvers | **[docs/RUNTIME-VALIDATION.md](docs/RUNTIME-VALIDATION.md)** |
+| Brand types — nominal IDs, zod `.brand`, multi-brand unions, money/time invariants, FK propagation | **[docs/BRAND-TYPES.md](docs/BRAND-TYPES.md)** |
+| Dates and times — `f.dateTime`/`f.date`/`f.time` per-dialect emit, timezone strategy, Temporal API, DST/calendar pitfalls | **[docs/DATES.md](docs/DATES.md)** |
+| Decimal and money — `f.decimal({ precision, scale })`, integer-cents pattern, dinero.js, per-dialect precision quirks | **[docs/DECIMAL.md](docs/DECIMAL.md)** |
+| UUID / ULID / Snowflake — bit layouts, DB-side generators, fragmentation, sortability, ObjectId, choice flowchart | **[docs/UUID.md](docs/UUID.md)** |
+
 **Runtime targets**
 
 | Topic | File |
@@ -170,6 +268,8 @@ The README is the surface reference. For more depth — extra examples, edge cas
 | Browser frameworks — React+Vite, Next.js, Vue, Nuxt, SvelteKit, Angular, SolidStart, Astro, Remix, React Native, Tauri (11 recipes) | **[docs/BROWSER-FRAMEWORKS.md](docs/BROWSER-FRAMEWORKS.md)** |
 | React — hooks, TanStack Query, Suspense, server vs client components, optimistic updates, sync, code-splitting, testing, 6 worked patterns | **[docs/REACT.md](docs/REACT.md)** |
 | Mobile — RN bare, Expo, Capacitor, Tauri, SQLCipher, sync patterns, background tasks, testing, migration cookbooks | **[docs/MOBILE.md](docs/MOBILE.md)** |
+| Cloudflare Workers / Vercel Edge — V8 isolate constraints, D1, Hyperdrive-fronted Postgres, Neon HTTP, Turso, cache patterns | **[docs/WORKERS.md](docs/WORKERS.md)** |
+| AWS Lambda — handler-scope pool, RDS Proxy, Aurora Serverless Data API, IAM token refresh, SIGTERM drain, cold-start budget | **[docs/LAMBDA.md](docs/LAMBDA.md)** |
 
 ---
 
@@ -831,7 +931,7 @@ await db.user.findMany({
 });
 ```
 
-See more — **[docs/MODEL.md](docs/MODEL.md)** (full field catalogue + id strategies + views + generated columns), **[docs/EMBED.md](docs/EMBED.md)** (`f.embed`/`f.embedMany`/`f.json` + JSON-null markers + 5 worked patterns), **[docs/RELATIONS.md](docs/RELATIONS.md)** (relation shapes + cascade + deep includes + 6 worked patterns), **[docs/INDEXES.md](docs/INDEXES.md)** (every `IndexDef` field + per-dialect emit + drift detection).
+See more — **[docs/MODEL.md](docs/MODEL.md)** (full field catalogue + id strategies + views + generated columns), **[docs/EMBED.md](docs/EMBED.md)** (`f.embed`/`f.embedMany`/`f.json` + JSON-null markers + 5 worked patterns), **[docs/RELATIONS.md](docs/RELATIONS.md)** (relation shapes + cascade + deep includes + 6 worked patterns), **[docs/INDEXES.md](docs/INDEXES.md)** (every `IndexDef` field + per-dialect emit + drift detection), **[docs/PRIMARY-KEYS.md](docs/PRIMARY-KEYS.md)** (UUIDv7 / ULID / Snowflake / serial trade-offs), **[docs/FOREIGN-KEYS.md](docs/FOREIGN-KEYS.md)** (onDelete / onUpdate / deferred), **[docs/ENUMS.md](docs/ENUMS.md)** (per-dialect emit + evolution), **[docs/CHECKS.md](docs/CHECKS.md)** (CHECK constraints + Mongo `$jsonSchema`), **[docs/GENERATED-COLUMNS.md](docs/GENERATED-COLUMNS.md)** (STORED vs VIRTUAL), **[docs/VIEWS.md](docs/VIEWS.md)** and **[docs/MATERIALIZED-VIEWS.md](docs/MATERIALIZED-VIEWS.md)**, **[docs/TRIGGERS.md](docs/TRIGGERS.md)** (DB-side procedural code).
 
 ---
 
@@ -966,7 +1066,7 @@ await db.post.findMany({
 await db.post.findMany({ take: 20, cursor: { id: lastSeenId }, skip: 1 });
 ```
 
-See more — **[docs/QUERIES.md](docs/QUERIES.md)** for every operator with per-dialect SQL/Mongo emit, cursor pagination, distinct, streaming internals, common bugs, and eight worked queries.
+See more — **[docs/QUERIES.md](docs/QUERIES.md)** for every operator with per-dialect SQL/Mongo emit, cursor pagination, distinct, streaming internals, common bugs, and eight worked queries. **[docs/AGGREGATIONS.md](docs/AGGREGATIONS.md)** for count/sum/avg/groupBy/having dashboards. **[docs/WINDOWS.md](docs/WINDOWS.md)** for ROW_NUMBER / LAG / LEAD / moving averages / sessionization. **[docs/PAGINATION.md](docs/PAGINATION.md)** for cursor vs offset vs keyset and Relay/REST response shapes. **[docs/STREAMING.md](docs/STREAMING.md)** for `findManyStream` internals per driver. **[docs/N-PLUS-ONE.md](docs/N-PLUS-ONE.md)** for the canonical query-explosion prevention patterns.
 
 ---
 
@@ -1045,7 +1145,7 @@ foreign keys, forge walks the relations and deletes the children for you.
 await db.user.delete({ where: { id: 'u1' } });   // posts with onDelete:'Cascade' go too
 ```
 
-See more — **[docs/MUTATIONS.md](docs/MUTATIONS.md)** for create/update/upsert/delete asymmetry, atomic ops, nested writes, idempotency, optimistic + pessimistic concurrency, batched throughput, and eight worked patterns.
+See more — **[docs/MUTATIONS.md](docs/MUTATIONS.md)** for create/update/upsert/delete asymmetry, atomic ops, nested writes, batched throughput, and eight worked patterns. **[docs/UPSERT.md](docs/UPSERT.md)** for per-dialect emit (`ON CONFLICT` / `ON DUPLICATE KEY` / `MERGE` / `findOneAndUpdate`) and race semantics. **[docs/BATCH.md](docs/BATCH.md)** for `createMany`/`updateMany`/`deleteMany`, bind-parameter limits, chunking. **[docs/LOCKING.md](docs/LOCKING.md)** for SELECT FOR UPDATE / advisory locks / SKIP LOCKED work queues. **[docs/CONCURRENCY.md](docs/CONCURRENCY.md)** for optimistic vs pessimistic control and ETag/If-Match patterns. **[docs/IDEMPOTENCY.md](docs/IDEMPOTENCY.md)** for the Stripe-style Idempotency-Key model.
 
 ---
 
@@ -1158,6 +1258,8 @@ try {
 
 The codes follow Prisma's familiar set (`P2002` unique, `P2003` foreign key,
 `P2004` constraint, and so on).
+
+See more — **[docs/ERRORS.md](docs/ERRORS.md)** for the full error taxonomy, per-dialect code mapping (PG 23505 / MySQL 1062 / Mongo E11000 / MSSQL 2601), retry classes, exponential backoff with jitter, the AsyncLocalStorage retry pattern, and Sentry / Bugsnag wiring.
 
 ---
 
@@ -2045,6 +2147,8 @@ has no `.softDeleteAt()` column — use `delete` for a hard delete in that case.
 > the full migration note. This is a runtime semantic change — it will not show
 > up as a type error.
 
+See more — **[docs/SOFT-DELETE.md](docs/SOFT-DELETE.md)** for partial-filter uniques that ignore soft-deleted rows, cascade restore semantics, retention-purge cron, FTS / vector / search-index interaction, GDPR caveats (soft-delete is not erasure), and 3 worked patterns.
+
 ---
 
 ## Views and materialised views
@@ -2074,6 +2178,8 @@ await db.postStats.refresh();                    // recompute now
 const stop = db.postStats.scheduleRefresh('1h'); // recompute hourly; call stop() to cancel
 ```
 
+See more — **[docs/VIEWS.md](docs/VIEWS.md)** (updatable rules, SECURITY_BARRIER, indexed views, Mongo collection views) and **[docs/MATERIALIZED-VIEWS.md](docs/MATERIALIZED-VIEWS.md)** (refresh strategies, `REFRESH MATERIALIZED VIEW CONCURRENTLY`, MSSQL indexed views, Mongo `$merge`/`$out`, per-dialect emulation for MySQL/SQLite).
+
 ---
 
 ## Watching queries
@@ -2089,6 +2195,8 @@ const off = db.$on('query', (e) => {
 db.$on('error', (e) => console.error(e.op, 'failed', e.error.message));
 // off();  // stop listening
 ```
+
+See more — **[docs/EVENTS.md](docs/EVENTS.md)** for the full `QueryEvent` shape with `semanticOp`, custom sinks, sampling and privacy. **[docs/LOGGING.md](docs/LOGGING.md)** for Pino/Winston wiring, redaction, request correlation. **[docs/TRACING.md](docs/TRACING.md)** for OpenTelemetry spans and W3C traceparent propagation. **[docs/METRICS.md](docs/METRICS.md)** for Prometheus histograms with cardinality discipline. **[docs/WATCH.md](docs/WATCH.md)** for Mongo change streams, Postgres LISTEN/NOTIFY, MySQL binlog tailing, and the WebSocket fan-out bridge for realtime UIs.
 
 ---
 
@@ -2220,7 +2328,7 @@ statements before the table DDL, based on what your schema declares:
 extension installs from app code doesn't fail at first push. Without the
 flag, the push works as long as the extensions are already installed.
 
-See more — **[docs/MIGRATIONS.md](docs/MIGRATIONS.md)** for the push-style model, every `forge push`/`diff`/`rollback` flag, drift rules, per-dialect emit table, three CI snippets, blue/green pattern, monorepo workflow, and the CLI-vs-runtime split.
+See more — **[docs/MIGRATIONS.md](docs/MIGRATIONS.md)** for the push-style model, drift rules, per-dialect emit table, three CI snippets, blue/green pattern, monorepo workflow. **[docs/CLI.md](docs/CLI.md)** for every `forge` subcommand and flag. **[docs/PUSH.md](docs/PUSH.md)** (push semantics + `--enable-extensions` + `--fallback`), **[docs/DIFF.md](docs/DIFF.md)** (drift taxonomy + the 2.5.1 auto-apply pass), **[docs/DOCTOR.md](docs/DOCTOR.md)** (live capability probe), **[docs/ROLLBACK.md](docs/ROLLBACK.md)** (snapshot vs forward-only vs blue/green), **[docs/SEED.md](docs/SEED.md)** (idempotent upserts + bootstrap/dev/demo split), **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** (env-per-stage + zero-downtime + RDS Proxy), **[docs/VERSIONING.md](docs/VERSIONING.md)** (expand/contract for breaking changes), **[docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md)** (per-dialect backup + PITR + restore drills).
 
 ---
 
@@ -2344,6 +2452,8 @@ query complexity. It says nothing about complex joins, correctness, or
 maturity. The point is only that the convenience does not cost you measurable
 performance. Run `forge:bench` and `forge:bench:compare` to see for yourself.
 
+See more — **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)** for the bench methodology, every shipped scenario, Prisma/Drizzle compare mode, profiling with clinic.js/0x, microbench traps (JIT warmup, GC pauses), and CI regression gating. **[docs/POOLING.md](docs/POOLING.md)** for connection-pool sizing per dialect and the per-runtime constraints (Lambda, Workers, Bun, pgbouncer). **[docs/CACHING.md](docs/CACHING.md)** for DataLoader / Redis cache-aside / CDN patterns. **[docs/N-PLUS-ONE.md](docs/N-PLUS-ONE.md)** for `include` vs DataLoader and how to detect query explosions via the event hook.
+
 ---
 
 ## Testing
@@ -2385,6 +2495,8 @@ tears the tmpdir + containers down. Covers `better-sqlite3` / `@libsql/client` /
 
 ARM Macs swap `mssql/server:2022` (AMD64-only) for `azure-sql-edge`
 (multi-arch) automatically.
+
+See more — **[docs/TESTING.md](docs/TESTING.md)** (in-memory better-sqlite3, FakeWorker for browser code, transaction-rollback reset, event-hook assertions). **[docs/INTEGRATION-TESTING.md](docs/INTEGRATION-TESTING.md)** (testcontainers, Docker Compose, parallel-safe schema reset, GH Actions matrix across pg/mysql/sqlite/mongo). **[docs/FIXTURES.md](docs/FIXTURES.md)** (typed factories, seeded random, snapshot fixtures, browser OPFS fixtures).
 
 ---
 
