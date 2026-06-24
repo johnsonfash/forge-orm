@@ -1463,7 +1463,7 @@ That's it. Persistent SQLite in the browser, with the full forge surface.
 | `:memory:` | In-RAM | None — lost on tab close | N/A |
 
 The path after the prefix is the file name inside OPFS. OPFS files are
-sandboxed per origin — `app.dallio.com` can't see `evil.com`'s files. The
+sandboxed per origin — `app.example.com` can't see `evil.com`'s files. The
 default URL is `opfs-sahpool:///forge.sqlite`.
 
 Pick **`opfs-sahpool:`** unless you have a specific reason not to. The SAH
@@ -1911,8 +1911,8 @@ SolidStart, Remix, Astro, Qwik — anywhere Vite is the bundler.
 **1. Install**
 
 ```sh
-npm create vite@latest dallio-mini -- --template react-ts
-cd dallio-mini
+npm create vite@latest forge-vite-demo -- --template react-ts
+cd forge-vite-demo
 npm install
 npm install forge-orm @sqlite.org/sqlite-wasm
 ```
@@ -1983,7 +1983,7 @@ function open() {
   );
   return createDb({
     schema,
-    driver: wasmSqliteDriver({ worker, url: 'opfs-sahpool:///dallio.sqlite' }),
+    driver: wasmSqliteDriver({ worker, url: 'opfs-sahpool:///app.sqlite' }),
   });
 }
 
@@ -2077,7 +2077,7 @@ async function showDiagnostics() {
 
 ```ts
 // In src/db/index.ts, alongside getDb:
-const bc = new BroadcastChannel('dallio-db');
+const bc = new BroadcastChannel('forge-db');
 
 export async function notifyChange(modelKey: string) {
   bc.postMessage({ kind: 'invalidate', model: modelKey });
@@ -2101,8 +2101,8 @@ Same idea, Next-shaped. Works in dev (`next dev`) and prod (`next build && next 
 **1. Install**
 
 ```sh
-npx create-next-app@latest dallio-next --typescript --app
-cd dallio-next
+npx create-next-app@latest forge-next-demo --typescript --app
+cd forge-next-demo
 npm install forge-orm @sqlite.org/sqlite-wasm
 ```
 
@@ -2148,7 +2148,7 @@ function open() {
   );
   return createDb({
     schema,
-    driver: wasmSqliteDriver({ worker, url: 'opfs-sahpool:///dallio.sqlite' }),
+    driver: wasmSqliteDriver({ worker, url: 'opfs-sahpool:///app.sqlite' }),
   });
 }
 
@@ -2279,8 +2279,8 @@ Same Vite plugin (`forgeWasm()`) — Vue picks it up via the standard
 **1. Install**
 
 ```sh
-npm create vite@latest dallio-vue -- --template vue-ts
-cd dallio-vue
+npm create vite@latest forge-vue-demo -- --template vue-ts
+cd forge-vue-demo
 npm install
 npm install forge-orm @sqlite.org/sqlite-wasm
 ```
@@ -2398,8 +2398,8 @@ helper-shape doesn't apply, but the manual config is small.
 **1. Install**
 
 ```sh
-npx nuxi@latest init dallio-nuxt
-cd dallio-nuxt
+npx nuxi@latest init forge-nuxt-demo
+cd forge-nuxt-demo
 npm install
 npm install forge-orm @sqlite.org/sqlite-wasm
 ```
@@ -2442,7 +2442,7 @@ function open() {
   );
   return createDb({
     schema,
-    driver: wasmSqliteDriver({ worker, url: 'opfs-sahpool:///dallio.sqlite' }),
+    driver: wasmSqliteDriver({ worker, url: 'opfs-sahpool:///app.sqlite' }),
   });
 }
 
@@ -2493,8 +2493,8 @@ point: only call forge from client code (browser-only).
 **1. Install**
 
 ```sh
-npm create svelte@latest dallio-svelte
-cd dallio-svelte
+npm create svelte@latest forge-svelte-demo
+cd forge-svelte-demo
 npm install
 npm install forge-orm @sqlite.org/sqlite-wasm
 ```
@@ -2540,7 +2540,7 @@ function open() {
   );
   return createDb({
     schema,
-    driver: wasmSqliteDriver({ worker, url: 'opfs-sahpool:///dallio.sqlite' }),
+    driver: wasmSqliteDriver({ worker, url: 'opfs-sahpool:///app.sqlite' }),
   });
 }
 
@@ -2622,8 +2622,8 @@ webpack builder.
 **1. Install**
 
 ```sh
-ng new dallio-angular --routing --style=css
-cd dallio-angular
+ng new forge-angular-demo --routing --style=css
+cd forge-angular-demo
 npm install forge-orm @sqlite.org/sqlite-wasm
 ```
 
@@ -2665,7 +2665,7 @@ export class DbService {
     );
     const db = await createDb({
       schema,
-      driver: wasmSqliteDriver({ worker, url: 'opfs-sahpool:///dallio.sqlite' }),
+      driver: wasmSqliteDriver({ worker, url: 'opfs-sahpool:///app.sqlite' }),
     });
     if (navigator.storage?.persist) await navigator.storage.persist();
     await db.$migrate();
@@ -2744,7 +2744,7 @@ import { schema } from './schema';
 let dbPromise: ReturnType<typeof open> | null = null;
 function open() {
   const worker = new Worker(new URL('forge-orm/wasm/worker', import.meta.url), { type: 'module' });
-  return createDb({ schema, driver: wasmSqliteDriver({ worker, url: 'opfs-sahpool:///dallio.sqlite' }) });
+  return createDb({ schema, driver: wasmSqliteDriver({ worker, url: 'opfs-sahpool:///app.sqlite' }) });
 }
 export function getDb() {
   if (!dbPromise) dbPromise = open();
@@ -2855,7 +2855,7 @@ import { createDb, opSqliteDriver } from 'forge-orm';
 import { open as openSqlite } from '@op-engineering/op-sqlite';
 import { schema } from './db/schema';
 
-const native = openSqlite({ name: 'dallio.sqlite' });
+const native = openSqlite({ name: 'app.sqlite' });
 
 export const db = await createDb({
   schema,
@@ -2867,7 +2867,7 @@ export const db = await createDb({
 await db.$migrate();
 ```
 
-For Expo (managed workflow), substitute `expoSqliteDriver(SQLite.openDatabaseSync('dallio.db'))` from `expo-sqlite`.
+For Expo (managed workflow), substitute `expoSqliteDriver(SQLite.openDatabaseSync('app.db'))` from `expo-sqlite`.
 
 ### Worked example: Tauri desktop + better-sqlite3
 
@@ -2879,7 +2879,7 @@ import { schema } from './schema';
 import { app } from '@tauri-apps/api';
 import path from 'node:path';
 
-const dbPath = path.join(await app.appLocalDataDir(), 'dallio.sqlite');
+const dbPath = path.join(await app.appLocalDataDir(), 'app.sqlite');
 export const db = await createDb({
   url: `sqlite:${dbPath}`,
   schema,
