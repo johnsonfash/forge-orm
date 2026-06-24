@@ -103,11 +103,12 @@ export type ForgeDb<S extends SchemaShape = SchemaMap> = Collections<S> & {
   // Runtime DDL apply — the browser/wasm replacement for `forge push`. Reads
   // the active schema, emits dialect DDL, applies what's missing inside a
   // transaction. Idempotent — already-existing tables/indexes are skipped.
-  // Currently sqlite-only (Node dialects use the CLI). Returns an apply report:
-  // { applied, skipped, failures }.
-  $migrate(opts?: { logger?: (line: string) => void }): Promise<{
-    applied: string[]; skipped: string[]; failures: { name: string; error: string }[];
-  }>;
+  // Currently sqlite-only (Node dialects use the CLI). Since 2.5.1 also runs
+  // a drift-apply pass: missing columns that can be safely added (nullable, or
+  // have a constant default) get `ALTER TABLE … ADD COLUMN` emitted; destructive
+  // drift (column drops, type changes, extra tables) is surfaced under `pending`.
+  // Returns: { applied, skipped, failures, alteredColumns, pending }.
+  $migrate(opts?: { logger?: (line: string) => void; alter?: boolean }): Promise<import('./wasm/migrate').RuntimeApplyReport>;
   // Runtime capability probe — the browser/wasm replacement for `forge doctor`.
   // On sqlite adapters (including the wasm one) returns the rich
   // BrowserDoctorReport (environment + sqlite + capabilities + notes); on
