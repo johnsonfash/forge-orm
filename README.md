@@ -1614,9 +1614,11 @@ forge ships the same emitter and applier as a runtime call:
 ```ts
 const report = await db.$migrate();
 // {
-//   applied: ['items', 'forge_items_unique_name'],
-//   skipped: [],                  // tables / indexes already present
-//   failures: [],                 // { name, error }
+//   applied:        ['items', 'forge_items_unique_name'],
+//   skipped:        [],                 // tables / indexes already present
+//   failures:       [],                 // { name, error }
+//   alteredColumns: ['items.email'],    // ALTER TABLE … ADD COLUMN run for these
+//   pending:        [],                 // destructive drift left untouched
 // }
 ```
 
@@ -1628,10 +1630,16 @@ Behind the scenes:
 3. Filters out tables / indexes that already exist (via `sqlite_master`).
 4. Wraps the remaining batch in `BEGIN / COMMIT` and applies through the
    wasm driver.
+5. Runs a drift-apply pass: introspects the live DB, diffs against the
+   schema, emits `ALTER TABLE … ADD COLUMN` for every missing column that
+   can be added safely (nullable, or with a constant default). Destructive
+   drift — column drops, column-type changes, extra tables — is left alone
+   and surfaced under `pending` for the caller to decide.
 
 It's **idempotent**. Safe to call on every app boot — already-present tables
-and indexes get skipped, the rest get created. The shape of the report matches
-the `forge push` output exactly, so it can be rendered in-app.
+and indexes get skipped, columns added since the last boot get patched in,
+the rest stays untouched. The shape of the report matches the `forge push`
+output exactly (plus the two new fields), so it can be rendered in-app.
 
 For verbose progress:
 
@@ -1655,10 +1663,24 @@ const report = await applySqliteMigration(driver, ddl, { logger: console.log });
 const report2 = await runMigrate(driver);
 ```
 
-**What `$migrate()` does NOT do** (yet): drift detection. If you add a column
-to an existing schema, today you must drop the DB or hand-write an
-`ALTER TABLE` via `db.$executeRaw\`...\``. Full drift detection (the
-in-browser equivalent of `forge diff`) is on the 2.5 roadmap.
+**Drift detection** (since 2.5.1). After the create-pass, `$migrate()`
+introspects the live DB and diffs it against the active schema:
+
+* **Missing column, safe to add** (nullable, or has a constant default) →
+  `ALTER TABLE … ADD COLUMN` is emitted automatically. Existing rows get
+  `NULL` or the declared default. Each one is reported under
+  `report.alteredColumns` as `'table.column'`.
+* **Missing column, NOT NULL with no default** → surfaced under
+  `report.pending`. SQLite would reject the ADD COLUMN against a non-empty
+  table, so the runtime won't try; the caller decides whether to wipe the
+  DB, hand-write a `$executeRaw` rebuild, or relax the schema.
+* **Column-type change / column drop / extra table** → also `pending`.
+  These need a full table rebuild, which is more than a runtime drift fix
+  should attempt.
+
+If you want the strict 2.5.0 create-or-skip behaviour back (no ALTER pass),
+pass `await db.$migrate({ alter: false })`. `db.$diff()` is still
+available when you only want the report and not the apply.
 
 ### `browserDoctor()` — runtime capability probe
 

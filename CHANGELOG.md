@@ -4,6 +4,65 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.5.1 — Browser `$migrate()` applies non-destructive drift
+
+**Patch release.** Closes the last "Coming soon" item carried over from 2.4:
+the in-browser equivalent of `forge diff` + a safe slice of `forge push`,
+rolled into the existing `$migrate()` call. Drop-in upgrade.
+
+### What changed
+
+`db.$migrate()` now runs a drift-apply pass after the create-pass:
+
+1. CREATE IF NOT EXISTS for tables and indexes (unchanged from 2.5.0).
+2. `introspectSqlite` + `diffIntrospection` against the active schema.
+3. For every `{ kind: 'column', direction: 'missing' }` drift item that's
+   safe — nullable, or has a constant default — emit
+   `ALTER TABLE … ADD COLUMN` inside the same transaction.
+4. Surface destructive drift (column drops, type changes, extra tables,
+   NOT NULL columns with no default) under a new `pending` field. The
+   runtime never tries to drop or re-type — those are full table-rebuild
+   territory.
+
+```ts
+const report = await db.$migrate();
+// {
+//   applied:        ['items', 'forge_items_unique_name'],
+//   skipped:        [],
+//   failures:       [],
+//   alteredColumns: ['items.email'],          // ADD COLUMN ran for each
+//   pending:        [                          // not applied — caller decides
+//     { kind: 'column', direction: 'missing', table: 'items', detail: "column 'count'" },
+//     { kind: 'column', direction: 'extra',   table: 'items', detail: "column 'legacy_blob' in DB but not in schema" },
+//   ],
+// }
+```
+
+Opt out with `await db.$migrate({ alter: false })` if you want the strict
+2.5.0 create-or-skip behaviour back. `db.$diff()` still returns the
+`DriftReport` directly when you only want the diff without the apply.
+
+### Why "non-destructive" is the only auto-applied slice
+
+SQLite `ALTER TABLE … ADD COLUMN` is the one drift fix that survives a
+non-empty production table. Adding a `NOT NULL` column without a constant
+default would reject; dropping or re-typing a column needs a full table
+rebuild (CREATE new table, INSERT … SELECT, DROP old, RENAME). The runtime
+won't pick a rebuild strategy on its own — pending entries land in the
+report so the caller can decide between wiping the DB, emitting a manual
+`$executeRaw` rebuild, or relaxing the schema.
+
+### Files added in 2.5.1
+
+| File | Purpose |
+|---|---|
+| `src/wasm/drift-apply.ts` | introspect + diff + safe-ALTER pass; exported as `applyDrift()` for direct use |
+| `src/__tests__/wasm-drift-apply.spec.ts` | 7 jest tests covering nullable / defaulted / unsafe / extra / opt-out / direct-call paths |
+
+### Tests
+
+472/472 jest tests, all green. Was 465/465 in 2.5.0.
+
 ## 2.5.0 — MSSQL `MERGE` upsert, Mongo cross-field `nearTo`, browser `$doctor`/`$diff`, MultiPolygon + GeometryCollection, 3D / Z coordinates, non-WGS84 SRIDs
 
 **Feature release.** Closes the entire "Coming soon" list from 2.4, plus a

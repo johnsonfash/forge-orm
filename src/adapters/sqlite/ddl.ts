@@ -187,7 +187,7 @@ function buildCreateTable(m: ModelDef<any>, schema: SchemaMap): DDLStatement {
   };
 }
 
-function renderColumn(name: string, field: FieldDef): string {
+export function renderColumn(name: string, field: FieldDef): string {
   const d = SqliteDialect;
   const colName = d.quoteIdent(name);
   const type = d.columnType(field);

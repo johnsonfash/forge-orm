@@ -165,9 +165,13 @@ export type {
 } from './scripts/diff-core';
 
 // ─── Runtime DDL apply (browser/wasm replacement for `forge push`) ──────────
-// Also available as `db.$migrate()` on any sqlite-adapter ForgeDb.
+// Also available as `db.$migrate()` on any sqlite-adapter ForgeDb. Since 2.5.1
+// also applies non-destructive drift (ADD COLUMN for missing columns) and
+// reports destructive items under `pending`.
 export { runMigrate } from './wasm/migrate';
-export type { RuntimeMigrateOptions } from './wasm/migrate';
+export type { RuntimeMigrateOptions, RuntimeApplyReport } from './wasm/migrate';
+export { applyDrift } from './wasm/drift-apply';
+export type { DriftApplyReport } from './wasm/drift-apply';
 // Browser feature-detection probe — mirror of the CLI doctor for the wasm path.
 export { browserDoctor } from './wasm/browser-doctor';
 export type { BrowserDoctorReport } from './wasm/browser-doctor';
