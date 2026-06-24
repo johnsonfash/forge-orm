@@ -13,7 +13,7 @@ import type { SchemaMap } from '../schema';
 // existing tables and indexes are skipped via the migrator's idempotency check
 // (CREATE … IF NOT EXISTS + sqlite_master lookup).
 //
-//   const db = await createDb({ url: 'opfs-sahpool:///dallio.sqlite',
+//   const db = await createDb({ url: 'opfs-sahpool:///app.sqlite',
 //     schema, driver: wasmSqliteDriver({ worker }) });
 //   await runMigrate(db);   // first call creates tables; subsequent calls no-op
 
