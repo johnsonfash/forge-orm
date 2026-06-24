@@ -231,17 +231,61 @@ function buildIndexes(m: ModelDef<any>): DDLStatement[] {
   const table = m.collection;
   const out: DDLStatement[] = [];
   for (const idx of m.indexes ?? []) {
-    const cols = Object.keys(idx.keys);
-    const name = (idx as IndexDef).name ?? tableConstraintName(table, 'idx', cols);
-    const colExpr = cols.map((c) => {
-      const dir = idx.keys[c];
-      if (dir === 'text') return `${d.quoteIdent(c)}`;
-      return `${d.quoteIdent(c)} ${dir === -1 ? 'DESC' : 'ASC'}`;
-    }).join(', ');
-    const uniqueKW = idx.unique ? 'UNIQUE ' : '';
+    const i = idx as IndexDef;
+    const cols = Object.keys(i.keys);
+    const name = i.name ?? tableConstraintName(table, 'idx', i.expression ? ['expr'] : cols);
+
+    // MySQL spatial / fulltext are statement-prefix keywords (CREATE SPATIAL
+    // INDEX … / CREATE FULLTEXT INDEX …) — not USING clauses. Other methods
+    // (gin / gist / brin / hash) don't exist on MySQL; we ignore them so the
+    // schema can stay portable.
+    let kindKW = '';
+    if (i.method === 'spatial') kindKW = 'SPATIAL ';
+    else if (i.method === 'fulltext') kindKW = 'FULLTEXT ';
+    else if (i.unique) kindKW = 'UNIQUE ';
+
+    // Expression index: MySQL 8.0+ supports (CAST/JSON-extract/etc) — wrap
+    // the user-supplied expression in an extra paren pair per the docs:
+    // `CREATE INDEX i ON t ((LOWER(name)))`.
+    let payload: string;
+    if (i.expression) {
+      payload = `(${i.expression})`;
+    } else {
+      payload = cols
+        .map((c) => {
+          const dir = i.keys[c];
+          if (dir === 'text') return `${d.quoteIdent(c)}`;
+          // SPATIAL / FULLTEXT don't accept ASC/DESC.
+          if (i.method === 'spatial' || i.method === 'fulltext') return d.quoteIdent(c);
+          return `${d.quoteIdent(c)} ${dir === -1 ? 'DESC' : 'ASC'}`;
+        })
+        .join(', ');
+    }
+
+    // INCLUDE is PG-only — warn if the user passes it on MySQL.
+    if (i.include?.length) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[forge:push:mysql] index '${name}' uses include — INCLUDE is a ` +
+        `Postgres-only feature. Ignored on MySQL.`,
+      );
+    }
+
+    // WHERE — MySQL does NOT support partial indexes natively. Warn + skip.
+    if (i.where) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[forge:push:mysql] index '${name}' uses 'where' — MySQL does not ` +
+        `support partial indexes. Either drop the filter or model it as a ` +
+        `generated column + plain index. Ignored.`,
+      );
+    }
+
     out.push({
-      kind: 'index', name, table,
-      sql: `CREATE ${uniqueKW}INDEX ${d.quoteIdent(name)} ON ${d.quoteIdent(table)} (${colExpr})`,
+      kind: 'index',
+      name,
+      table,
+      sql: `CREATE ${kindKW}INDEX ${d.quoteIdent(name)} ON ${d.quoteIdent(table)} (${payload})`,
       dropSql: `DROP INDEX ${d.quoteIdent(name)} ON ${d.quoteIdent(table)}`,
     });
   }

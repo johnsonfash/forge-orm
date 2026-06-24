@@ -21,12 +21,14 @@ import { FieldDef, ModelDef } from '../../../schema/types';
 // (model.uniques), plain compound indexes (model.indexes). _id is never pushed.
 
 interface IndexSpec {
-  keys: Record<string, 1 | -1 | 'text'>;
+  keys: Record<string, 1 | -1 | 'text' | '2dsphere' | '2d' | 'hashed'>;
   unique?: boolean;
   sparse?: boolean;
   name: string;
   expireAfterSeconds?: number;
   partialFilterExpression?: Record<string, unknown>;
+  collation?: Record<string, unknown>;
+  wildcardProjection?: Record<string, unknown>;
 }
 
 interface IndexInfo {
@@ -36,6 +38,8 @@ interface IndexInfo {
   sparse?: boolean;
   expireAfterSeconds?: number;
   partialFilterExpression?: Record<string, unknown>;
+  collation?: Record<string, unknown>;
+  wildcardProjection?: Record<string, unknown>;
 }
 
 // Order-independent JSON for comparing a partialFilterExpression we declared
@@ -47,11 +51,30 @@ export function stableJson(v: any): string {
 }
 
 // Stable string for spec comparison: preserves key insertion order.
-export function fingerprint(keys: Record<string, any>, unique?: boolean, sparse?: boolean, expireAfterSeconds?: number, partialFilterExpression?: Record<string, unknown>): string {
+//
+// Signature stays positional + back-compat: callers that only pass keys/unique/
+// sparse/ttl/pfe (pre-2.2) still work — the extra options collapse to '-' when
+// absent and are appended at the end so a fingerprint computed with the old
+// signature equals one computed with the new signature for the same spec.
+export function fingerprint(
+  keys: Record<string, any>,
+  unique?: boolean,
+  sparse?: boolean,
+  expireAfterSeconds?: number,
+  partialFilterExpression?: Record<string, unknown>,
+  collation?: Record<string, unknown>,
+  wildcardProjection?: Record<string, unknown>,
+): string {
   const keyStr = Object.keys(keys)
     .map((k) => `${k}:${keys[k]}`)
     .join(',');
-  return `${keyStr}|u=${unique ? 1 : 0}|s=${sparse ? 1 : 0}|ttl=${expireAfterSeconds ?? '-'}|pfe=${partialFilterExpression ? stableJson(partialFilterExpression) : '-'}`;
+  const base = `${keyStr}|u=${unique ? 1 : 0}|s=${sparse ? 1 : 0}|ttl=${expireAfterSeconds ?? '-'}|pfe=${partialFilterExpression ? stableJson(partialFilterExpression) : '-'}`;
+  // Append new dims ONLY when present so the empty-options fingerprint is
+  // byte-identical with the pre-2.2 fingerprint. That keeps existing indexes
+  // from being unnecessarily rebuilt on a pure-version-bump push.
+  const coll = collation ? `|coll=${stableJson(collation)}` : '';
+  const wcp = wildcardProjection ? `|wcp=${stableJson(wildcardProjection)}` : '';
+  return base + coll + wcp;
 }
 
 async function listExisting(collection: Collection): Promise<Map<string, IndexInfo>> {
@@ -68,6 +91,10 @@ async function listExisting(collection: Collection): Promise<Map<string, IndexIn
         sparse: !!i.sparse,
         expireAfterSeconds: i.expireAfterSeconds,
         partialFilterExpression: i.partialFilterExpression,
+        // Mongo echoes back collation + wildcardProjection on listIndexes()
+        // so the diff can compare them and rebuild on drift.
+        collation: i.collation,
+        wildcardProjection: i.wildcardProjection,
       });
     }
     return map;
@@ -91,12 +118,53 @@ async function ensureIndex(
   if (spec.partialFilterExpression) {
     opts.partialFilterExpression = spec.partialFilterExpression;
   }
+  if (spec.collation) {
+    opts.collation = spec.collation;
+  }
+  if (spec.wildcardProjection) {
+    opts.wildcardProjection = spec.wildcardProjection;
+  }
 
-  const want = fingerprint(spec.keys, spec.unique, spec.sparse, spec.expireAfterSeconds, spec.partialFilterExpression);
+  const want = fingerprint(
+    spec.keys,
+    spec.unique,
+    spec.sparse,
+    spec.expireAfterSeconds,
+    spec.partialFilterExpression,
+    spec.collation,
+    spec.wildcardProjection,
+  );
   const have = existing.get(spec.name);
 
   if (have) {
-    const haveFp = fingerprint(have.key, have.unique, have.sparse, have.expireAfterSeconds, have.partialFilterExpression);
+    // Mongo echoes back collation with every default field filled in
+    // (caseLevel, caseFirst, alternate, maxVariable, normalization, version
+    // …). The user only declared a subset (typically locale + strength) so
+    // a direct fingerprint comparison would always say "drifted" and force
+    // an unnecessary rebuild on every push.
+    //
+    // Project the echoed collation down to ONLY the keys the user declared
+    // before fingerprinting. If a declared key changes (locale: 'en' → 'tr')
+    // the projection still catches it; if Mongo adds a brand-new default
+    // field, we silently ignore it.
+    let haveCollation = have.collation;
+    if (haveCollation && spec.collation) {
+      const declaredKeys = Object.keys(spec.collation);
+      const projected: Record<string, unknown> = {};
+      for (const k of declaredKeys) {
+        if (k in haveCollation) projected[k] = (haveCollation as any)[k];
+      }
+      haveCollation = projected;
+    }
+    const haveFp = fingerprint(
+      have.key,
+      have.unique,
+      have.sparse,
+      have.expireAfterSeconds,
+      have.partialFilterExpression,
+      haveCollation,
+      have.wildcardProjection,
+    );
     if (haveFp === want) {
       return 'skipped';
     }
@@ -173,14 +241,26 @@ export function collectIndexSpecs(modelName: string, model: ModelDef<any>): Inde
     });
   }
 
-  // Plain compound indexes — schema-supplied.
+  // Plain compound indexes — schema-supplied. Expression indexes
+  // (idx.expression) and SQL-only fields (idx.include, idx.method) are
+  // SQL-only — skip the spec on Mongo. `where` aliases the Mongo
+  // `partialFilterExpression` when given as an object; a string `where`
+  // is SQL-only and ignored here.
   for (const idx of model.indexes || []) {
+    if (idx.expression) continue; // Mongo doesn't support expression indexes
+    const pfe =
+      idx.partialFilterExpression ??
+      (idx.where && typeof idx.where === 'object'
+        ? (idx.where as Record<string, unknown>)
+        : undefined);
     specs.push({
       keys: idx.keys,
       unique: idx.unique,
       sparse: idx.sparse,
       expireAfterSeconds: idx.expireAfterSeconds,
-      partialFilterExpression: idx.partialFilterExpression,
+      partialFilterExpression: pfe,
+      collation: idx.collation as Record<string, unknown> | undefined,
+      wildcardProjection: idx.wildcardProjection,
       name: idx.name || indexNameFor(modelName, idx.keys, idx.unique),
     });
   }

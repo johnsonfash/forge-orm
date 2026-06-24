@@ -85,22 +85,76 @@ export function generateMigration(
     }
 
     // Missing indexes (unique + composite + @@index), by column-set+uniqueness.
+    // Column-set diff doesn't catch method / where / include / expression
+    // drift on EXISTING indexes — for that, drop & recreate via `forge:push`.
+    // But when an index is genuinely missing from the DB, generate the FULL
+    // 2.2+ SQL — method/where/include/expression — so the migration matches
+    // the schema's intent and not a watered-down BTREE fallback.
     const actSigs = new Set(act.indexes.map((ix) => `${ix.unique ? 'u' : 'n'}:${[...ix.columns].sort().join(',')}`));
-    const wantIdx: { unique: boolean; cols: string[] }[] = [];
+    type WantIdx = {
+      unique: boolean;
+      cols: string[];
+      method?: string;
+      where?: string;
+      include?: string[];
+      expression?: string;
+      explicitName?: string;
+    };
+    const wantIdx: WantIdx[] = [];
     for (const [name, fdef] of Object.entries(m.fields)) {
       const f = fdef as FieldDef;
       if (f.unique && f.kind !== 'id') wantIdx.push({ unique: true, cols: [name] });
     }
     for (const cols of m.uniques ?? []) wantIdx.push({ unique: true, cols });
-    for (const idx of m.indexes ?? []) wantIdx.push({ unique: idx.unique === true, cols: Object.keys(idx.keys) });
+    for (const idx of m.indexes ?? []) {
+      wantIdx.push({
+        unique: idx.unique === true,
+        cols: Object.keys(idx.keys),
+        method: idx.method,
+        where: typeof idx.where === 'string' ? idx.where : undefined,
+        include: idx.include,
+        expression: idx.expression,
+        explicitName: idx.name,
+      });
+    }
     for (const w of wantIdx) {
+      // Expression indexes have NO column list — they can't be compared by
+      // the column-set sig (every expression index would otherwise look like
+      // a duplicate of every other one). Skip the diff for them — `forge:push`
+      // handles their lifecycle.
+      if (w.expression) continue;
       const sig = `${w.unique ? 'u' : 'n'}:${[...w.cols].sort().join(',')}`;
       if (actSigs.has(sig)) continue;
-      const name = idxName(m.collection, w.unique, w.cols);
-      const colList = w.cols.map(d.quoteIdent).join(', ');
+      const name = w.explicitName ?? idxName(m.collection, w.unique, w.cols);
       const onMysql = d.name === 'mysql';
+
+      // Build per-dialect SQL that mirrors what buildSchemaDDL produces.
+      let sql: string;
+      if (d.name === 'postgres') {
+        const method = w.method && w.method !== 'btree' ? ` USING ${w.method}` : '';
+        const colList = w.cols.map(d.quoteIdent).join(', ');
+        const includeSql = w.include?.length
+          ? ` INCLUDE (${w.include.map(d.quoteIdent).join(', ')})`
+          : '';
+        const whereSql = w.where ? ` WHERE ${w.where}` : '';
+        sql = `CREATE ${w.unique ? 'UNIQUE ' : ''}INDEX IF NOT EXISTS ${d.quoteIdent(name)} ON ${q}${method} (${colList})${includeSql}${whereSql}`;
+      } else if (d.name === 'mysql') {
+        // MySQL spatial / fulltext are STATEMENT-prefix keywords, not USING.
+        let kindKW = '';
+        if (w.method === 'spatial') kindKW = 'SPATIAL ';
+        else if (w.method === 'fulltext') kindKW = 'FULLTEXT ';
+        else if (w.unique) kindKW = 'UNIQUE ';
+        const colList = w.cols.map(d.quoteIdent).join(', ');
+        sql = `CREATE ${kindKW}INDEX ${d.quoteIdent(name)} ON ${q} (${colList})`;
+      } else {
+        // SQLite supports WHERE natively.
+        const colList = w.cols.map(d.quoteIdent).join(', ');
+        const whereSql = w.where ? ` WHERE ${w.where}` : '';
+        sql = `CREATE ${w.unique ? 'UNIQUE ' : ''}INDEX IF NOT EXISTS ${d.quoteIdent(name)} ON ${q} (${colList})${whereSql}`;
+      }
+
       pairs.push({
-        up: `CREATE ${w.unique ? 'UNIQUE ' : ''}INDEX ${d.quoteIdent(name)} ON ${q} (${colList})`,
+        up: sql,
         down: onMysql ? `DROP INDEX ${d.quoteIdent(name)} ON ${q}` : `DROP INDEX IF EXISTS ${d.quoteIdent(name)}`,
         note: `add index ${name}`,
       });

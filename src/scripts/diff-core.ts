@@ -125,6 +125,11 @@ export function expectedFromSchema(schema: Record<string, any>): {
     }
     for (const cols of m.uniques ?? []) indexSigs.add(indexSig(true, cols));
     for (const idx of m.indexes ?? []) {
+      // Expression indexes have no column list — comparing them by column-set
+      // would treat every expression index as a duplicate of every other one
+      // (all "empty cols"). Skip them from the structural diff; `forge:push`
+      // is the source of truth for their lifecycle.
+      if (idx.expression) continue;
       indexSigs.add(indexSig(idx.unique === true, Object.keys(idx.keys)));
     }
 

@@ -28,6 +28,28 @@ function modelKeyFor(model: ModelDef<any>): string {
   return model.collection;
 }
 
+// Walk the model's fields and return the name of the field flagged with
+// `.softDeleteAt()`. Used by the compile-side softDelete/restore — same gate
+// the runtime collection wrapper uses, just thrown at compile() time.
+function softDeleteField(model: ModelDef<any>): string | undefined {
+  for (const [name, fdef] of Object.entries(model.fields)) {
+    if ((fdef as any)?.softDeleteAt) return name;
+  }
+  return undefined;
+}
+
+function requireSoftDeleteField(model: ModelDef<any>, op: string): string {
+  const sd = softDeleteField(model);
+  if (!sd) {
+    throw new Error(
+      `[forge] compile.${op}() requires a field declared with .softDeleteAt() ` +
+      `on model '${model.collection}'. Use compile.delete()/compile.deleteMany() ` +
+      `for hard deletes.`,
+    );
+  }
+  return sd;
+}
+
 export function buildMongoCompileApi(model: ModelDef<any>): MongoCompileApi {
   const mk = modelKeyFor(model);
   return {
@@ -69,6 +91,45 @@ export function buildMongoCompileApi(model: ModelDef<any>): MongoCompileApi {
     deleteMany: (args?: any) => compileDelete(buildDelete(mk, model, {
       where: args?.where, many: true,
     }), model),
+
+    // Soft delete / restore compile to update IRs that set/clear the
+    // `.softDeleteAt()` column. Same shape as the runtime collection
+    // wrapper (collection.softDelete → this.update with data:{<sd>: new Date()}),
+    // just compiled instead of executed.
+    softDelete: (args: any) => {
+      const sd = requireSoftDeleteField(model, 'softDelete');
+      return compileUpdate(buildUpdate(mk, model, {
+        where: args.where,
+        data: { [sd]: new Date() } as any,
+        many: false,
+        returning: args,
+      }), model);
+    },
+    softDeleteMany: (args?: any) => {
+      const sd = requireSoftDeleteField(model, 'softDeleteMany');
+      return compileUpdate(buildUpdate(mk, model, {
+        where: args?.where,
+        data: { [sd]: new Date() } as any,
+        many: true,
+      }), model);
+    },
+    restore: (args: any) => {
+      const sd = requireSoftDeleteField(model, 'restore');
+      return compileUpdate(buildUpdate(mk, model, {
+        where: args.where,
+        data: { [sd]: null } as any,
+        many: false,
+        returning: args,
+      }), model);
+    },
+    restoreMany: (args?: any) => {
+      const sd = requireSoftDeleteField(model, 'restoreMany');
+      return compileUpdate(buildUpdate(mk, model, {
+        where: args?.where,
+        data: { [sd]: null } as any,
+        many: true,
+      }), model);
+    },
 
     aggregate:  (args: { pipeline: any[]; options?: any }): MongoArtifact => ({
       kind: 'mongo',

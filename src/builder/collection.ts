@@ -20,7 +20,10 @@ import { ModelDef, RelationDef } from '../schema/types';
 import { coerceExtendedJSON } from '../adapters/mongo/coerce';
 import { DbKnownError, notFoundError } from '../adapters/mongo/errors';
 import { buildMongoCompileApi } from '../adapters/mongo/compile';
-import type { MongoCompileApi } from '../compile';
+import { buildPostgresCompileApi } from '../adapters/postgres/compile';
+import { buildMysqlCompileApi } from '../adapters/mysql/compile';
+import { buildSqliteCompileApi } from '../adapters/sqlite/compile';
+import type { CompileApi, MongoCompileApi, SQLCompileApi } from '../compile';
 import { buildCount, buildDelete, buildGroupBy, buildInsert, buildProjection, buildSelect, buildUpdate } from '../ir/build';
 import type { Adapter } from '../adapters/types';
 import { getDefaultMongoAdapter } from '../adapters/mongo/adapter';
@@ -65,7 +68,7 @@ export class CollectionWrapper<
   SM extends Record<string, TypedModel<any, any>> = SchemaMap,
 > {
   private _collection?: Collection<Document>;
-  private _compileApi?: MongoCompileApi;
+  private _compileApi?: CompileApi;
   // Defaults to the lazily-built Mongo singleton so the default Mongo path works
   // without surgery. createDb() injects the active adapter explicitly for
   // Postgres / MySQL / SQLite.
@@ -120,10 +123,51 @@ export class CollectionWrapper<
 
   // Compile namespace — same arg shape as the execute methods, but returns a
   // typed artifact instead of executing (for forwarding to a manually managed
-  // driver, generating migration/seed scripts, debugging, replay/audit).
-  get compile(): MongoCompileApi {
-    if (!this._compileApi) this._compileApi = buildMongoCompileApi(this.model);
+  // driver, generating migration/seed scripts, debugging, replay/audit). Per-
+  // adapter dispatch: Mongo returns MongoArtifact, SQL dialects return
+  // SQLArtifact with the matching `dialect` field. Each adapter's IR-stage
+  // emitter handles its own placeholder syntax + quoting.
+  get compile(): CompileApi {
+    if (!this._compileApi) {
+      const kind = this._adapter?.kind;
+      switch (kind) {
+        case 'postgres': this._compileApi = buildPostgresCompileApi(this.model); break;
+        case 'mysql':    this._compileApi = buildMysqlCompileApi(this.model);    break;
+        case 'sqlite':   this._compileApi = buildSqliteCompileApi(this.model);   break;
+        case 'mongo':
+        default:         this._compileApi = buildMongoCompileApi(this.model);    break;
+      }
+    }
     return this._compileApi;
+  }
+  /**
+   * Narrowed compile API for Mongo callers — same getter as `compile`, just
+   * statically typed. Throws at access if the adapter isn't Mongo so the
+   * mismatched dialect surfaces loudly instead of silently returning the wrong
+   * artifact shape.
+   */
+  get compileMongo(): MongoCompileApi {
+    if (this._adapter?.kind !== 'mongo' && this._adapter?.kind !== undefined) {
+      throw new Error(
+        `[forge] .compileMongo is only available on a Mongo adapter ` +
+        `(current adapter: ${this._adapter?.kind}). Use .compile or ` +
+        `.compileSql instead.`,
+      );
+    }
+    return this.compile as MongoCompileApi;
+  }
+  /**
+   * Narrowed compile API for SQL callers — returns SQLArtifact with the
+   * correct dialect. Throws at access if the adapter is Mongo.
+   */
+  get compileSql(): SQLCompileApi {
+    if (this._adapter?.kind === 'mongo') {
+      throw new Error(
+        `[forge] .compileSql is not available on a Mongo adapter. Use .compile ` +
+        `or .compileMongo instead.`,
+      );
+    }
+    return this.compile as SQLCompileApi;
   }
 
   private get collection(): Collection<Document> {

@@ -87,6 +87,15 @@ export interface MongoCompileApi<F = any, R = any> {
   upsert(args: any): MongoArtifact;
   delete(args: any): MongoArtifact;
   deleteMany(args?: any): MongoArtifact;
+  /**
+   * Soft delete — set the model's `.softDeleteAt()` field to `now()`. Throws at
+   * call time if the model has no soft-delete field.
+   */
+  softDelete(args: any): MongoArtifact;
+  softDeleteMany(args?: any): MongoArtifact;
+  /** Restore a soft-deleted row — clear the `.softDeleteAt()` field. */
+  restore(args: any): MongoArtifact;
+  restoreMany(args?: any): MongoArtifact;
   aggregate(args: { pipeline: any[]; options?: any }): MongoArtifact;
 }
 
@@ -102,6 +111,15 @@ export interface SQLCompileApi<F = any, R = any> {
   upsert(args: any): SQLArtifact;
   delete(args: any): SQLArtifact;
   deleteMany(args?: any): SQLArtifact;
+  /**
+   * Soft delete — set the model's `.softDeleteAt()` field to `now()`. Throws at
+   * call time if the model has no soft-delete field.
+   */
+  softDelete(args: any): SQLArtifact;
+  softDeleteMany(args?: any): SQLArtifact;
+  /** Restore a soft-deleted row — clear the `.softDeleteAt()` field. */
+  restore(args: any): SQLArtifact;
+  restoreMany(args?: any): SQLArtifact;
 }
 
 export type CompileApi<F = any, R = any> = MongoCompileApi<F, R> | SQLCompileApi<F, R>;
