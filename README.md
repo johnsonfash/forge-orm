@@ -107,7 +107,7 @@ you usually have to drop to raw SQL for:
   * [Feature parity matrix](#feature-parity-matrix)
   * [Custom wasm build (vec0 + R-Tree)](#custom-wasm-build-vec0--r-tree)
   * [Troubleshooting](#troubleshooting)
-  * [Framework worked examples → docs/browser-frameworks.md](docs/browser-frameworks.md)
+  * [Framework worked examples → docs/BROWSER-FRAMEWORKS.md](docs/BROWSER-FRAMEWORKS.md)
 * [Streaming large results](#streaming-large-results)
 * [Soft delete](#soft-delete)
 * [Views and materialised views](#views-and-materialised-views)
@@ -133,12 +133,12 @@ The README is the surface reference. For more depth — extra examples, edge cas
 
 | Topic | File |
 |---|---|
-| Backend / server integration (hyper-express, Fastify, NestJS, Bun+Hono, pools, tx, BullMQ, multi-tenant, replicas, OTel, health checks, CI) | **[docs/backend.md](docs/backend.md)** |
-| Browser frameworks (React, Next.js, Vue, Nuxt, SvelteKit, Angular, SolidStart, Astro, Remix, React Native, Tauri) | **[docs/browser-frameworks.md](docs/browser-frameworks.md)** |
-| Mobile + cross-platform persistence (RN bare, Expo, Capacitor, Tauri, SQLCipher, sync patterns, background tasks, testing) | **[docs/mobile.md](docs/mobile.md)** |
-| Geo deep-dive (SRIDs, dialect matrix, PostGIS, distance models, 3D, MultiPolygon, GeoJSON, spatial joins, H3, realtime) | **[docs/geo.md](docs/geo.md)** |
-| Vector / embeddings / RAG (dialect picker, pipeline, hybrid BM25, versioning, HNSW/IVFFlat, quantization, multi-modal, eval) | **[docs/vector.md](docs/vector.md)** |
-| JSON path queries (per-dialect emit, indexing, migration, operator matrix, null markers, audit/webhook patterns, common bugs) | **[docs/json-path.md](docs/json-path.md)** |
+| Backend / server integration (hyper-express, Fastify, NestJS, Bun+Hono, pools, tx, BullMQ, multi-tenant, replicas, OTel, health checks, CI) | **[docs/BACKEND.md](docs/BACKEND.md)** |
+| Browser frameworks (React, Next.js, Vue, Nuxt, SvelteKit, Angular, SolidStart, Astro, Remix, React Native, Tauri) | **[docs/BROWSER-FRAMEWORKS.md](docs/BROWSER-FRAMEWORKS.md)** |
+| Mobile + cross-platform persistence (RN bare, Expo, Capacitor, Tauri, SQLCipher, sync patterns, background tasks, testing) | **[docs/MOBILE.md](docs/MOBILE.md)** |
+| Geo deep-dive (SRIDs, dialect matrix, PostGIS, distance models, 3D, MultiPolygon, GeoJSON, spatial joins, H3, realtime) | **[docs/GEO.md](docs/GEO.md)** |
+| Vector / embeddings / RAG (dialect picker, pipeline, hybrid BM25, versioning, HNSW/IVFFlat, quantization, multi-modal, eval) | **[docs/VECTOR.md](docs/VECTOR.md)** |
+| JSON path queries (per-dialect emit, indexing, migration, operator matrix, null markers, audit/webhook patterns, common bugs) | **[docs/JSON-PATH.md](docs/JSON-PATH.md)** |
 
 ---
 
@@ -1263,7 +1263,7 @@ Fallback mode emits an axis-aligned bbox prefilter from the polygon's
 envelope; the adapter then runs a ray-casting point-in-polygon refinement
 in app. Concave polygons work correctly.
 
-**See also:** **[docs/geo.md](docs/geo.md)** — SRID picker, full dialect feature matrix, PostGIS deep-dive, distance models (sphere/ellipsoid/planar), 3D coords, MultiPolygon patterns, GeoJSON round-trip, spatial joins, H3 grids, realtime tracking, testing.
+**See also:** **[docs/GEO.md](docs/GEO.md)** — SRID picker, full dialect feature matrix, PostGIS deep-dive, distance models (sphere/ellipsoid/planar), 3D coords, MultiPolygon patterns, GeoJSON round-trip, spatial joins, H3 grids, realtime tracking, testing.
 
 ---
 
@@ -1319,7 +1319,7 @@ Per dialect:
 | MSSQL | `JSON_VALUE(col, '$.a.b')` |
 | Mongo | dotted key: `{ 'meta.a.b': … }` |
 
-**See also:** **[docs/json-path.md](docs/json-path.md)** — per-dialect SQL emit, GIN/multi-valued/expression indexes, column ↔ JSON migration, full operator-by-dialect matrix, null-marker semantics, audit-log/webhook patterns, common bugs.
+**See also:** **[docs/JSON-PATH.md](docs/JSON-PATH.md)** — per-dialect SQL emit, GIN/multi-valued/expression indexes, column ↔ JSON migration, full operator-by-dialect matrix, null-marker semantics, audit-log/webhook patterns, common bugs.
 
 ---
 
@@ -1395,7 +1395,7 @@ When the dialect can't host a regular vector index (Mongo, SQLite), the
 `method: 'vector'` index emission warns clearly instead of silently
 emitting a useless btree.
 
-**See also:** **[docs/vector.md](docs/vector.md)** — dialect picker (pgvector / sqlite-vec / Atlas / HeatWave / DuckDB), end-to-end RAG pipeline, hybrid BM25 + vector with RRF, embedding versioning, HNSW/IVFFlat tuning, halfvec/binary quantization, CLIP multi-modal, MRR/nDCG CI gates, cost model.
+**See also:** **[docs/VECTOR.md](docs/VECTOR.md)** — dialect picker (pgvector / sqlite-vec / Atlas / HeatWave / DuckDB), end-to-end RAG pipeline, hybrid BM25 + vector with RRF, embedding versioning, HNSW/IVFFlat tuning, halfvec/binary quantization, CLIP multi-modal, MRR/nDCG CI gates, cost model.
 
 ---
 
@@ -1936,7 +1936,7 @@ the worker construction in the root layout instead of waiting for a route.
 
 ### Framework worked examples
 
-End-to-end recipes for React + Vite, Next.js App Router, Vue 3, Nuxt 3, SvelteKit, Angular, SolidStart, Astro, Remix, React Native + op-sqlite, and Tauri desktop live in **[docs/browser-frameworks.md](docs/browser-frameworks.md)**. Each one is the production-shaped install → bundler config → schema → db singleton → component flow.
+End-to-end recipes for React + Vite, Next.js App Router, Vue 3, Nuxt 3, SvelteKit, Angular, SolidStart, Astro, Remix, React Native + op-sqlite, and Tauri desktop live in **[docs/BROWSER-FRAMEWORKS.md](docs/BROWSER-FRAMEWORKS.md)**. Each one is the production-shaped install → bundler config → schema → db singleton → component flow.
 
 ---
 

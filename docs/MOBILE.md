@@ -4,10 +4,10 @@ forge ships SQLite drivers (`expoSqliteDriver`, `opSqliteDriver`,
 `libsqlDriver`, `betterSqlite3Driver`, `wasmSqliteDriver`) and the same
 `SqliteDriver` port is open for anything else that can run SQL. The
 [README's pluggable drivers section](../README.md#pluggable-drivers) names
-each factory; the [browser-frameworks recipes](./browser-frameworks.md)
+each factory; the [browser-frameworks recipes](./BROWSER-FRAMEWORKS.md)
 cover Vite / Next / Vue / Svelte / Angular and a brief
-[React Native + op-sqlite](./browser-frameworks.md#react-native--op-sqlite-bonus)
-and [Tauri + better-sqlite3](./browser-frameworks.md#tauri-desktop--better-sqlite3)
+[React Native + op-sqlite](./BROWSER-FRAMEWORKS.md#react-native--op-sqlite-bonus)
+and [Tauri + better-sqlite3](./BROWSER-FRAMEWORKS.md#tauri-desktop--better-sqlite3)
 example.
 
 This doc goes deeper on what those two short sections skip: how to pick
@@ -423,7 +423,7 @@ WebKitGTK on Linux) and a Rust binary. SQLite can live in either.
   `db.$migrate()` and `db.$doctor()` calls.
 
 ```ts
-// src/db.ts — identical to the Vite recipe in browser-frameworks.md
+// src/db.ts — identical to the Vite recipe in BROWSER-FRAMEWORKS.md
 import { createDb, wasmSqliteDriver } from 'forge-orm';
 import { schema } from './schema';
 
@@ -954,7 +954,7 @@ shape — `name: 'string'` becomes `name: f.string()`, `email:
 is Realm's auto-update notifications — there's no direct forge
 equivalent. Replace `realm.objects('Person').addListener(...)` with
 either a manual refetch on mutation (the React Query pattern in the
-[Next.js section](./browser-frameworks.md#nextjs-app-router)) or driver-level
+[Next.js section](./BROWSER-FRAMEWORKS.md#nextjs-app-router)) or driver-level
 change hooks (op-sqlite's `db.reactiveExecute`). Data migration: export
 Realm to JSON, run a one-off forge script that upserts each row. Realm's
 binary format is not sqlite-compatible, so there's no in-place migration.
@@ -986,4 +986,4 @@ without further edits.
 ---
 
 Back to the [README index](../README.md#contents) or the framework-by-
-framework [browser recipes](./browser-frameworks.md).
+framework [browser recipes](./BROWSER-FRAMEWORKS.md).
