@@ -129,16 +129,47 @@ you usually have to drop to raw SQL for:
 
 ### Deep-dive companions (`docs/`)
 
-The README is the surface reference. For more depth — extra examples, edge cases, integration patterns — each major surface has its own companion doc.
+The README is the surface reference. For more depth — extra examples, edge cases, integration patterns — each major surface has its own companion doc. Twenty in total, ~20,000 lines of reference material.
+
+**Schema and data model**
 
 | Topic | File |
 |---|---|
-| Backend / server integration (hyper-express, Fastify, NestJS, Bun+Hono, pools, tx, BullMQ, multi-tenant, replicas, OTel, health checks, CI) | **[docs/BACKEND.md](docs/BACKEND.md)** |
-| Browser frameworks (React, Next.js, Vue, Nuxt, SvelteKit, Angular, SolidStart, Astro, Remix, React Native, Tauri) | **[docs/BROWSER-FRAMEWORKS.md](docs/BROWSER-FRAMEWORKS.md)** |
-| Mobile + cross-platform persistence (RN bare, Expo, Capacitor, Tauri, SQLCipher, sync patterns, background tasks, testing) | **[docs/MOBILE.md](docs/MOBILE.md)** |
-| Geo deep-dive (SRIDs, dialect matrix, PostGIS, distance models, 3D, MultiPolygon, GeoJSON, spatial joins, H3, realtime) | **[docs/GEO.md](docs/GEO.md)** |
-| Vector / embeddings / RAG (dialect picker, pipeline, hybrid BM25, versioning, HNSW/IVFFlat, quantization, multi-modal, eval) | **[docs/VECTOR.md](docs/VECTOR.md)** |
-| JSON path queries (per-dialect emit, indexing, migration, operator matrix, null markers, audit/webhook patterns, common bugs) | **[docs/JSON-PATH.md](docs/JSON-PATH.md)** |
+| Model definition — full field catalogue, id strategies, enums, views, generated columns, schema namespacing, 5 worked schemas | **[docs/MODEL.md](docs/MODEL.md)** |
+| Embeds — `f.embed`/`f.embedMany`/`f.json` storage, indexing into embeds, Mongo `$elemMatch`, JSON-null markers, shape migration, 5 worked patterns | **[docs/EMBED.md](docs/EMBED.md)** |
+| Relations — one/many/inverse/cascade, join tables, polymorphic, self-ref, deep includes, 6 worked patterns | **[docs/RELATIONS.md](docs/RELATIONS.md)** |
+| Indexes — every `IndexDef` field, partial-filter, expression, INCLUDE, method matrix, drift detection, 6 worked patterns | **[docs/INDEXES.md](docs/INDEXES.md)** |
+| Type safety — `Row`, every `Infer*` helper, `ForgeOf` / `ForgeModels`, autocomplete tricks, generics, 5 worked patterns | **[docs/TYPES.md](docs/TYPES.md)** |
+
+**Reads, writes, transactions**
+
+| Topic | File |
+|---|---|
+| Queries — every operator with per-dialect SQL/Mongo emit, cursor pagination, distinct, streaming, common bugs, 8 worked queries | **[docs/QUERIES.md](docs/QUERIES.md)** |
+| Mutations — create/update/upsert/delete asymmetry, atomic ops, nested writes, idempotency, optimistic+pessimistic concurrency, batching, 8 worked patterns | **[docs/MUTATIONS.md](docs/MUTATIONS.md)** |
+| Transactions — callback vs array, per-dialect mechanics, savepoints, isolation, deadlock retry, Mongo replica-set, outbox, 5 worked patterns | **[docs/TRANSACTIONS.md](docs/TRANSACTIONS.md)** |
+| Raw SQL — `forgeSql` composition, identifier-vs-value safety, per-dialect placeholders, `$runCommandRaw`, per-dialect worked patterns | **[docs/RAW-SQL.md](docs/RAW-SQL.md)** |
+
+**Cross-cutting surfaces**
+
+| Topic | File |
+|---|---|
+| Full-text search — every dialect's FTS engine, ranking, multi-column, languages, hybrid BM25+vector, highlighting, 6 worked patterns | **[docs/FTS.md](docs/FTS.md)** |
+| Geo — SRIDs, dialect matrix, PostGIS, distance models, 3D, MultiPolygon, GeoJSON, spatial joins, H3, realtime tracking | **[docs/GEO.md](docs/GEO.md)** |
+| Vector / embeddings / RAG — dialect picker, pipeline, hybrid BM25, versioning, HNSW/IVFFlat, quantization, multi-modal, eval | **[docs/VECTOR.md](docs/VECTOR.md)** |
+| JSON path queries — per-dialect emit, indexing, migration, operator matrix, null markers, audit/webhook patterns, common bugs | **[docs/JSON-PATH.md](docs/JSON-PATH.md)** |
+| Migrations — push-style model, every CLI flag, drift rules, per-dialect emit, three CI snippets, blue/green, monorepo, runtime split | **[docs/MIGRATIONS.md](docs/MIGRATIONS.md)** |
+| Drivers — bring-your-own-driver pattern, every shipped wrapper, six worked wrappers (Neon, Turso, D1, Atlas Data API, Bun, decorator) | **[docs/DRIVERS.md](docs/DRIVERS.md)** |
+
+**Runtime targets**
+
+| Topic | File |
+|---|---|
+| Backend — server integration (hyper-express, Fastify, NestJS, Bun+Hono, pools, tx, BullMQ, multi-tenant, replicas, OTel, health, CI) | **[docs/BACKEND.md](docs/BACKEND.md)** |
+| Browser — full sqlite-wasm + OPFS reference (URL schemes, worker, bundlers, `$migrate`, browserDoctor, ITP, multi-tab, pro build) | **[docs/BROWSER.md](docs/BROWSER.md)** |
+| Browser frameworks — React+Vite, Next.js, Vue, Nuxt, SvelteKit, Angular, SolidStart, Astro, Remix, React Native, Tauri (11 recipes) | **[docs/BROWSER-FRAMEWORKS.md](docs/BROWSER-FRAMEWORKS.md)** |
+| React — hooks, TanStack Query, Suspense, server vs client components, optimistic updates, sync, code-splitting, testing, 6 worked patterns | **[docs/REACT.md](docs/REACT.md)** |
+| Mobile — RN bare, Expo, Capacitor, Tauri, SQLCipher, sync patterns, background tasks, testing, migration cookbooks | **[docs/MOBILE.md](docs/MOBILE.md)** |
 
 ---
 
@@ -267,6 +298,8 @@ There is no lock-in. No generated client to regenerate, no migration state you
 cannot leave, no framework module to wire in, and no driver bundled inside. It
 is plain TypeScript over the official drivers, and you can always call the
 driver directly if you outgrow it.
+
+See more — **[docs/DRIVERS.md](docs/DRIVERS.md)** for the bring-your-own-driver pattern, every shipped wrapper, six worked wrappers (Neon HTTP, Turso, Cloudflare D1, Atlas Data API, Bun:sqlite, logging decorator), capability flags, and per-driver perf notes.
 
 ---
 
@@ -798,6 +831,8 @@ await db.user.findMany({
 });
 ```
 
+See more — **[docs/MODEL.md](docs/MODEL.md)** (full field catalogue + id strategies + views + generated columns), **[docs/EMBED.md](docs/EMBED.md)** (`f.embed`/`f.embedMany`/`f.json` + JSON-null markers + 5 worked patterns), **[docs/RELATIONS.md](docs/RELATIONS.md)** (relation shapes + cascade + deep includes + 6 worked patterns), **[docs/INDEXES.md](docs/INDEXES.md)** (every `IndexDef` field + per-dialect emit + drift detection).
+
 ---
 
 ## Reading data
@@ -931,6 +966,8 @@ await db.post.findMany({
 await db.post.findMany({ take: 20, cursor: { id: lastSeenId }, skip: 1 });
 ```
 
+See more — **[docs/QUERIES.md](docs/QUERIES.md)** for every operator with per-dialect SQL/Mongo emit, cursor pagination, distinct, streaming internals, common bugs, and eight worked queries.
+
 ---
 
 ## Writing data
@@ -1008,6 +1045,8 @@ foreign keys, forge walks the relations and deletes the children for you.
 await db.user.delete({ where: { id: 'u1' } });   // posts with onDelete:'Cascade' go too
 ```
 
+See more — **[docs/MUTATIONS.md](docs/MUTATIONS.md)** for create/update/upsert/delete asymmetry, atomic ops, nested writes, idempotency, optimistic + pessimistic concurrency, batched throughput, and eight worked patterns.
+
 ---
 
 ## Grouping and aggregates
@@ -1049,6 +1088,8 @@ await db.order.findMany({ distinct: ['status'] });    // one row per status
 await db.order.count({ distinct: ['channel'] });      // how many distinct channels
 ```
 
+See more — **[docs/QUERIES.md](docs/QUERIES.md#groupby--having)** for the full groupBy / having vocabulary and per-dialect emit.
+
 ---
 
 ## Transactions
@@ -1078,6 +1119,8 @@ transaction fail and retry it.
 **DuckDB** doesn't support `SAVEPOINT`, so nested transactions degrade to a
 single outer one. Migration batches that abort can't partially recover.
 
+See more — **[docs/TRANSACTIONS.md](docs/TRANSACTIONS.md)** for callback vs array semantics, per-dialect BEGIN/COMMIT mechanics, savepoint behaviour, isolation levels, deadlock retry, Mongo replica-set rules, AsyncLocalStorage HTTP pattern, and five worked patterns.
+
 ---
 
 ## Running raw SQL
@@ -1091,6 +1134,8 @@ const affected = await db.$executeRaw`UPDATE users SET active = false WHERE last
 ```
 
 This is SQL only. On Mongo, use `db.<model>.aggregate({ pipeline })` instead.
+
+See more — **[docs/RAW-SQL.md](docs/RAW-SQL.md)** for `forgeSql` composition, identifier-vs-value safety, per-dialect placeholder styles, `$runCommandRaw`, raw inside `$transaction`, and per-dialect worked patterns (PG `WITH RECURSIVE`, MySQL FULLTEXT, DuckDB Parquet, Mongo `$graphLookup`).
 
 ---
 
@@ -1146,6 +1191,8 @@ On SQLite, queries through the shadow FTS5 table are joined automatically —
 you don't have to know it exists. On Postgres, the index is over
 `to_tsvector('simple', col)`; you can pass a custom configuration via a raw
 `expression:` index for language-specific stemming.
+
+See more — **[docs/FTS.md](docs/FTS.md)** for every dialect's FTS engine, ranking score retrieval, multi-column composition, languages and analyzers, hybrid BM25 + vector (RRF), highlighting, and six worked patterns.
 
 ---
 
@@ -1938,6 +1985,8 @@ the worker construction in the root layout instead of waiting for a route.
 
 End-to-end recipes for React + Vite, Next.js App Router, Vue 3, Nuxt 3, SvelteKit, Angular, SolidStart, Astro, Remix, React Native + op-sqlite, and Tauri desktop live in **[docs/BROWSER-FRAMEWORKS.md](docs/BROWSER-FRAMEWORKS.md)**. Each one is the production-shaped install → bundler config → schema → db singleton → component flow.
 
+See more — **[docs/BROWSER.md](docs/BROWSER.md)** for the complete browser reference (URL schemes, worker, every bundler setup, `$migrate` semantics including 2.5.1 drift, browserDoctor, persistent storage, multi-tab, stock-vs-pro matrix, custom build, troubleshooting), **[docs/BROWSER-FRAMEWORKS.md](docs/BROWSER-FRAMEWORKS.md)** for 11 framework recipes, and **[docs/REACT.md](docs/REACT.md)** for React patterns (hooks, TanStack Query, Suspense, server vs client components, optimistic updates, sync).
+
 ---
 
 ## Streaming large results
@@ -1950,6 +1999,8 @@ for await (const user of db.user.findManyStream({ where: { active: true } })) {
   await sendEmail(user);   // one row in memory at a time
 }
 ```
+
+See more — **[docs/QUERIES.md](docs/QUERIES.md#findmanystream)** for `findManyStream` internals per driver and the memory profile.
 
 ---
 
@@ -2169,6 +2220,8 @@ statements before the table DDL, based on what your schema declares:
 extension installs from app code doesn't fail at first push. Without the
 flag, the push works as long as the extensions are already installed.
 
+See more — **[docs/MIGRATIONS.md](docs/MIGRATIONS.md)** for the push-style model, every `forge push`/`diff`/`rollback` flag, drift rules, per-dialect emit table, three CI snippets, blue/green pattern, monorepo workflow, and the CLI-vs-runtime split.
+
 ---
 
 ## Dropping to raw queries with `.compile`
@@ -2273,6 +2326,8 @@ type UserInclude = Types['user']['Include'];
 don't have to wire it into a schema map first, you don't have to call
 `setActiveSchema`, and you don't need a build step. Add a field to the
 model and every `Infer*` derived from it updates on save.
+
+See more — **[docs/TYPES.md](docs/TYPES.md)** for `Row`, every `Infer*` helper, `ForgeOf` / `ForgeModels`, optional-vs-nullable asymmetry, strict mode, generic helpers, autocomplete pitfalls, embed inference, per-dialect type quirks, and five worked patterns.
 
 ---
 
