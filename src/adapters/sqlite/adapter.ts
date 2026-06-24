@@ -95,6 +95,7 @@ export class SqliteAdapter implements Adapter {
     node: any, model: any,
     exec: () => Promise<T>,
     countRows: (r: T) => number,
+    semanticOp?: ExecOpts['semanticOp'],
   ): Promise<T> {
     if (!this.emitter.hasListeners()) return exec();
     const c = await import('./compile-from-ir');
@@ -106,7 +107,7 @@ export class SqliteAdapter implements Adapter {
       op === 'update'  ? c.compileUpdate(node, model)  :
                          c.compileDelete(node, model);
     return this.emitter.track(
-      { adapter: 'sqlite', model: node.model ?? '', op, sql: a.sql, params: a.params as unknown[] },
+      { adapter: 'sqlite', model: node.model ?? '', op, sql: a.sql, params: a.params as unknown[], ...(semanticOp ? { semanticOp } : {}) },
       exec, countRows);
   }
 
@@ -128,7 +129,7 @@ export class SqliteAdapter implements Adapter {
   executeUpdate(node: any, model: any, opts?: ExecOpts) {
     return this._track('update', node, model,
       () => executeSqliteUpdate(this.db, node, model, this.sqliteOpts(opts)),
-      (r) => r.count);
+      (r) => r.count, opts?.semanticOp);
   }
   executeDelete(node: any, model: any, opts?: ExecOpts) {
     return this._track('delete', node, model,

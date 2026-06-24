@@ -104,6 +104,7 @@ export class PostgresAdapter implements Adapter {
     model: any,
     exec: () => Promise<T>,
     countRows: (r: T) => number,
+    semanticOp?: ExecOpts['semanticOp'],
   ): Promise<T> {
     if (!this.emitter.hasListeners()) return exec();
     const { compileSelect, compileCount, compileGroupBy, compileInsert, compileUpdate, compileDelete } =
@@ -116,7 +117,7 @@ export class PostgresAdapter implements Adapter {
       op === 'update'  ? compileUpdate(node, model)  :
                          compileDelete(node, model);
     return this.emitter.track(
-      { adapter: 'postgres', model: node.model ?? '', op, sql: artifact.sql, params: artifact.params },
+      { adapter: 'postgres', model: node.model ?? '', op, sql: artifact.sql, params: artifact.params, ...(semanticOp ? { semanticOp } : {}) },
       exec, countRows,
     );
   }
@@ -139,7 +140,7 @@ export class PostgresAdapter implements Adapter {
   executeUpdate(node: any, model: any, opts?: ExecOpts) {
     return this._track('update', node, model,
       () => executePgUpdate(this.handle(opts), node, model, this.pgOpts(opts)),
-      (r) => r.count);
+      (r) => r.count, opts?.semanticOp);
   }
   executeDelete(node: any, model: any, opts?: ExecOpts) {
     return this._track('delete', node, model,

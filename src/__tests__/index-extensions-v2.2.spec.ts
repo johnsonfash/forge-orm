@@ -510,3 +510,122 @@ describe('compile — softDelete / restore (added 2.2 sweep)', () => {
     expect(art.dialect).toBe('sqlite');
   });
 });
+
+// -----------------------------------------------------------------------------
+// 2.2.1 — deeper sweep fixes (introspect drift detection + soft-delete event)
+// -----------------------------------------------------------------------------
+
+describe('diff-core deep drift detection (2.2.1)', () => {
+  const { diffIntrospection } = require('../scripts/diff-core');
+
+  it('reports a mismatch when the DB index has a different method', () => {
+    const M = model('payments', { id: f.id(), tags: f.json() }, {
+      indexes: [{ keys: { tags: 1 }, method: 'gin', name: 'idx_pay_tags' }],
+    }) as unknown as ModelDef<any>;
+    const actual = {
+      kind: 'postgres',
+      tables: [{
+        name: 'payments',
+        columns: [{ name: 'tags', type: 'jsonb', nullable: false }],
+        indexes: [{ name: 'idx_pay_tags', columns: ['tags'], unique: false, method: 'btree' }],
+        foreignKeys: [],
+      }],
+      views: [],
+    };
+    const r = diffIntrospection({ M }, actual, []);
+    const mismatch = r.items.find((i: any) => i.detail.includes('method'));
+    expect(mismatch).toBeDefined();
+    expect(mismatch.direction).toBe('mismatch');
+  });
+
+  it('reports a mismatch when the DB index has a different INCLUDE list', () => {
+    const M = model('orders', {
+      id: f.id(), customer_id: f.objectId(), status: f.string(), total: f.float(),
+    }, {
+      indexes: [{ keys: { customer_id: 1 }, include: ['status', 'total'], name: 'idx_o_cov' }],
+    }) as unknown as ModelDef<any>;
+    const actual = {
+      kind: 'postgres',
+      tables: [{
+        name: 'orders',
+        columns: [],
+        indexes: [{ name: 'idx_o_cov', columns: ['customer_id'], unique: false, include: ['status'] }],
+        foreignKeys: [],
+      }],
+      views: [],
+    };
+    const r = diffIntrospection({ M }, actual, []);
+    expect(r.items.some((i: any) => i.detail.includes('include'))).toBe(true);
+  });
+
+  it('reports a mismatch when the DB index has a different WHERE clause', () => {
+    const M = model('items', { id: f.id(), sku: f.string() }, {
+      indexes: [{ keys: { sku: 1 }, unique: true, where: 'deleted_at IS NULL', name: 'idx_i_sku' }],
+    }) as unknown as ModelDef<any>;
+    const actual = {
+      kind: 'postgres',
+      tables: [{
+        name: 'items',
+        columns: [],
+        indexes: [{ name: 'idx_i_sku', columns: ['sku'], unique: true, where: 'deleted_at IS NOT NULL' }],
+        foreignKeys: [],
+      }],
+      views: [],
+    };
+    const r = diffIntrospection({ M }, actual, []);
+    expect(r.items.some((i: any) => i.detail.includes('where'))).toBe(true);
+  });
+
+  it('matches identical where strings ignoring whitespace + case', () => {
+    const M = model('items', { id: f.id(), sku: f.string() }, {
+      indexes: [{ keys: { sku: 1 }, unique: true, where: 'deleted_at IS NULL', name: 'idx_i_sku' }],
+    }) as unknown as ModelDef<any>;
+    const actual = {
+      kind: 'postgres',
+      tables: [{
+        name: 'items',
+        columns: [],
+        indexes: [{ name: 'idx_i_sku', columns: ['sku'], unique: true, where: '  deleted_at  IS  NULL  ' }],
+        foreignKeys: [],
+      }],
+      views: [],
+    };
+    const r = diffIntrospection({ M }, actual, []);
+    expect(r.items.some((i: any) => i.detail.includes('where'))).toBe(false);
+  });
+
+  it('reports a mismatch when Mongo partialFilterExpression diverges', () => {
+    const M = model('m', { id: f.id(), v: f.string().optional() }, {
+      indexes: [{
+        keys: { v: 1 }, unique: true, name: 'idx_v',
+        partialFilterExpression: { v: { $type: 'string' } },
+      }],
+    }) as unknown as ModelDef<any>;
+    const actual = {
+      kind: 'mongo',
+      tables: [{
+        name: 'm', columns: [], foreignKeys: [],
+        indexes: [{
+          name: 'idx_v', columns: ['v'], unique: true,
+          partialFilterExpression: { v: { $exists: true } },
+        }],
+      }],
+      views: [],
+    };
+    const r = diffIntrospection({ M }, actual, []);
+    expect(r.items.some((i: any) => i.detail.includes('partialFilter'))).toBe(true);
+  });
+});
+
+describe('events QueryEvent.semanticOp (2.2.1)', () => {
+  it('softDelete/softDeleteMany/restore/restoreMany are reserved semanticOp values', () => {
+    // Pure type-shape assertion. If this compiles, the field accepts those
+    // four values.
+    const e: import('../events').QueryEvent = {
+      adapter: 'postgres', model: 'docs', op: 'update', sql: '', params: [],
+      duration_ms: 0, rowCount: 0, startedAt: new Date(),
+      semanticOp: 'softDelete',
+    };
+    expect(e.semanticOp).toBe('softDelete');
+  });
+});

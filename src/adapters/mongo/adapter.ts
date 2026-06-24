@@ -74,13 +74,14 @@ export class MongoAdapter implements Adapter {
     node: any,
     exec: () => Promise<T>,
     countRows: (r: T) => number,
+    semanticOp?: ExecOpts['semanticOp'],
   ): Promise<T> {
     if (!this.emitter.hasListeners()) return exec();
     // Mongo has no SQL — describe the op for the event payload as
     // "<collection>.<op>"; surface the IR node as `params`.
     const collection = (node as any).model ?? '';
     return this.emitter.track(
-      { adapter: 'mongo', model: collection, op, sql: `${collection}.${op}`, params: { node } },
+      { adapter: 'mongo', model: collection, op, sql: `${collection}.${op}`, params: { node }, ...(semanticOp ? { semanticOp } : {}) },
       exec, countRows);
   }
 
@@ -102,7 +103,7 @@ export class MongoAdapter implements Adapter {
   executeUpdate(node: any, model: any, opts?: ExecOpts) {
     return this._track('update', node,
       () => executeUpdate(node, model, this.mongoOpts(opts)),
-      (r) => r.count);
+      (r) => r.count, opts?.semanticOp);
   }
   executeDelete(node: any, model: any, opts?: ExecOpts) {
     return this._track('delete', node,
@@ -189,6 +190,15 @@ export class MongoAdapter implements Adapter {
           name: i.name,
           columns: Object.keys(i.key ?? {}),
           unique: i.unique === true,
+          // Carry the 2.1/2.2 fields back so the drift comparator can see
+          // changes to partial filters, collation, wildcard projections,
+          // and the per-key direction tokens (1, -1, 'text', '2dsphere',
+          // '2d', 'hashed'). When listIndexes doesn't echo a field back,
+          // we leave it undefined and diff treats it as "not declared".
+          partialFilterExpression: i.partialFilterExpression,
+          collation: i.collation,
+          wildcardProjection: i.wildcardProjection,
+          keySpec: i.key ?? undefined,
         })),
       });
     }

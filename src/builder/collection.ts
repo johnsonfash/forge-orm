@@ -408,7 +408,7 @@ export class CollectionWrapper<
       if (spec.op !== 'connectOrCreate' || spec.rel.inverse) continue;
       const target = (schema as any)[spec.rel.target] as ModelDef<any> | undefined;
       if (!target) continue;
-      const w = new CollectionWrapper(target, this._session, this._adapter);
+      const w = new CollectionWrapper(target, this._session, this._adapter, this._strict);
       const items: any[] = Array.isArray(spec.data) ? spec.data : [spec.data];
       // Owning-one expects a single item — first wins.
       const it = items[0];
@@ -445,7 +445,14 @@ export class CollectionWrapper<
     select?: ISelect<F, R, SM>;
     include?: IInclude<R, SM>;
     omit?: { [K in keyof F]?: boolean };
-  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A, SM>> {
+  }>(
+    args: A & NoBothSelectInclude<A>,
+    // Internal hint set by softDelete()/restore() so the executor can tag
+    // the emitted QueryEvent with `semanticOp`. Not part of the public API
+    // (the `_` prefix is the convention); users should call softDelete()
+    // / restore() directly rather than passing this themselves.
+    _internal?: { semanticOp?: 'softDelete' | 'restore' },
+  ): Promise<Find1<F, R, A, SM>> {
     this._assertWritable('update');
     this._assertStrictWhere(args.where);
     const mk = this._modelKey();
@@ -455,16 +462,22 @@ export class CollectionWrapper<
       { where: args.where, data: this._applyUpdatedAt(scalar), many: false },
       schema as any,
     );
-    const { doc } = await this.adapter.executeUpdate(node, this.model, { session: this._session });
+    const { doc } = await this.adapter.executeUpdate(node, this.model, {
+      session: this._session,
+      semanticOp: _internal?.semanticOp,
+    });
     if (!doc) throw notFoundError(this.model.collection, args.where);
     if (nested.length > 0) await this._applyNestedWrites(doc, nested);
     return this._returnOne(doc, args);
   }
 
-  async updateMany(args: {
-    where?: WhereInput<F>;
-    data: IUpdate<F, R>;
-  }): Promise<{ count: number }> {
+  async updateMany(
+    args: {
+      where?: WhereInput<F>;
+      data: IUpdate<F, R>;
+    },
+    _internal?: { semanticOp?: 'softDeleteMany' | 'restoreMany' },
+  ): Promise<{ count: number }> {
     this._assertWritable('updateMany');
     this._assertStrictWhere(args.where);
     const mk = this._modelKey();
@@ -473,7 +486,10 @@ export class CollectionWrapper<
       { where: args.where, data: this._applyUpdatedAt(args.data), many: true },
       schema as any,
     );
-    const r = await this.adapter.executeUpdate(node, this.model, { session: this._session });
+    const r = await this.adapter.executeUpdate(node, this.model, {
+      session: this._session,
+      semanticOp: _internal?.semanticOp,
+    });
     return { count: r.count };
   }
 
@@ -552,14 +568,20 @@ export class CollectionWrapper<
   }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A, SM>> {
     this._assertWritable('softDelete');
     const sd = this._requireSoftDeleteField('softDelete');
-    return this.update({ ...args, data: { [sd]: new Date() } as any } as any) as any;
+    return this.update(
+      { ...args, data: { [sd]: new Date() } as any } as any,
+      { semanticOp: 'softDelete' },
+    ) as any;
   }
 
   /** Bulk soft delete — sets `.softDeleteAt()` on every matching row. */
   async softDeleteMany(args: { where?: WhereInput<F> } = {}): Promise<{ count: number }> {
     this._assertWritable('softDeleteMany');
     const sd = this._requireSoftDeleteField('softDeleteMany');
-    return this.updateMany({ where: args.where, data: { [sd]: new Date() } as any });
+    return this.updateMany(
+      { where: args.where, data: { [sd]: new Date() } as any },
+      { semanticOp: 'softDeleteMany' },
+    );
   }
 
   /**
@@ -576,14 +598,20 @@ export class CollectionWrapper<
   }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A, SM>> {
     this._assertWritable('restore');
     const sd = this._requireSoftDeleteField('restore');
-    return this.update({ ...args, data: { [sd]: null } as any } as any) as any;
+    return this.update(
+      { ...args, data: { [sd]: null } as any } as any,
+      { semanticOp: 'restore' },
+    ) as any;
   }
 
   /** Bulk restore — clears `.softDeleteAt()` on every matching row. */
   async restoreMany(args: { where?: WhereInput<F> } = {}): Promise<{ count: number }> {
     this._assertWritable('restoreMany');
     const sd = this._requireSoftDeleteField('restoreMany');
-    return this.updateMany({ where: args.where, data: { [sd]: null } as any });
+    return this.updateMany(
+      { where: args.where, data: { [sd]: null } as any },
+      { semanticOp: 'restoreMany' },
+    );
   }
 
   // Replaces Prisma's aggregateRaw — same signature, returns plain documents
@@ -796,7 +824,17 @@ export class CollectionWrapper<
           `[Database] nested write target '${rel.target}' is not in the schema map`,
         );
       }
-      const targetWrapper = new CollectionWrapper(target, this._session);
+      // CRITICAL: pass _adapter and _strict so nested writes against the
+      // target hit the same dialect. Dropping them silently falls through
+      // to the default Mongo singleton, which would write to Mongo (or
+      // fail to connect) when the outer wrapper is Postgres / MySQL /
+      // SQLite.
+      const targetWrapper = new CollectionWrapper(
+        target,
+        this._session,
+        this._adapter,
+        this._strict,
+      );
 
       // Parent ref value — used as the child's FK target.
       const parentRef =

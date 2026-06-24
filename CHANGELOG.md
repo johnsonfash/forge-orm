@@ -4,42 +4,116 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite - one code
 path, no codegen, no external query engine.
 
-## 2.2.0 — every gap in `IndexDef` closed: SQL partial / expression / method, Mongo geo / collation / wildcard
+## 2.2.1 — drift detection for the new index shapes, plus a nested-write adapter bug
 
-**Feature release.** One unified `IndexDef` now expresses every common
-production index shape across all four dialects, so schemas no longer have to
-hand-roll `db.$executeRaw\`CREATE INDEX …\`` or `client.collection.createIndex`
-for things `forge push` couldn't model.
+**Bug fix + completeness.** `forge diff` couldn't see drift on the 2.2.0 index
+shapes because the introspect layer wasn't reading method, `where`, `include`,
+expression, partial filter, collation, or wildcard projection back from the
+DB. The comparator ran on column-set + uniqueness alone, so if someone
+manually changed an index's method from `btree` to `gin`, or dropped the
+`WHERE` clause, `forge diff` reported "no drift." Fixed across all four
+adapters:
 
-### New fields on `IndexDef`
+- Postgres `introspect` now joins `pg_am` and reads `pg_get_expr(indpred,…)`
+  + `pg_get_indexdef`, surfacing method, partial `WHERE`, expression body,
+  and INCLUDE columns. The INCLUDE boundary is derived from `pg_index.indnatts`
+  so covering columns end up in their own slot instead of mixed with the
+  key columns.
+- MySQL `introspect` reads `INDEX_TYPE` (BTREE / FULLTEXT / SPATIAL) and
+  `EXPRESSION` from `information_schema.STATISTICS`. The `EXPRESSION` column
+  doesn't exist on MySQL pre-8.0, so the query falls back when it raises
+  Unknown column.
+- Mongo `introspect` carries `partialFilterExpression`, `collation`,
+  `wildcardProjection`, and the raw `key` map (so `'2dsphere'` / `'hashed'`
+  / `1` / `-1` directions survive the round-trip).
+- `diff-core` now emits per-property `'mismatch'` items when an index of the
+  same name exists on both sides but a tracked property drifted. Whitespace
+  + case are normalized for SQL `WHERE` strings, expression bodies tolerate
+  PG's extra-paren echo, and Mongo collation is projected down to the keys
+  the user declared (so Mongo's filled-in defaults don't read as drift).
+- `IntrospectedIndex` gains optional fields for everything above. Adapters
+  that can't tell leave them undefined and the diff skips that check.
 
-| Field                  | Use                                                       | Dialects                            |
-|------------------------|-----------------------------------------------------------|-------------------------------------|
-| `where`                | Partial index predicate. Object on Mongo, SQL string on PG / SQLite. | Mongo, PG, SQLite |
-| `expression`           | Index an arbitrary SQL expression instead of column names.| PG, MySQL 8+, SQLite               |
-| `method`               | `gin` / `gist` / `brin` / `hash` (PG); `spatial` / `fulltext` (MySQL). | PG, MySQL               |
-| `include`              | Covering columns for index-only scans.                    | PG                                  |
-| `collation`            | Case- / accent-insensitive index (e.g. `{ locale: 'en', strength: 2 }`). | Mongo                |
-| `wildcardProjection`   | Pair with `keys: { '$**': 1 }` to project the wildcard.   | Mongo                               |
+Also fixed: a nested-write path in the collection wrapper that silently
+fell back to the default Mongo singleton on Postgres / MySQL / SQLite.
+`_applyNestedWrites` constructed the target wrapper without passing
+`this._adapter` or `this._strict`, so a nested `create` or `connect` against
+the relation's target model would try to talk to Mongo even when the parent
+write was on Postgres. Both sites now propagate both. (This predated 2.2 —
+it was exposed while auditing the wrapper for completeness.)
 
-### New `IndexKey` values (Mongo)
+### Soft-delete events
 
-- `'2dsphere'` — geospatial index over GeoJSON (spherical Earth model).
-- `'2d'` — legacy flat-earth geospatial.
-- `'hashed'` — hashed index (required for hashed shard keys).
+`QueryEvent` gains an optional `semanticOp` field set to `'softDelete'`,
+`'softDeleteMany'`, `'restore'`, or `'restoreMany'` whenever the wrapper
+dispatches one of those verbs. Up to now they all surfaced as `op: 'update'`,
+which made audit pipelines unable to filter soft-deletes from regular updates
+without parsing the SQL or the Mongo update doc. The wrapper threads the
+hint through `ExecOpts.semanticOp`; each adapter's `_track` copies it onto
+the emitted event. `op` is unchanged for back-compat.
 
-### What this enables
+### Doc voice
+
+The 2.2.0 entry below was rewritten to match the rest of the changelog —
+direct narration of what changed and why, no meta-narrative.
+
+## 2.2.0 — `IndexDef` covers the index shapes `forge push` couldn't model before
+
+**Feature release.** `IndexDef` had `keys` / `unique` / `sparse` / `name` /
+`expireAfterSeconds` / `partialFilterExpression` (Mongo only). That covered
+plain BTREE compounds, sparse uniques, TTL, and 2.1.0's partial filters, but
+left geospatial, hashed shard keys, collation, wildcard projection, SQL
+partial indexes, expression indexes, `INCLUDE` covering columns, and PG
+access methods (`gin` / `gist` / `brin` / `hash`) outside the schema —
+schemas had to fall back to `db.$executeRaw\`CREATE INDEX …\`` or a manual
+`collection.createIndex` to express them. This release covers all of those.
+
+### New fields
+
+- `where` — partial index predicate. On Mongo it's an alias of
+  `partialFilterExpression` (object form). On Postgres and SQLite it's a raw
+  SQL string and compiles to `… WHERE <sql>`. MySQL has no native partial
+  index and warns + skips. The same schema can carry both `where: 'sql…'`
+  and `partialFilterExpression: { … }` so it works on every dialect.
+- `expression` — index the result of a SQL expression instead of a column
+  list. Compiles to `CREATE INDEX … ((<expr>))` on Postgres / MySQL 8+ /
+  SQLite. Mongo doesn't model expression indexes — `forge push` warns and
+  skips. Use this for `lower(email)` case-insensitive lookups, `((data->>'sku'))`
+  JSON paths, computed keys.
+- `method` — index access method. `btree` (default) / `gin` / `gist` /
+  `brin` / `hash` for Postgres, and `spatial` / `fulltext` for MySQL. On
+  MySQL `spatial` / `fulltext` are statement-prefix keywords (`CREATE
+  SPATIAL INDEX …`), not USING clauses, so they're emitted in that form.
+  SQLite and Mongo ignore `method`.
+- `include` — Postgres covering columns. Emits `… INCLUDE (col, …)` so the
+  index can satisfy a read from the index alone. Other dialects warn + skip.
+- `collation` — Mongo only. Build a case- or accent-insensitive index by
+  passing the same shape `collection.createIndex` accepts:
+  `{ locale: 'en', strength: 2 }`. The push fingerprint includes the
+  collation, and the diff projects Mongo's echoed defaults down to the keys
+  you declared so an in-sync DB doesn't read as drifted.
+- `wildcardProjection` — Mongo only. Pair with `keys: { '$**': 1 }` to
+  control which paths the wildcard index covers.
+
+### New `IndexKey` values
+
+`IndexKey` gains `'2dsphere'`, `'2d'`, and `'hashed'`. They pass through
+verbatim to `collection.createIndex`, so geospatial `$near` queries and
+hashed shard keys work without going around `forge push`. The SQL dialects
+ignore these tokens.
+
+### Examples
 
 ```ts
 indexes: [
-  // SQL partial — soft-delete-aware uniqueness (PG / SQLite)
+  // SQL partial — soft-delete-aware uniqueness on Postgres / SQLite
   { keys: { sku: 1 }, unique: true, where: 'deleted_at IS NULL' },
 
-  // Mongo partial — same intent, dialect-native shape (`where` aliases PFE)
+  // Same intent on Mongo — pass both for cross-dialect schemas
   { keys: { sku: 1 }, unique: true,
     partialFilterExpression: { deleted_at: { $exists: false } } },
 
-  // Geospatial — $near / $geoWithin queries
+  // Mongo geospatial — $near / $geoWithin queries
   { keys: { location: '2dsphere' } },
 
   // Hashed shard key
@@ -49,16 +123,16 @@ indexes: [
   { keys: { email: 1 }, unique: true,
     collation: { locale: 'en', strength: 2 } },
 
-  // PG GIN over a jsonb column for @> containment
+  // Postgres GIN on a jsonb column for `@>` containment
   { keys: { tags: 1 }, method: 'gin' },
 
-  // PG covering index — answers (customer_id) → (status, total) from the index alone
+  // Postgres covering index — index-only scans for (customer_id) → (status, total)
   { keys: { customer_id: 1 }, include: ['status', 'total'] },
 
-  // BRIN for huge time-series tables (PG)
+  // BRIN for huge append-only tables (Postgres)
   { keys: { received_at: 1 }, method: 'brin' },
 
-  // Case-insensitive email lookup across all SQL dialects
+  // Case-insensitive email lookup, every SQL dialect
   { keys: {}, expression: 'lower(email)' },
 
   // MySQL spatial / fulltext
@@ -67,66 +141,50 @@ indexes: [
 ]
 ```
 
-### Cross-dialect behaviour
+### Adapter dispatch on `db.<model>.compile`
 
-`where` on Mongo accepts the same Mongo query document that
-`partialFilterExpression` accepts (and is an alias of it for back-compat with
-2.1.0 callsites). `where` on PG / SQLite requires a raw SQL string — passing an
-object-form `where` to a SQL dialect warns at push and skips the filter (the
-Mongo operator vocabulary doesn't translate verbatim to SQL).
+The `compile` getter on the collection wrapper was hardcoded to the Mongo
+compile API regardless of dialect, so a Postgres consumer calling
+`compile.findMany(...)` got a `MongoArtifact` back instead of a parameterised
+SQL string. The getter now dispatches on `adapter.kind` and returns the
+matching artifact. Two narrowed getters were added — `.compileMongo` and
+`.compileSql` — that throw at access if the adapter doesn't match, so a
+misroute surfaces loudly instead of silently returning the wrong shape.
+MySQL and SQLite gain top-level `buildMysqlCompileApi` /
+`buildSqliteCompileApi` builders (they had `compile-from-ir` emitters but
+no top-level wiring).
 
-Mismatched `method` on a dialect that doesn't support it is left in the
-emitted SQL — the DB raises a clear error ("access method does not exist") so
-the failure is loud and informative. `include` on a non-PG dialect, and
-non-`btree` `method` on SQLite, warn at push time and are dropped from the SQL.
+### Soft-delete in `compile`
 
-### Idempotency
+`softDelete` / `softDeleteMany` / `restore` / `restoreMany` have been runtime
+methods on the collection wrapper since 2.0, but the typed `compile` surface
+only listed find / create / update / upsert / delete. They're now on
+`MongoCompileApi` and `SQLCompileApi`; each compiles to the same
+update-the-soft-delete-column shape the runtime uses, and throws at compile
+time when the model has no `.softDeleteAt()` field.
 
-The Mongo push fingerprint was extended to cover `collation` and
-`wildcardProjection`, and the diff projects Mongo's echoed collation down to
-the keys the user declared. Re-running `forge push` against an in-sync DB
-emits ZERO `rebuilt` entries for any of the new index shapes.
+### `migrate-gen` knows the new shapes
+
+When a missing index is detected via the column-set diff, the generated
+migration SQL now carries `method`, `where`, `include`, and (per dialect) the
+full statement-prefix for MySQL `SPATIAL` / `FULLTEXT`. Before this, the
+generator stripped to a plain `CREATE INDEX (cols)` even when the schema
+asked for a GIN or partial index. Expression indexes are skipped from the
+column-set diff (they have no columns to compare); `forge push` is the source
+of truth for their lifecycle.
 
 ### Migration
 
-No breaking changes. Existing schemas keep working — every new field is
-optional. The legacy `partialFilterExpression` field still works exactly as it
-did in 2.1.0.
+No breaking changes. Every new field is optional. `partialFilterExpression`
+still works exactly as it did in 2.1.0.
 
-### Also fixed in 2.2
+### Not yet covered
 
-While sweeping the codebase for files that hadn't been updated alongside
-recent features, two real gaps surfaced and were closed:
-
-- **`compile` namespace dispatched by adapter.** The `db.<model>.compile`
-  getter was hardcoded to the Mongo compile API regardless of dialect, so
-  Postgres / MySQL / SQLite consumers calling `compile.findMany(...)` got a
-  Mongo artifact back instead of a parameterised SQL string. Now dispatched
-  by `adapter.kind`. Two new narrowed getters — `.compileMongo` and
-  `.compileSql` — throw on mismatch so the wrong shape can't be returned
-  silently.
-- **`compile` had no soft-delete verbs.** The runtime collection wrapper has
-  exposed `softDelete` / `softDeleteMany` / `restore` / `restoreMany` since
-  2.0.0, but the typed `compile` API only listed find / create / update /
-  upsert / delete. Both Mongo and SQL compile builders now expose them; they
-  compile to the same update-the-soft-delete-column shape the runtime uses.
-- **MySQL + SQLite top-level compile builders** are new (they previously
-  only had `compile-from-ir` low-level emitters but no `buildXyzCompileApi`).
-- **`migrate-gen` and `diff-core`** now understand the new 2.2 `IndexDef`
-  fields. The migration generator emits full SQL (method / where / include)
-  when adding a missing index, and the diff pass skips expression indexes
-  from the column-set comparison so they don't appear as spurious drift.
-- **`src/index.ts`** re-exports the new `IndexKey` and `IndexMethod` types
-  so consumers can reference them when typing schema fragments.
-
-### Still missing (deliberate non-goals for 2.2)
-
-- SQLite FTS5 virtual tables — requires a different DDL shape than `CREATE
-  INDEX`. `.searchable()` still warns on SQLite.
-- MySQL invisible indexes (canary testing) and multi-valued JSON-array indexes.
+- SQLite FTS5 virtual tables. `.searchable()` still warns on SQLite.
+- MySQL invisible indexes and multi-valued JSON-array indexes.
 - MySQL FULLTEXT parser configuration (`WITH PARSER ngram`).
-- Generic Mongo query-document → SQL `WHERE` translation. Pass raw SQL for
-  SQL dialects; pass Mongo objects for Mongo.
+- Generic Mongo query-document → SQL `WHERE` translation. Pass raw SQL on
+  SQL dialects; pass Mongo objects on Mongo.
 
 ## 2.1.0 — partial indexes on MongoDB (`partialFilterExpression`)
 

@@ -102,6 +102,7 @@ export class MysqlAdapter implements Adapter {
     node: any, model: any,
     exec: () => Promise<T>,
     countRows: (r: T) => number,
+    semanticOp?: ExecOpts['semanticOp'],
   ): Promise<T> {
     if (!this.emitter.hasListeners()) return exec();
     const c = await import('./compile-from-ir');
@@ -113,7 +114,7 @@ export class MysqlAdapter implements Adapter {
       op === 'update'  ? c.compileUpdate(node, model)  :
                          c.compileDelete(node, model);
     return this.emitter.track(
-      { adapter: 'mysql', model: node.model ?? '', op, sql: a.sql, params: a.params },
+      { adapter: 'mysql', model: node.model ?? '', op, sql: a.sql, params: a.params, ...(semanticOp ? { semanticOp } : {}) },
       exec, countRows);
   }
 
@@ -135,7 +136,7 @@ export class MysqlAdapter implements Adapter {
   executeUpdate(node: any, model: any, opts?: ExecOpts) {
     return this._track('update', node, model,
       () => executeMysqlUpdate(this.handle(opts), node, model, this.mysqlOpts(opts)),
-      (r) => r.count);
+      (r) => r.count, opts?.semanticOp);
   }
   executeDelete(node: any, model: any, opts?: ExecOpts) {
     return this._track('delete', node, model,

@@ -18,12 +18,30 @@ export async function introspectMysql(pool: MysqlPool): Promise<DbIntrospection>
        FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()
       ORDER BY TABLE_NAME, ORDINAL_POSITION`,
   ) as any;
-  const [idx] = await pool.query(
-    `SELECT TABLE_NAME AS t, INDEX_NAME AS name, NON_UNIQUE AS nonUnique,
-            COLUMN_NAME AS col, SEQ_IN_INDEX AS seq
-       FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE()
-      ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX`,
-  ) as any;
+  // INDEX_TYPE: 'BTREE' | 'FULLTEXT' | 'SPATIAL' | 'HASH'. EXPRESSION exists
+  // on MySQL 8.0+ (functional indexes); older servers raise an Unknown column
+  // error which we swallow per-row by selecting both with conditional SQL.
+  let idxRows: any[];
+  try {
+    const [r] = await pool.query(
+      `SELECT TABLE_NAME AS t, INDEX_NAME AS name, NON_UNIQUE AS nonUnique,
+              COLUMN_NAME AS col, SEQ_IN_INDEX AS seq,
+              INDEX_TYPE AS indexType, EXPRESSION AS expr
+         FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE()
+        ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX`,
+    ) as any;
+    idxRows = r;
+  } catch {
+    // Pre-8.0: no EXPRESSION column. Drop it from the projection.
+    const [r] = await pool.query(
+      `SELECT TABLE_NAME AS t, INDEX_NAME AS name, NON_UNIQUE AS nonUnique,
+              COLUMN_NAME AS col, SEQ_IN_INDEX AS seq,
+              INDEX_TYPE AS indexType, NULL AS expr
+         FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE()
+        ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX`,
+    ) as any;
+    idxRows = r;
+  }
   const [fks] = await pool.query(
     `SELECT CONSTRAINT_NAME AS name, TABLE_NAME AS t, COLUMN_NAME AS col,
             REFERENCED_TABLE_NAME AS refTable, REFERENCED_COLUMN_NAME AS refColumn
@@ -52,12 +70,32 @@ export async function introspectMysql(pool: MysqlPool): Promise<DbIntrospection>
   }
 
   const idxAcc = new Map<string, IntrospectedIndex>();
-  for (const r of idx as any[]) {
+  for (const r of idxRows as any[]) {
     if (!baseTables.has(r.t)) continue;
     const k = `${r.t}::${r.name}`;
     let i = idxAcc.get(k);
-    if (!i) { i = { name: r.name, columns: [], unique: Number(r.nonUnique) === 0 }; idxAcc.set(k, i); ensure(r.t).indexes.push(i); }
-    i.columns.push(r.col);
+    if (!i) {
+      // INDEX_TYPE maps to our `method` field, lower-cased. FULLTEXT and
+      // SPATIAL are statement-prefix keywords on MySQL — schema declares
+      // them as method: 'fulltext' / 'spatial', so the comparison aligns.
+      const it = String(r.indexType ?? 'btree').toLowerCase();
+      i = {
+        name: r.name,
+        columns: [],
+        unique: Number(r.nonUnique) === 0,
+        method: it !== 'btree' ? it : undefined,
+      };
+      idxAcc.set(k, i);
+      ensure(r.t).indexes.push(i);
+    }
+    // EXPRESSION non-null on MySQL 8 functional indexes — the COLUMN_NAME
+    // is NULL when the entry is an expression, so we capture the expression
+    // text and skip pushing a phantom column.
+    if (r.expr != null) {
+      i.expression = String(r.expr);
+    } else if (r.col != null) {
+      i.columns.push(r.col);
+    }
   }
 
   for (const r of fks as any[]) {

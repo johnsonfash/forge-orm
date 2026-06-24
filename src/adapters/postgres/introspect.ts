@@ -27,6 +27,24 @@ export async function introspectPg(pool: PgPoolHandle): Promise<DbIntrospection>
   );
   const baseSet = new Set<string>(baseTables.rows.map((r: any) => r.table_name));
 
+  // Two passes. First pass: per-index metadata (one row per index) — method,
+  // partial WHERE, expression body, INCLUDE column boundary.
+  const idxMeta = await pool.query(
+    `SELECT t.relname AS table_name, i.relname AS index_name,
+            ix.indisunique AS is_unique,
+            am.amname AS method,
+            ix.indnatts AS key_col_count,
+            pg_get_expr(ix.indpred, ix.indrelid) AS partial_pred,
+            pg_get_expr(ix.indexprs, ix.indrelid) AS expression_body
+       FROM pg_index ix
+       JOIN pg_class i  ON i.oid = ix.indexrelid
+       JOIN pg_class t  ON t.oid = ix.indrelid
+       JOIN pg_am    am ON am.oid = i.relam
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname = 'public'`,
+  );
+
+  // Second pass: ordered column list per index (key cols then INCLUDE cols).
   const idx = await pool.query(
     `SELECT t.relname AS table_name, i.relname AS index_name,
             ix.indisunique AS is_unique, a.attname AS column_name,
@@ -72,13 +90,47 @@ export async function introspectPg(pool: PgPoolHandle): Promise<DbIntrospection>
     ensure(r.table_name).columns.push(normalizeColumn(r));
   }
 
+  // Join the per-index metadata by table::name so we can attach method,
+  // partial WHERE, and expression body to the matching index. INCLUDE
+  // columns are the column-list entries beyond `key_col_count` (the index
+  // has its key columns first, then any covering columns).
+  const metaByKey = new Map<string, any>();
+  for (const r of idxMeta.rows as any[]) {
+    metaByKey.set(`${r.table_name}::${r.index_name}`, r);
+  }
+
   const idxAcc = new Map<string, IntrospectedIndex>();
   for (const r of idx.rows as any[]) {
     if (!baseSet.has(r.table_name)) continue;
     const k = `${r.table_name}::${r.index_name}`;
     let i = idxAcc.get(k);
-    if (!i) { i = { name: r.index_name, columns: [], unique: r.is_unique }; idxAcc.set(k, i); ensure(r.table_name).indexes.push(i); }
+    if (!i) {
+      const meta = metaByKey.get(k);
+      i = {
+        name: r.index_name,
+        columns: [],
+        unique: r.is_unique,
+        method: meta?.method ? String(meta.method).toLowerCase() : undefined,
+        where: meta?.partial_pred ?? undefined,
+        expression: meta?.expression_body ?? undefined,
+      };
+      idxAcc.set(k, i);
+      ensure(r.table_name).indexes.push(i);
+    }
     i.columns.push(r.column_name);
+  }
+
+  // Now that all columns are accumulated, split the tail into INCLUDE
+  // columns when the index declared coverage. PG stores the boundary in
+  // pg_index.indnatts (number of leading key columns) — anything after
+  // that is an INCLUDE column.
+  for (const [k, ix] of idxAcc) {
+    const meta = metaByKey.get(k);
+    const keyCount = Number(meta?.key_col_count ?? ix.columns.length);
+    if (ix.columns.length > keyCount) {
+      ix.include = ix.columns.slice(keyCount);
+      ix.columns = ix.columns.slice(0, keyCount);
+    }
   }
 
   for (const r of fks.rows as any[]) {

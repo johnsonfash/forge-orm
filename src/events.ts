@@ -15,8 +15,20 @@ export interface QueryEvent {
    * Operation name. For SQL adapters: 'find' / 'findOne' / 'insert' / 'update' /
    * 'delete' / 'count' / 'groupBy' / 'raw'. For Mongo: the driver-level op name
    * ('find', 'insertOne', 'findOneAndUpdate', etc.).
+   *
+   * Soft-delete and restore go through `update` at this level — the wrapper
+   * sets `semanticOp` so listeners can distinguish them from a plain update
+   * without parsing the SQL or the Mongo update doc.
    */
   op: string;
+  /**
+   * Schema-level semantic operation, when the runtime caller was one of the
+   * higher-level verbs that ultimately compile to an `update` or `delete`.
+   * Set by the collection wrapper for `softDelete` / `softDeleteMany` /
+   * `restore` / `restoreMany`. Listeners building an audit log or filtering
+   * traffic by intent should branch on this when it's present.
+   */
+  semanticOp?: 'softDelete' | 'softDeleteMany' | 'restore' | 'restoreMany';
   /** SQL text (SQL adapters) or human description (Mongo). */
   sql: string;
   /** Parameter values (SQL) or Mongo args object. */
