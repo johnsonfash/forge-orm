@@ -56,7 +56,7 @@ export { forgeValidator } from './validator';
 // ─── Schema DSL — define YOUR OWN models, then `createDb({ schema })` ───────
 export { f, model, rel, enums, embed } from './schema/core';
 export type { Field, TypedModel, RelationInfo, EnumDef, ModelOptions } from './schema/core';
-export type { FieldDef, FieldKind, ModelDef, IndexDef, RelationDef, OnDeleteAction, EmbedDef } from './schema/types';
+export type { FieldDef, FieldKind, ModelDef, IndexDef, IndexKey, IndexMethod, RelationDef, OnDeleteAction, EmbedDef } from './schema/types';
 // Bundled sample schema (blog/CMS) — the default when you don't pass your own.
 // `SchemaShape` is the structural type any schema map satisfies.
 export { sampleSchema } from './schema';

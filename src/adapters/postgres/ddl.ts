@@ -307,21 +307,68 @@ function buildIndexes(d: Dialect, m: ModelDef<any>): DDLStatement[] {
 }
 
 function buildIndex(d: Dialect, table: string, idx: IndexDef): DDLStatement {
+  // Name fallback: use idx.name when supplied; otherwise derive from columns
+  // (or 'expr' for expression indexes, since there are no column names then).
   const cols = Object.keys(idx.keys);
-  const name = idx.name ?? tableConstraintName(table, 'idx', cols);
-  const colExpr = cols.map((c) => {
-    const dir = idx.keys[c];
-    if (dir === 'text') return `${d.quoteIdent(c)} text_pattern_ops`;
-    return `${d.quoteIdent(c)} ${dir === -1 ? 'DESC' : 'ASC'}`;
-  }).join(', ');
+  const name = idx.name ?? tableConstraintName(table, 'idx', idx.expression ? ['expr'] : cols);
   const uniqueKW = idx.unique ? 'UNIQUE ' : '';
+
+  // USING <method> — gin / gist / brin / hash. Omitted when unset or
+  // 'btree' (PG's default). The DB raises a clear error if the method
+  // isn't installed (e.g. gin/gist without the extensions).
+  const method = idx.method && idx.method !== 'btree' ? ` USING ${idx.method}` : '';
+
+  // Payload — either an arbitrary expression (CREATE INDEX … ((<expr>)))
+  // or a column list. For column lists with the btree method we still
+  // honour the existing text→text_pattern_ops opclass shortcut.
+  let payload: string;
+  if (idx.expression) {
+    payload = `(${idx.expression})`;
+  } else {
+    const isBtree = !idx.method || idx.method === 'btree';
+    const colExpr = cols
+      .map((c) => {
+        const dir = idx.keys[c];
+        if (isBtree && dir === 'text') return `${d.quoteIdent(c)} text_pattern_ops`;
+        // Non-btree methods don't take ASC/DESC and won't accept the
+        // text_pattern_ops opclass.
+        if (!isBtree) return d.quoteIdent(c);
+        return `${d.quoteIdent(c)} ${dir === -1 ? 'DESC' : 'ASC'}`;
+      })
+      .join(', ');
+    payload = colExpr;
+  }
+
+  // INCLUDE — covering columns for index-only scans. PG-only feature; the
+  // schema typing already gates it to SQL by convention.
+  const include = idx.include?.length
+    ? ` INCLUDE (${idx.include.map(d.quoteIdent).join(', ')})`
+    : '';
+
+  // WHERE — partial index predicate. Mongo callers pass an object via
+  // partialFilterExpression / where; SQL needs a raw SQL string. When an
+  // object is passed accidentally to a SQL schema it would be wrong to
+  // try to translate Mongo operators ($type / $exists / …) verbatim —
+  // skip it with a warning instead of producing wrong SQL.
+  let whereClause = '';
+  if (typeof idx.where === 'string' && idx.where.trim()) {
+    whereClause = ` WHERE ${idx.where}`;
+  } else if (idx.where && typeof idx.where === 'object') {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[forge:push:postgres] index '${name}' has object-form 'where' — ` +
+      `expected a raw SQL string on Postgres. The partial filter is being ` +
+      `omitted. (Use partialFilterExpression for Mongo and where: 'sql…' for PG.)`,
+    );
+  }
+
   return {
     kind: 'index',
     name,
     table,
     sql:
       `CREATE ${uniqueKW}INDEX IF NOT EXISTS ${d.quoteIdent(name)} ` +
-      `ON ${d.quoteIdent(table)} (${colExpr})`,
+      `ON ${d.quoteIdent(table)}${method} (${payload})${include}${whereClause}`,
     dropSql: `DROP INDEX IF EXISTS ${d.quoteIdent(name)}`,
   };
 }

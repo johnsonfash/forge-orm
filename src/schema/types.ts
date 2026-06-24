@@ -67,20 +67,131 @@ export interface FieldDef {
   idType?: 'auto' | 'uuid' | 'bigserial';
 }
 
-export type IndexKey = 1 | -1 | 'text';
+/**
+ * Per-key direction or index type.
+ *
+ *   1 / -1     — ascending / descending (BTREE on SQL, normal on Mongo).
+ *   'text'     — text (full-text) index. PG: text_pattern_ops opclass.
+ *                MySQL/SQLite: ignored as a direction (kept as column).
+ *                Mongo: real text index.
+ *   '2dsphere' — Mongo geospatial (spherical Earth model). Use on a field that
+ *                stores GeoJSON. SQL dialects ignore (warn at push).
+ *   '2d'       — Mongo legacy flat geospatial. SQL dialects ignore.
+ *   'hashed'   — Mongo hashed index. Required for hashed-shard keys.
+ *                SQL dialects ignore.
+ */
+export type IndexKey = 1 | -1 | 'text' | '2dsphere' | '2d' | 'hashed';
+
+/**
+ * Universally-supported index method. Affects the access method on SQL
+ * dialects via `USING <method>`. Mongo and SQLite ignore.
+ *
+ *   'btree'    — default. PG default; explicit on MySQL means a plain BTREE.
+ *   'gin'      — PG only. Inverted index for jsonb / arrays / pg_trgm.
+ *   'gist'     — PG only. Generic / PostGIS geometry / range types.
+ *   'brin'     — PG only. Block-range; ideal for huge append-only tables.
+ *   'hash'     — PG only. Equality-only, smaller than BTREE for huge unique IDs.
+ *   'spatial'  — MySQL only. SPATIAL INDEX over GEOMETRY columns.
+ *   'fulltext' — MySQL only. FULLTEXT INDEX (declarative alternative to the
+ *                auto-emitted indexes from .searchable()).
+ *
+ * On a dialect that doesn't support a given method, the push emits the SQL
+ * verbatim — the DB itself will reject an unsupported method with a useful
+ * error. Mongo/SQLite ignore method entirely.
+ */
+export type IndexMethod =
+  | 'btree'
+  | 'gin'
+  | 'gist'
+  | 'brin'
+  | 'hash'
+  | 'spatial'
+  | 'fulltext';
 
 export interface IndexDef {
+  /**
+   * Column → direction map. For Mongo geospatial / hashed indexes use the
+   * specialised IndexKey values ('2dsphere', '2d', 'hashed'). For wildcard
+   * indexes use `{ '$**': 1 }` and pair with `wildcardProjection`.
+   *
+   * Ignored when `expression` is set (expression indexes are keyed off the
+   * expression, not column names).
+   */
   keys: Record<string, IndexKey>;
   unique?: boolean;
   sparse?: boolean;
   name?: string;
   expireAfterSeconds?: number;
   /**
-   * MongoDB only: build a partial index covering just the documents that match
-   * this filter (e.g. `{ email: { $type: 'string' } }` for a unique index that
-   * ignores rows where the field is absent). Ignored by the SQL dialects.
+   * MongoDB only — kept as an alias of `where` for backward compatibility
+   * with 2.1.0 callsites. Prefer `where` going forward; it carries the same
+   * Mongo semantics and ALSO works on SQL when given a raw SQL string.
    */
   partialFilterExpression?: Record<string, unknown>;
+  /**
+   * Partial index filter.
+   *
+   *   Mongo: same as `partialFilterExpression`. Object form only.
+   *   SQL (PG / MySQL 8+ functional / SQLite): compiles to
+   *     `CREATE INDEX … WHERE <sql>`. Pass a raw SQL expression string
+   *     (e.g. `"deleted_at IS NULL"`); objects are not auto-translated on
+   *     SQL (use raw SQL since dialect semantics differ).
+   *
+   * Either set both `where: '...'` (SQL string) and `partialFilterExpression:
+   * { ... }` (Mongo object) for cross-dialect schemas, or pass an object that
+   * Mongo understands and skip the SQL form.
+   */
+  where?: Record<string, unknown> | string;
+  /**
+   * Postgres-only — extra columns appended to the index payload for
+   * index-only scans. Compiles to `… INCLUDE (col, …)`. Other dialects
+   * ignore (warn).
+   */
+  include?: string[];
+  /**
+   * Expression index. Used INSTEAD OF `keys` to index the result of an
+   * arbitrary SQL expression — `(lower(email))`, `((data->>'sku'))`, etc.
+   *   PG / MySQL 8+ / SQLite: emits `CREATE INDEX name ON tbl ((<expr>))`.
+   *   Mongo: ignored (warn). For Mongo, model the computed value as a
+   *   stored field via `.dbGenerated(...)` (SQL only) — or persist the
+   *   shadow field application-side and index it directly.
+   */
+  expression?: string;
+  /**
+   * Index method / access method.
+   *
+   *   PG: 'btree' (default) | 'gin' | 'gist' | 'brin' | 'hash'
+   *   MySQL: undefined (BTREE) | 'spatial' | 'fulltext'
+   *   SQLite / Mongo: ignored.
+   *
+   * Mismatched method on a given dialect doesn't error at compile time —
+   * the DB itself raises a clear "access method does not exist" / "unknown
+   * index type" if the method isn't supported.
+   */
+  method?: IndexMethod;
+  /**
+   * MongoDB only — collation specification for the index. Use to build
+   * case- or accent-insensitive indexes:
+   *   `{ locale: 'en', strength: 2 }` → case-insensitive.
+   * Ignored on SQL dialects (use `expression: 'lower(col)'` instead).
+   */
+  collation?: {
+    locale: string;
+    caseLevel?: boolean;
+    caseFirst?: 'upper' | 'lower' | 'off';
+    strength?: 1 | 2 | 3 | 4 | 5;
+    numericOrdering?: boolean;
+    alternate?: 'non-ignorable' | 'shifted';
+    maxVariable?: 'punct' | 'space';
+    backwards?: boolean;
+    normalization?: boolean;
+  };
+  /**
+   * MongoDB only — wildcard projection paired with `keys: { '$**': 1 }`
+   * to index every field at any depth except the projection. e.g.
+   * `{ 'meta.$**': 1 }` to index only paths under `meta`. Ignored on SQL.
+   */
+  wildcardProjection?: Record<string, unknown>;
 }
 
 export type RelationKind = 'one' | 'many';

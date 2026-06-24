@@ -256,17 +256,60 @@ function buildIndexes(m: ModelDef<any>): DDLStatement[] {
   const table = m.collection;
   const out: DDLStatement[] = [];
   for (const idx of m.indexes ?? []) {
-    const cols = Object.keys(idx.keys);
-    const name = idx.name ?? tableConstraintName(table, 'idx', cols);
-    const colExpr = cols.map((c) => {
-      const dir = (idx as IndexDef).keys[c];
-      if (dir === 'text') return `${d.quoteIdent(c)}`;
-      return `${d.quoteIdent(c)} ${dir === -1 ? 'DESC' : 'ASC'}`;
-    }).join(', ');
-    const uniqueKW = idx.unique ? 'UNIQUE ' : '';
+    const i = idx as IndexDef;
+    const cols = Object.keys(i.keys);
+    const name = i.name ?? tableConstraintName(table, 'idx', i.expression ? ['expr'] : cols);
+    const uniqueKW = i.unique ? 'UNIQUE ' : '';
+
+    // SQLite supports expression indexes natively:
+    //   CREATE INDEX i ON t (lower(name))
+    let payload: string;
+    if (i.expression) {
+      payload = `(${i.expression})`;
+    } else {
+      payload = cols
+        .map((c) => {
+          const dir = i.keys[c];
+          if (dir === 'text') return `${d.quoteIdent(c)}`;
+          return `${d.quoteIdent(c)} ${dir === -1 ? 'DESC' : 'ASC'}`;
+        })
+        .join(', ');
+    }
+
+    // SQLite supports partial indexes via WHERE. Mongo-object form is
+    // ignored with a warning — SQL needs raw SQL.
+    let whereClause = '';
+    if (typeof i.where === 'string' && i.where.trim()) {
+      whereClause = ` WHERE ${i.where}`;
+    } else if (i.where && typeof i.where === 'object') {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[forge:push:sqlite] index '${name}' has object-form 'where' — ` +
+        `expected a raw SQL string on SQLite. Filter ignored.`,
+      );
+    }
+
+    // INCLUDE + method aren't supported on SQLite.
+    if (i.include?.length) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[forge:push:sqlite] index '${name}' uses include — INCLUDE is a ` +
+        `Postgres-only feature. Ignored on SQLite.`,
+      );
+    }
+    if (i.method && i.method !== 'btree') {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[forge:push:sqlite] index '${name}' specifies method='${i.method}' — ` +
+        `SQLite only supports BTREE. Method ignored.`,
+      );
+    }
+
     out.push({
-      kind: 'index', name, table,
-      sql: `CREATE ${uniqueKW}INDEX IF NOT EXISTS ${d.quoteIdent(name)} ON ${d.quoteIdent(table)} (${colExpr})`,
+      kind: 'index',
+      name,
+      table,
+      sql: `CREATE ${uniqueKW}INDEX IF NOT EXISTS ${d.quoteIdent(name)} ON ${d.quoteIdent(table)} (${payload})${whereClause}`,
       dropSql: `DROP INDEX IF EXISTS ${d.quoteIdent(name)}`,
     });
   }

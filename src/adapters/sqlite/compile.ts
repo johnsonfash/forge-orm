@@ -16,8 +16,8 @@ import {
 } from './compile-from-ir';
 import { schema } from '../../schema';
 
-// Postgres compile API — same shape as Mongo's, returns SQLArtifact. Both go
-// through the same IR; only the per-adapter compileFromIR layer differs.
+// SQLite compile API — same shape as Postgres / MySQL, returns SQLArtifact with
+// dialect='sqlite'.
 
 function modelKeyFor(model: ModelDef<any>): string {
   for (const key of Object.keys(schema as any)) {
@@ -45,7 +45,7 @@ function requireSoftDeleteField(model: ModelDef<any>, op: string): string {
   return sd;
 }
 
-export function buildPostgresCompileApi(model: ModelDef<any>): SQLCompileApi {
+export function buildSqliteCompileApi(model: ModelDef<any>): SQLCompileApi {
   const mk = modelKeyFor(model);
   return {
     findFirst:  (args?: any) => compileSelect(buildSelect(mk, model, args, 'one'), model),
@@ -54,9 +54,7 @@ export function buildPostgresCompileApi(model: ModelDef<any>): SQLCompileApi {
 
     count:      (args?: any) => compileCount(buildCount(mk, model, args), model),
 
-    create:     (args: any) => {
-      return compileInsert(buildInsert(mk, model, { rows: [args.data], returning: args }), model);
-    },
+    create:     (args: any) => compileInsert(buildInsert(mk, model, { rows: [args.data], returning: args }), model),
     createMany: (args: any) => {
       const rows = args.data ?? [];
       return compileInsert(buildInsert(mk, model, {
@@ -83,9 +81,6 @@ export function buildPostgresCompileApi(model: ModelDef<any>): SQLCompileApi {
       where: args?.where, many: true,
     }), model),
 
-    // Soft delete / restore compile to update IRs that set/clear the
-    // `.softDeleteAt()` column — same surface as the runtime collection
-    // wrapper (which dispatches softDelete to update with data:{<sd>: now}).
     softDelete: (args: any) => {
       const sd = requireSoftDeleteField(model, 'softDelete');
       return compileUpdate(buildUpdate(mk, model, {
@@ -123,5 +118,4 @@ export function buildPostgresCompileApi(model: ModelDef<any>): SQLCompileApi {
   };
 }
 
-// Type-level no-op to silence unused-import warning if a consumer doesn't use it.
 export type _SQLArtifact = SQLArtifact;
