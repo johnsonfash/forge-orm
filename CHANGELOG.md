@@ -4,6 +4,19 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.5.2 — Docs reorganization (no code change)
+
+**Docs-only patch.** No runtime change; the published `dist/` is byte-identical to 2.5.1. The release bumps the npm registry version so the new README + the 20-doc deep-dive tree is the default thing readers land on.
+
+What changed:
+
+- `docs/` grew from 7 files to 20. New deep-dives for MODEL, EMBED, RELATIONS, INDEXES, QUERIES, MUTATIONS, TRANSACTIONS, RAW-SQL, FTS, MIGRATIONS, TYPES, REACT, DRIVERS — plus the BROWSER full reference split out from the README. Existing BACKEND, MOBILE, GEO, VECTOR, JSON-PATH, BROWSER-FRAMEWORKS expanded with consistent voice.
+- README's Deep-dive table at the top restructured by section (Schema and data model / Reads, writes, transactions / Cross-cutting / Runtime targets) and grown to cover all 20 docs.
+- "See more —" pointer added at the end of every README chapter that has a deep-dive companion: Install, Defining a schema, Reading data, Writing data, Grouping, Transactions, Raw SQL, FTS, Browser, Streaming, Migrations, Type safety. Geo / JSON path / Vector keep their existing "See also" lines.
+- Docs filenames are uppercase to match the README.md / CHANGELOG.md convention.
+
+Docs live in the GitHub repo only — the published npm tarball still ships `dist/` + README.md + CHANGELOG.md + LICENSE. Relative links in the README resolve to the repo on npmjs.com and github.com, so the 20-file table works in either viewer.
+
 ## 2.5.1 — Browser `$migrate()` applies non-destructive drift
 
 **Patch release.** Closes the last "Coming soon" item carried over from 2.4:
