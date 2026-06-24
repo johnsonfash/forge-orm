@@ -4,6 +4,33 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.5.3 — Docs expansion to 80 files (no code change)
+
+**Docs-only patch.** No runtime change; the published `dist/` is byte-identical to 2.5.2. The release bumps the npm registry version so the expanded 80-doc tree is the default thing readers land on.
+
+What changed:
+
+- `docs/` grew from 20 files to 80 (~78,500 lines of reference material). The 60 new deep-dives complete the surface coverage:
+  - **Schema (8 new):** PRIMARY-KEYS, FOREIGN-KEYS, ENUMS, CHECKS, GENERATED-COLUMNS, VIEWS, MATERIALIZED-VIEWS, TRIGGERS.
+  - **Reads/writes (8 new):** UPSERT, BATCH, AGGREGATIONS, WINDOWS, PAGINATION, STREAMING, LOCKING, CONCURRENCY.
+  - **CLI and operations (9 new):** CLI, PUSH, DIFF, DOCTOR, ROLLBACK, SEED, DEPLOYMENT, BACKUP-RESTORE, VERSIONING.
+  - **Per-dialect deep dives (6 new):** POSTGRES, MYSQL, SQLITE, MONGO, DUCKDB, MSSQL.
+  - **Observability and errors (5 new):** EVENTS, LOGGING, TRACING, METRICS, ERRORS.
+  - **Performance (4 new):** POOLING, BENCHMARKS, CACHING, N-PLUS-ONE.
+  - **Patterns (6 new):** SOFT-DELETE, AUDIT-LOG, MULTI-TENANT, SHARDING, IDEMPOTENCY, WATCH.
+  - **Testing (3 new):** TESTING, INTEGRATION-TESTING, FIXTURES.
+  - **Security (4 new):** SECURITY, ENCRYPTION, SQLCIPHER, AUTH.
+  - **Type-level reference (5 new):** RUNTIME-VALIDATION, BRAND-TYPES, DATES, DECIMAL, UUID.
+  - **Runtime targets (2 new):** WORKERS (Cloudflare / Vercel Edge), LAMBDA (AWS).
+- README's Deep-dive table at the top expanded into eleven sections covering all 80 files.
+- New "See more" pointers added for Errors, Soft delete, Views and materialised views, Watching queries, Performance, and Testing chapters. Existing pointers (Defining a schema / Reading data / Writing data / Migrations) expanded to reference the new docs in their respective surfaces.
+
+Docs live in the GitHub repo only — the published npm tarball still ships `dist/` + README.md + CHANGELOG.md + LICENSE.
+
+### Tests
+
+472/472 jest tests, all green. Same as 2.5.2 — no code changed.
+
 ## 2.5.2 — Docs reorganization (no code change)
 
 **Docs-only patch.** No runtime change; the published `dist/` is byte-identical to 2.5.1. The release bumps the npm registry version so the new README + the 20-doc deep-dive tree is the default thing readers land on.
