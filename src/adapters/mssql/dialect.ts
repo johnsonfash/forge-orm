@@ -3,6 +3,7 @@
 
 import type { FieldDef } from '../../schema/types';
 import type { Dialect } from '../postgres/dialect';
+import { toGeoWKT } from '../shared/wkt';
 
 export const MssqlDialect: Dialect = {
   name: 'mssql',
@@ -88,9 +89,12 @@ export const MssqlDialect: Dialect = {
 
   valueExpr(field, params, value) {
     if (field.kind === 'geoPoint' && !field.geo?.fallback && value && typeof value === 'object') {
-      const v = value as { lng: number; lat: number };
+      const v = value as { lng: number; lat: number; alt?: number };
       const srid = field.geo?.srid ?? 4326;
-      const ph = this.placeholder(params, `POINT(${v.lng} ${v.lat})`);
+      const wkt = field.geo?.dims === 3 && typeof v.alt === 'number'
+        ? `POINT(${v.lng} ${v.lat} ${v.alt})`
+        : `POINT(${v.lng} ${v.lat})`;
+      const ph = this.placeholder(params, wkt);
       return `geography::STGeomFromText(${ph}, ${srid})`;
     }
     if (field.kind === 'vector' && Array.isArray(value)) {
@@ -140,10 +144,9 @@ export const MssqlDialect: Dialect = {
     return `JSON_VALUE(${quotedCol}, '${pathSpec.replace(/'/g, "''")}')`;
   },
 
-  geoWithinPolygonClause(quotedCol, field, polygon, params) {
+  geoWithinPolygonClause(quotedCol, field, multiPolygon, params) {
     const srid = field.geo?.srid ?? 4326;
-    const ring = polygon.map((v) => `${v.lng} ${v.lat}`).join(', ');
-    const wkt = `POLYGON((${ring}))`;
+    const wkt = toGeoWKT(multiPolygon, 'lng-lat');
     const pp = this.placeholder(params, wkt);
     // SQL Server: invert STContains for "point within polygon".
     return `geography::STGeomFromText(${pp}, ${srid}).STContains(${quotedCol}) = 1`;

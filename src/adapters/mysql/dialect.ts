@@ -1,5 +1,6 @@
 import type { FieldDef } from '../../schema/types';
 import type { Dialect } from '../postgres/dialect';
+import { toGeoWKT } from '../shared/wkt';
 
 // MySQL dialect. Diverges from PG/SQLite:
 //   • Backtick identifier quoting; `?` positional placeholders.
@@ -83,9 +84,15 @@ export const MysqlDialect: Dialect = {
 
   valueExpr(field, params, value) {
     if (field.kind === 'geoPoint' && !field.geo?.fallback && value && typeof value === 'object') {
-      const v = value as { lng: number; lat: number };
+      const v = value as { lng: number; lat: number; alt?: number };
       const srid = field.geo?.srid ?? 4326;
-      const ph = this.placeholder(params, `POINT(${v.lat} ${v.lng})`);
+      // MySQL SRID 4326 uses lat-first axis order. POINT Z is unsupported in
+      // 8.x — when dims=3 we drop altitude at storage but document round-trip
+      // happens via the `alt` scalar (raw read returns ground point only).
+      const wkt = field.geo?.dims === 3 && typeof v.alt === 'number'
+        ? `POINT(${v.lat} ${v.lng})` // altitude dropped; see jsdoc on f.geoPoint dims=3
+        : `POINT(${v.lat} ${v.lng})`;
+      const ph = this.placeholder(params, wkt);
       return `ST_GeomFromText(${ph}, ${srid})`;
     }
     if (field.kind === 'vector' && Array.isArray(value)) {
@@ -136,11 +143,10 @@ export const MysqlDialect: Dialect = {
     return `JSON_UNQUOTE(JSON_EXTRACT(${quotedCol}, '${pathSpec.replace(/'/g, "''")}'))`;
   },
 
-  geoWithinPolygonClause(quotedCol, field, polygon, params) {
+  geoWithinPolygonClause(quotedCol, field, multiPolygon, params) {
     const srid = field.geo?.srid ?? 4326;
-    // Axis-order quirk: lat first.
-    const ring = polygon.map((v) => `${v.lat} ${v.lng}`).join(', ');
-    const wkt = `POLYGON((${ring}))`;
+    // MySQL SRID 4326 uses lat-first axis order — toGeoWKT handles it.
+    const wkt = toGeoWKT(multiPolygon, 'lat-lng');
     const pp = this.placeholder(params, wkt);
     return `ST_Within(${quotedCol}, ST_GeomFromText(${pp}, ${srid}))`;
   },

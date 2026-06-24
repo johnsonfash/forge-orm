@@ -10,6 +10,7 @@
 
 import type { FieldDef } from '../../schema/types';
 import type { Dialect } from '../postgres/dialect';
+import { toGeoWKT } from '../shared/wkt';
 
 export const DuckdbDialect: Dialect = {
   name: 'duckdb',
@@ -87,9 +88,13 @@ export const DuckdbDialect: Dialect = {
 
   valueExpr(field, params, value) {
     if (field.kind === 'geoPoint' && !field.geo?.fallback && value && typeof value === 'object') {
-      const v = value as { lng: number; lat: number };
+      const v = value as { lng: number; lat: number; alt?: number };
       const lngP = this.placeholder(params, v.lng);
       const latP = this.placeholder(params, v.lat);
+      if (field.geo?.dims === 3 && typeof v.alt === 'number') {
+        const altP = this.placeholder(params, v.alt);
+        return `ST_Point3D(${lngP}, ${latP}, ${altP})`;
+      }
       return `ST_Point(${lngP}, ${latP})`;
     }
     if (field.kind === 'vector' && Array.isArray(value)) {
@@ -141,9 +146,8 @@ export const DuckdbDialect: Dialect = {
     return `json_extract(${quotedCol}, '${pathSpec.replace(/'/g, "''")}')`;
   },
 
-  geoWithinPolygonClause(quotedCol, _field, polygon, params) {
-    const ring = polygon.map((v) => `${v.lng} ${v.lat}`).join(', ');
-    const wkt = `POLYGON((${ring}))`;
+  geoWithinPolygonClause(quotedCol, _field, multiPolygon, params) {
+    const wkt = toGeoWKT(multiPolygon, 'lng-lat');
     const pp = this.placeholder(params, wkt);
     // Cast the WKT param to VARCHAR explicitly — DuckDB's prepared-statement
     // type inference defaults to ANY here, which ST_GeomFromText rejects.

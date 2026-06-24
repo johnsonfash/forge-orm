@@ -85,11 +85,17 @@ export async function executeSelect(
  * field — we ask for `_distanceMeters` so the rows shape matches what the
  * SQL adapters produce.
  *
- * If the SELECT also has a `near` filter on the same column, we drop it
- * (the $near used in a find/$near query can't appear inside aggregate
- * filters — but $geoNear's `maxDistance` covers the same semantic, so we
- * lift it onto the stage). Any other where clauses go into a $match stage
- * that runs after $geoNear.
+ * Filter handling:
+ *   • If a `near` filter targets the SAME field as nearTo, $maxDistance is
+ *     lifted onto the $geoNear stage and the original filter dropped.
+ *   • If a `near` filter targets a DIFFERENT field (cross-field), it's
+ *     converted to the equivalent `$geoWithin: { $centerSphere: [[lng, lat],
+ *     radians] }` form (which IS valid in a $geoNear.query / $match stage,
+ *     unlike $near). This lets the same query run both filter and orderBy
+ *     against two different geoPoint columns — fixing the limitation noted
+ *     in the 2.3 release notes ("Mongo nearTo cross-field" → 2.5.0).
+ *   • Any other where clauses go into the $geoNear.query (Mongo accepts an
+ *     embedded find-style filter there) so the executor stays single-stage.
  */
 async function executeSelectWithGeoNear(
   node: SelectNode,
@@ -101,15 +107,17 @@ async function executeSelectWithGeoNear(
   const coll = dbClient.db.collection(artifact.collection);
   const sessOpt = opts.session ? { session: opts.session } : undefined;
 
-  // Strip any { col: { $near: …} } from the artifact filter — its semantics
-  // are covered by the $geoNear stage. Promote $maxDistance to the stage.
-  const filter = { ...(artifact.args.filter ?? {}) };
+  // Walk the artifact filter once. Same-field $near collapses into the
+  // stage's maxDistance; cross-field $near gets rewritten to $geoWithin so
+  // it survives the $match-style query slot on $geoNear.
+  const filter = rewriteNearForGeoNear(artifact.args.filter ?? {}, nearToEntry.field);
   const dbField = nearToEntry.field;
   let maxDistance: number | undefined;
-  if (filter[dbField]?.$near) {
-    const n = filter[dbField].$near;
-    maxDistance = n.$maxDistance;
-    delete filter[dbField];
+  // Same-field collapse — `near` on the same column as the nearTo orderBy
+  // is fully absorbed by the stage's maxDistance.
+  if (filter.__sameFieldMaxDistance != null) {
+    maxDistance = filter.__sameFieldMaxDistance;
+    delete filter.__sameFieldMaxDistance;
   }
   const point = nearToEntry.nearTo as { lng: number; lat: number };
   const geoNearStage: any = {
@@ -136,6 +144,65 @@ async function executeSelectWithGeoNear(
   let out = docs.map((r) => decodeRow(model, r));
   if (node.distinct?.length) out = dedupeBy(out, node.distinct);
   await applyProjectionAndHydration(out, model, node, opts.session);
+  return out;
+}
+
+// Earth radius in meters — used to convert $maxDistance (meters) to the
+// radian form $centerSphere expects.
+const EARTH_RADIUS_METERS = 6_371_008.8;
+
+/**
+ * Rewrite `{ field: { $near: { $geometry, $maxDistance } } }` leaves in a
+ * Mongo find-style filter so they survive a $geoNear stage:
+ *   • Same field as the nearTo orderBy: collapse to a sentinel
+ *     `__sameFieldMaxDistance` (caller lifts it onto $geoNear.maxDistance).
+ *   • Different field (cross-field): rewrite to
+ *     `{ field: { $geoWithin: { $centerSphere: [[lng, lat], r] } } }` —
+ *     $near is illegal inside a $geoNear.query / $match, but $centerSphere
+ *     is fine. Equivalent semantics (distance ≤ N meters).
+ *
+ * Other operators on the same field are preserved by mutating a shallow
+ * clone of the inner object. Top-level $and / $or trees are walked
+ * recursively.
+ */
+function rewriteNearForGeoNear(filter: Record<string, any>, nearToField: string): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const [k, v] of Object.entries(filter)) {
+    if (k === '$and' || k === '$or') {
+      out[k] = (v as Record<string, any>[]).map((sub) => rewriteNearForGeoNear(sub, nearToField));
+      continue;
+    }
+    if (k === '$nor') {
+      out[k] = (v as Record<string, any>[]).map((sub) => rewriteNearForGeoNear(sub, nearToField));
+      continue;
+    }
+    if (v && typeof v === 'object' && '$near' in v) {
+      const n = (v as { $near: { $geometry?: { coordinates?: [number, number] }; $maxDistance?: number } }).$near;
+      if (k === nearToField) {
+        // Same field — collapse into maxDistance on the stage.
+        if (typeof n.$maxDistance === 'number') {
+          out.__sameFieldMaxDistance = n.$maxDistance;
+        }
+        // Drop the $near from this field; keep other ops if any.
+        const rest: Record<string, any> = { ...(v as Record<string, any>) };
+        delete rest.$near;
+        if (Object.keys(rest).length > 0) out[k] = rest;
+        continue;
+      }
+      // Cross-field — rewrite to $geoWithin / $centerSphere.
+      const coords = n.$geometry?.coordinates;
+      const meters = n.$maxDistance;
+      if (Array.isArray(coords) && typeof meters === 'number') {
+        const rest: Record<string, any> = { ...(v as Record<string, any>) };
+        delete rest.$near;
+        rest.$geoWithin = { $centerSphere: [[coords[0], coords[1]], meters / EARTH_RADIUS_METERS] };
+        out[k] = rest;
+        continue;
+      }
+      // No usable geometry — fall through and let Mongo error explicitly.
+    }
+    out[k] = v;
+  }
   return out;
 }
 

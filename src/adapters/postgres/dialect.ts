@@ -3,6 +3,7 @@
 // swapping just this.
 
 import type { FieldDef } from '../../schema/types';
+import { toGeoWKT } from '../shared/wkt';
 
 export interface Dialect {
   readonly name: 'postgres' | 'mysql' | 'sqlite' | 'duckdb' | 'mssql';
@@ -79,7 +80,10 @@ export interface Dialect {
   geoWithinPolygonClause?(
     quotedCol: string,
     field: FieldDef,
-    polygon: Array<{ lng: number; lat: number }>,
+    // MultiPolygon shape — Array of polygons, each polygon = Array of rings
+    // (outer + 0..N holes), each ring = closed Array<{lng,lat}>. A simple
+    // single-ring input arrives as [[[{lng,lat}, …]]].
+    multiPolygon: Array<Array<Array<{ lng: number; lat: number }>>>,
     params: unknown[],
   ): string;
   /**
@@ -170,7 +174,12 @@ export const PostgresDialect: Dialect = {
       case 'geoPoint': {
         if (field.geo?.fallback) return 'jsonb';
         const srid = field.geo?.srid ?? 4326;
-        return `geography(Point, ${srid})`;
+        const pointType = field.geo?.dims === 3 ? 'PointZ' : 'Point';
+        // Non-WGS84 SRIDs can't ride on the geography type (which is
+        // 4326-only) — fall back to geometry(Point, srid) so user-declared
+        // SRIDs like 3857 (Web Mercator) or 27700 (OSGB) work end-to-end.
+        if (srid !== 4326) return `geometry(${pointType}, ${srid})`;
+        return `geography(${pointType}, ${srid})`;
       }
       case 'vector': {
         // pgvector. The dims must match the embedding model's output (1536
@@ -200,9 +209,14 @@ export const PostgresDialect: Dialect = {
 
   valueExpr(field, params, value) {
     if (field.kind === 'geoPoint' && !field.geo?.fallback && value && typeof value === 'object') {
-      const v = value as { lng: number; lat: number };
+      const v = value as { lng: number; lat: number; alt?: number };
       const srid = field.geo?.srid ?? 4326;
-      const ph = this.placeholder(params, `SRID=${srid};POINT(${v.lng} ${v.lat})`);
+      // dims=3 → emit POINT Z(lng lat alt). PG `geography(PointZ, 4326)` is
+      // the natural backing type; PostGIS auto-promotes from the WKT.
+      const wkt = field.geo?.dims === 3 && typeof v.alt === 'number'
+        ? `SRID=${srid};POINT Z(${v.lng} ${v.lat} ${v.alt})`
+        : `SRID=${srid};POINT(${v.lng} ${v.lat})`;
+      const ph = this.placeholder(params, wkt);
       return `ST_GeogFromText(${ph})`;
     }
     if (field.kind === 'vector' && Array.isArray(value)) {
@@ -245,10 +259,10 @@ export const PostgresDialect: Dialect = {
     return `(${quotedCol} ${op} ${ph}::vector)`;
   },
 
-  geoWithinPolygonClause(quotedCol, field, polygon, params) {
+  geoWithinPolygonClause(quotedCol, field, multiPolygon, params) {
     const srid = field.geo?.srid ?? 4326;
-    const ring = polygon.map((v) => `${v.lng} ${v.lat}`).join(', ');
-    const ewkt = `SRID=${srid};POLYGON((${ring}))`;
+    const wkt = toGeoWKT(multiPolygon, 'lng-lat');
+    const ewkt = `SRID=${srid};${wkt}`;
     const pp = this.placeholder(params, ewkt);
     // ST_Within works on the geography type for cast-friendly comparison.
     return `ST_Within(${quotedCol}::geometry, ST_GeogFromText(${pp})::geometry)`;

@@ -1,5 +1,6 @@
 import type { FieldDef } from '../../schema/types';
 import type { Dialect } from '../postgres/dialect';
+import { toGeoWKT } from '../shared/wkt';
 
 // SQLite dialect. Mostly Postgres-compatible (double-quoted idents, ON CONFLICT
 // upsert, NULLS FIRST/LAST since 3.30), but:
@@ -80,9 +81,12 @@ export const SqliteDialect: Dialect = {
 
   valueExpr(field, params, value) {
     if (field.kind === 'geoPoint' && !field.geo?.fallback && value && typeof value === 'object') {
-      const v = value as { lng: number; lat: number };
+      const v = value as { lng: number; lat: number; alt?: number };
       const srid = field.geo?.srid ?? 4326;
-      const ph = this.placeholder(params, `POINT(${v.lng} ${v.lat})`);
+      const wkt = field.geo?.dims === 3 && typeof v.alt === 'number'
+        ? `POINT Z(${v.lng} ${v.lat} ${v.alt})`
+        : `POINT(${v.lng} ${v.lat})`;
+      const ph = this.placeholder(params, wkt);
       return `GeomFromText(${ph}, ${srid})`;
     }
     if (field.kind === 'vector' && Array.isArray(value)) {
@@ -129,10 +133,9 @@ export const SqliteDialect: Dialect = {
     return `json_extract(${quotedCol}, '${pathSpec.replace(/'/g, "''")}')`;
   },
 
-  geoWithinPolygonClause(quotedCol, field, polygon, params) {
+  geoWithinPolygonClause(quotedCol, field, multiPolygon, params) {
     const srid = field.geo?.srid ?? 4326;
-    const ring = polygon.map((v) => `${v.lng} ${v.lat}`).join(', ');
-    const wkt = `POLYGON((${ring}))`;
+    const wkt = toGeoWKT(multiPolygon, 'lng-lat');
     const pp = this.placeholder(params, wkt);
     return `Within(${quotedCol}, GeomFromText(${pp}, ${srid}))`;
   },

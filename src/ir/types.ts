@@ -162,15 +162,30 @@ export type WhereOp =
   //   MSSQL  → loc.STDistance(geography::STGeomFromText('POINT(lng lat)', 4326)) < N
   //   Mongo  → { $near: { $geometry: …Point…, $maxDistance: N } }
   | 'near'
-  // Geo polygon containment — `value` carries `{ polygon: [{lng,lat}, ...] }`.
-  // The point is considered inside when the polygon is closed (first vertex
-  // equal to last); the IR builder auto-closes if needed. Per dialect:
-  //   PG     → ST_Within(loc, ST_GeogFromText('SRID=4326;POLYGON((…))'))
-  //   MySQL  → ST_Within(loc, ST_GeomFromText('POLYGON((lat lng,…))', 4326))
-  //   SQLite → Within(loc, GeomFromText('POLYGON((…))', 4326))   (SpatiaLite)
-  //   DuckDB → ST_Within(loc, ST_GeomFromText('POLYGON((…))'))
-  //   MSSQL  → geography::STGeomFromText('POLYGON((…))').STContains(loc) = 1
-  //   Mongo  → { $geoWithin: { $geometry: Polygon } }
+  // Geo polygon containment.
+  //
+  // Accepted user-facing input shapes:
+  //   • Single ring (legacy):     [{lng,lat}, {lng,lat}, …]
+  //   • Polygon with holes:       { type: 'Polygon', rings: [outer, hole1, hole2, …] }
+  //   • MultiPolygon:             { type: 'MultiPolygon', polygons: [[outer, …holes], …] }
+  //   • GeometryCollection:       { type: 'GeometryCollection', geometries: [Polygon | MultiPolygon, …] }
+  //
+  // The IR builder normalises ALL of those to a single internal shape on the
+  // leaf: `value = { multiPolygon: Array<Array<Array<{lng,lat}>>> }` — an
+  // array of polygons, each polygon an array of rings, each ring an array
+  // of {lng,lat} points (auto-closed). A single ring becomes a single
+  // polygon with a single ring; a GeometryCollection is flattened to its
+  // constituent polygons. This way every dialect compiler / fallback path
+  // sees the same shape.
+  //
+  // Per dialect (one MULTIPOLYGON per call, even when the source was a single
+  // ring — most SQL geo libs accept MULTIPOLYGON over a single-polygon input):
+  //   PG     → ST_Within(loc, ST_GeogFromText('SRID=4326;MULTIPOLYGON(((…)))'))
+  //   MySQL  → ST_Within(loc, ST_GeomFromText('MULTIPOLYGON(((lat lng,…)))', 4326))
+  //   SQLite → Within(loc, GeomFromText('MULTIPOLYGON(((…)))', 4326))   (SpatiaLite)
+  //   DuckDB → ST_Within(loc, ST_GeomFromText('MULTIPOLYGON(((…)))'))
+  //   MSSQL  → geography::STGeomFromText('MULTIPOLYGON(((…)))').STContains(loc) = 1
+  //   Mongo  → { $geoWithin: { $geometry: { type:'MultiPolygon', coordinates:… } } }
   | 'withinPolygon';
 
 export interface ProjectionPlan {

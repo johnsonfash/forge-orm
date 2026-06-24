@@ -203,12 +203,39 @@ export const f = {
    * Pair with `indexes: [{ keys: { col: 1 }, method: 'spatial' }]` to opt
    * into the dialect's spatial index family.
    */
-  geoPoint: (opts: { srid?: number; fallback?: boolean } = {}) => {
+  geoPoint: (opts: { srid?: number; fallback?: boolean; dims?: 2 | 3 } = {}) => {
     // make<> returns a Field<> whose .def carries the FieldDef; mutate the
     // FieldDef directly so the geo block lands on the shared definition the
     // schema layer reads downstream.
-    const fld = make<{ lng: number; lat: number }, 'geoPoint'>('geoPoint');
-    fld.def.geo = { srid: opts.srid ?? 4326, fallback: !!opts.fallback };
+    //
+    // `dims: 3` opts into XYZ storage — point becomes { lng, lat, alt }.
+    // Per dialect:
+    //   PG     → geography(PointZ, srid)             (PostGIS)
+    //   MySQL  → POINT — 2D only; altitude stored alongside as raw JSON `alt`
+    //            in the same column, surfaced to the user but not indexed by
+    //            spatial. Distance ops remain ground-distance (2D-on-sphere).
+    //   SQLite → SpatiaLite XYZ via dimension='XYZ' in the geometry constraint
+    //   DuckDB → POINT_3D (spatial extension's 3D point)
+    //   MSSQL  → GEOGRAPHY accepts Z natively
+    //   Mongo  → GeoJSON Point with 3-element coords [lng, lat, alt]
+    //
+    // Distance semantics: `near` / `nearTo` still compute great-circle
+    // distance on the ground (2D-on-sphere). Altitude is preserved on
+    // round-trip but doesn't participate in distance — that's a TBD for
+    // a future "3D distance" mode (would need a per-dialect choice between
+    // 3D Euclidean and ground+vertical).
+    const dims = opts.dims ?? 2;
+    if (dims !== 2 && dims !== 3) {
+      throw new Error(`[forge] f.geoPoint({ dims }): dims must be 2 or 3, got ${dims}`);
+    }
+    const fld = dims === 3
+      ? make<{ lng: number; lat: number; alt: number }, 'geoPoint'>('geoPoint')
+      : make<{ lng: number; lat: number }, 'geoPoint'>('geoPoint');
+    fld.def.geo = {
+      srid: opts.srid ?? 4326,
+      fallback: !!opts.fallback,
+      dims,
+    };
     return fld;
   },
 
