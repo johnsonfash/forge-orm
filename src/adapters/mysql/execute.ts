@@ -79,6 +79,12 @@ export async function executeMysqlSelect(
   const [rows] = await withMysqlErrors(() => exec.query(a.sql, a.params));
   let out = (rows as any[]).map((r) => decodeRow(model, r));
   if (node.distinct?.length) out = dedupeBy(out, node.distinct);
+  // Fallback geoPoint refinement — bbox prefilter → exact circle + sort.
+  const { extractFallbackGeoOps, applyHaversinePostFilter } = await import('../shared/haversine');
+  const geoOps = extractFallbackGeoOps(node, model);
+  if (geoOps.near || geoOps.nearTo || geoOps.withinPolygon) {
+    out = applyHaversinePostFilter(out, geoOps.near, geoOps.nearTo, geoOps.withinPolygon);
+  }
   if (node.projection?.counts?.length) await applyRelationCounts(exec, out, model, node.projection.counts);
   if (node.hydration?.length) await hydrate(pool, opts, out, model, node.hydration);
   return out;

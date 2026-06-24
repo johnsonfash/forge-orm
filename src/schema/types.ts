@@ -18,7 +18,26 @@ export type FieldKind =
   | 'embed'
   | 'embedMany'
   | 'stringArray'
-  | 'intArray';
+  | 'intArray'
+  // 2D geographic point (WGS84 / SRID 4326). User interacts via { lng, lat };
+  // per-dialect storage:
+  //   PG:     geography(Point, 4326) — needs PostGIS, or JSON if fallback: true
+  //   MySQL:  POINT NOT NULL SRID 4326 (8.0+)
+  //   SQLite: SpatiaLite geometry, or JSON if SpatiaLite unavailable
+  //   DuckDB: GEOMETRY (spatial extension — auto-loaded)
+  //   MSSQL:  GEOGRAPHY (built-in)
+  //   Mongo:  GeoJSON Point ({ type, coordinates: [lng, lat] }) as JSON
+  | 'geoPoint'
+  // Dense numeric vector — embedding storage for semantic / similarity
+  // search. The JS-side shape is `number[]` (or Float32Array on read). Per-
+  // dialect storage:
+  //   PG     → `vector(N)` (pgvector extension)
+  //   MySQL  → `VECTOR(N)` (MySQL 9.0+; community = brute-force only)
+  //   SQLite → JSON-stored array; sqlite-vec virtual table created out-of-band
+  //   DuckDB → `FLOAT[N]` (vss extension's HNSW index works on these)
+  //   MSSQL  → `VECTOR(N)` (SQL Server 2025 / Azure SQL)
+  //   Mongo  → plain array; Atlas Vector Search index out-of-band
+  | 'vector';
 
 export type DefaultValue =
   | { kind: 'now' }
@@ -29,6 +48,22 @@ export interface FieldDef {
   kind: FieldKind;
   optional: boolean;
   unique: boolean;
+  /**
+   * Geo-field options (only meaningful when `kind === 'geoPoint'`):
+   *   srid:     Spatial Reference System ID. Default 4326 (WGS84 / GPS).
+   *   fallback: When true, the column is stored as JSON ({lng, lat}) when
+   *             the dialect's spatial extension is not installed. Distance
+   *             queries fall back to a B-tree-prefiltered Haversine. Slow
+   *             for large tables; works without the extension.
+   */
+  geo?: { srid?: number; fallback?: boolean };
+  /**
+   * Vector-field options (only meaningful when `kind === 'vector'`):
+   *   dims:    Vector dimensionality (must match the embedding model output).
+   *   metric:  Distance metric — 'cosine' (default) | 'l2' | 'dot'.
+   *            Drives both the index-builder and the query-time operator.
+   */
+  vector?: { dims: number; metric?: 'cosine' | 'l2' | 'dot' };
   default?: DefaultValue;
   updatedAt: boolean;
   // For enum fields: the runtime enum literal-tuple (carried for validation).
@@ -39,7 +74,10 @@ export interface FieldDef {
   //   PG     → CREATE INDEX … USING gin(to_tsvector('simple', col))
   //   MySQL  → ALTER TABLE … ADD FULLTEXT(col)
   //   Mongo  → createIndex({ col: 'text' })
-  //   SQLite → unsupported (would need FTS5 virtual table); warns.
+  //   SQLite → CREATE VIRTUAL TABLE <table>_fts USING fts5(...) +
+  //            insert/update/delete triggers to keep it sync'd. Queries
+  //            via `where: { col: { search: q } }` are JOINed through the
+  //            shadow rowid automatically.
   searchable?: boolean;
   // When true on a dateTime field, this is the soft-delete column. Reads add
   // `WHERE <col> IS NULL`; deletes become updates setting it to now(). One per model.
@@ -106,7 +144,14 @@ export type IndexMethod =
   | 'brin'
   | 'hash'
   | 'spatial'
-  | 'fulltext';
+  | 'fulltext'
+  | 'vector';
+// Note on 'spatial' portability: it resolves per-dialect to whichever
+// spatial index family is native — `USING GIST` on Postgres (PostGIS),
+// `SPATIAL INDEX` on MySQL, `USING RTREE` on DuckDB, `SPATIAL INDEX` on
+// MSSQL, a virtual `idx_<tbl>_<col>` table on SQLite/SpatiaLite, and
+// `2dsphere` on Mongo. Use it with `f.geoPoint()` fields for portable
+// "find places near me" workloads.
 
 export interface IndexDef {
   /**
@@ -192,6 +237,21 @@ export interface IndexDef {
    * `{ 'meta.$**': 1 }` to index only paths under `meta`. Ignored on SQL.
    */
   wildcardProjection?: Record<string, unknown>;
+  /**
+   * MySQL 8.0+ only — when `false`, emits `INVISIBLE` so the optimizer
+   * ignores the index. Useful for canary-testing whether an index is
+   * load-bearing before dropping it: flip to invisible, observe, then
+   * drop if nothing broke. Default `undefined` (visible). Other dialects
+   * ignore.
+   */
+  visible?: boolean;
+  /**
+   * MySQL only — FULLTEXT parser plugin name. `'ngram'` covers CJK +
+   * substring matching; `'mecab'` is the Japanese morphological parser.
+   * Only honoured when `method === 'fulltext'` (or `.searchable()` emits
+   * a FULLTEXT index). Other dialects ignore.
+   */
+  parser?: 'ngram' | 'mecab' | string;
 }
 
 export type RelationKind = 'one' | 'many';

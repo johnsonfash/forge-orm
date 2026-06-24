@@ -47,6 +47,12 @@ export interface MongoArtifact {
   // `select` — IDs to hydrate aren't known until the primary query runs,
   // so this is an informational note for downstream tooling.
   hydration?: Array<{ relation: string; via: 'one' | 'many'; target: string; on: string; refs: string }>;
+  /**
+   * Schema-level intent — set by the compile API for soft-delete / restore
+   * call-sites so replay / audit tooling can branch on intent without
+   * parsing the update payload. Absent for plain update / upsert.
+   */
+  semanticOp?: 'softDelete' | 'softDeleteMany' | 'restore' | 'restoreMany';
 }
 
 // ─── SQL (Postgres / MySQL / SQLite) ────────────────────────────────────────
@@ -54,7 +60,7 @@ export interface MongoArtifact {
 // Single shape across SQL dialects; the `dialect` field narrows for callers
 // that care about quoting conventions or driver placeholder syntax.
 
-export type SQLDialect = 'postgres' | 'mysql' | 'sqlite';
+export type SQLDialect = 'postgres' | 'mysql' | 'sqlite' | 'duckdb' | 'mssql';
 
 export interface SQLArtifact {
   kind: 'sql';
@@ -66,6 +72,12 @@ export interface SQLArtifact {
   // Optional: per-step plan for queries that produce multiple statements
   // (e.g. a write inside a transaction that needs `RETURNING`-then-hydrate).
   steps?: SQLArtifact[];
+  /**
+   * Schema-level intent — set by the compile API for soft-delete / restore
+   * call-sites so replay / audit tooling can branch on intent without
+   * parsing the SQL or the update payload. Absent for plain update / upsert.
+   */
+  semanticOp?: 'softDelete' | 'softDeleteMany' | 'restore' | 'restoreMany';
 }
 
 // ─── Compile namespace type per-adapter ─────────────────────────────────────

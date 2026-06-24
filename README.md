@@ -1,10 +1,16 @@
 # forge-orm
 
-A small, Prisma-shaped data layer for **MongoDB, PostgreSQL, MySQL, and SQLite**.
-You write your models once in plain TypeScript and the same query code runs
-against any of the four databases. There is no code generation step, no Rust
-query engine, and no framework to adopt — just readable TypeScript (around
-13,000 lines) over the official drivers, organised one adapter per database.
+A small, Prisma-shaped data layer for **MongoDB, PostgreSQL, MySQL, SQLite,
+DuckDB and SQL Server**. You write your models once in plain TypeScript and
+the same query code runs against any of the six databases. There is no code
+generation step, no Rust query engine, and no framework to adopt — just
+readable TypeScript over the official drivers, organised one adapter per
+database.
+
+Geo (`f.geoPoint()` + `near` / `nearTo` / `withinPolygon`), vector similarity
+(`f.vector(N)` + the same `near` / `nearTo` vocabulary), JSON path queries
+(`{ meta: { path: 'profile.age', gte: 18 } }`), and full-text search
+(`.searchable()`) all work cross-dialect through the same wrapper API.
 
 ```
 npm install forge-orm
@@ -29,8 +35,10 @@ const alice = await db.user.create({ data: { email: 'a@x.co', name: 'Alice' } })
 const users = await db.user.findMany({ where: { name: { contains: 'Ali' } }, take: 10 });
 ```
 
-That same code works whether `DATABASE_URL` is a Postgres, MySQL, SQLite, or
-Mongo connection string. forge picks the right driver from the URL.
+That same code works whether `DATABASE_URL` is a Postgres, MySQL, SQLite,
+DuckDB, SQL Server, or Mongo connection string. forge picks the right
+driver from the URL prefix (`postgres:`, `mysql:`, `sqlite:`, `duckdb:`,
+`mssql:`, `mongodb:`).
 
 ---
 
@@ -62,6 +70,9 @@ Mongo connection string. forge picks the right driver from the URL.
 * [Running raw SQL](#running-raw-sql)
 * [Errors](#errors)
 * [Full-text search](#full-text-search)
+* [Geo (geoPoint, near, nearTo)](#geo-geopoint-near-nearto)
+* [JSON path queries](#json-path-queries)
+* [Vector similarity search](#vector-similarity-search)
 * [Streaming large results](#streaming-large-results)
 * [Soft delete](#soft-delete)
 * [Views and materialised views](#views-and-materialised-views)
@@ -100,6 +111,16 @@ this out.
 
 Full release history is in [CHANGELOG.md](./CHANGELOG.md). Recent highlights:
 
+- **2.3 — DuckDB + MSSQL adapters, end-to-end geo, JSON path queries, vector search.**
+  Two new dialects (`duckdb:` and `mssql:` URL prefixes); typed geo
+  (`f.geoPoint()` + `near` / `nearTo` / `withinPolygon` across all 6 dialects
+  with a fallback mode for envs without the spatial extension); typed JSON
+  path reads (`where: { meta: { path: 'profile.age', gte: 18 } }`); typed
+  vector similarity (`f.vector(1536, { metric: 'cosine' })` + the same
+  `near` / `nearTo` vocabulary, compiling to pgvector / DuckDB vss / MSSQL
+  `VECTOR_DISTANCE` / Mongo `$vectorSearch`); `forge doctor` live
+  capability probe; `forge push --enable-extensions`; a throwaway driver
+  smoke harness (`npm run smoke:drivers`). See the new sections below.
 - **2.2 — `IndexDef` covers the shapes `forge push` couldn't model.** SQL
   partial indexes (`where: 'deleted_at IS NULL'`), expression indexes
   (`expression: 'lower(email)'`), Postgres access methods (`gin` / `gist` /
@@ -164,6 +185,8 @@ at all.
 | MySQL or MariaDB  | `mysql://`                         | `npm install mysql2`          |
 | SQLite            | `sqlite:` or `file:`               | `npm install better-sqlite3`  |
 | MongoDB           | `mongodb://` or `mongodb+srv://`   | `npm install mongodb`         |
+| DuckDB            | `duckdb:`                          | `npm install @duckdb/node-api`|
+| SQL Server (MSSQL)| `mssql:` or `sqlserver:`           | `npm install mssql`           |
 
 ```sh
 npm install forge-orm      # the library, no drivers
@@ -192,7 +215,7 @@ handle whose properties match your model names.
 import { createDb } from 'forge-orm';
 
 const db = await createDb({
-  url: process.env.DATABASE_URL!,   // postgres://… | mysql://… | sqlite:… | mongodb://…
+  url: process.env.DATABASE_URL!,   // postgres://… | mysql://… | sqlite:… | duckdb:… | mssql:… | mongodb://…
   schema: { user: User, post: Post },
 });
 
@@ -237,6 +260,8 @@ Built-in drivers:
 | Postgres  | `pgDriver` (`pg`)                          | `postgresJsDriver` (`postgres.js`)                                                     |
 | MySQL     | `mysql2Driver` (`mysql2`)                  | `mariadbDriver` (MariaDB connector), `planetscaleDriver` (`@planetscale/database`)     |
 | MongoDB   | built-in `mongodb` client                 | `mongoDriver(client)` — your own `MongoClient` (DocumentDB, Cosmos, FerretDB, custom)  |
+| DuckDB    | `duckdbDriver` (`@duckdb/node-api`)       | —                                                                                      |
+| MSSQL     | `mssqlDriver` (`mssql`)                   | —                                                                                      |
 
 ```ts
 // SQLite on Expo / React Native
@@ -265,6 +290,19 @@ const db = await createDb({ schema, driver: mariadbDriver(pool) });
 import { MongoClient } from 'mongodb';
 import { createDb, mongoDriver } from 'forge-orm';
 const db = await createDb({ schema, driver: mongoDriver(new MongoClient(uri, { tls: true }), 'mydb') });
+
+// DuckDB (embedded analytics — auto-loads the `spatial` extension at connect)
+import { DuckDBInstance } from '@duckdb/node-api';
+import { createDb, duckdbDriver } from 'forge-orm';
+const instance = await DuckDBInstance.create('analytics.duckdb');
+const connection = await instance.connect();
+const db = await createDb({ schema, driver: duckdbDriver(connection) });
+
+// SQL Server (Linux / Windows; ARM Macs auto-swap to azure-sql-edge in tests)
+import sql from 'mssql';
+import { createDb, mssqlDriver } from 'forge-orm';
+const pool = await sql.connect({ server: 'localhost', user: 'sa', password: '…', database: 'app' });
+const db = await createDb({ schema, driver: mssqlDriver(pool) });
 ```
 
 Each port is a small interface, so any other client fits too:
@@ -276,6 +314,43 @@ Each port is a small interface, so any other client fits too:
 One caveat: `forge push` / `applyMigration` (DDL) still assume each database's
 **default** driver. With an injected driver, run runtime queries through forge
 and manage schema/DDL with the default client (or separately).
+
+### Wire-compatible databases (no new code needed)
+
+Several databases speak the wire protocol of one of the four forge supports.
+They work today through the matching adapter — point the existing driver at
+them:
+
+| Database | Adapter | How |
+|---|---|---|
+| **CockroachDB** | postgres | `pg` or `postgresJsDriver` against the CockroachDB URL |
+| **YugabyteDB** | postgres | `pg` or `postgresJsDriver` |
+| **Neon** | postgres | `pg` or `@neondatabase/serverless` wrapped in a `PostgresDriver` port |
+| **Supabase** | postgres | `pg` against the Supabase URL |
+| **TimescaleDB** | postgres | `pg` (TimescaleDB is a Postgres extension) |
+| **TiDB** | mysql | `mysql2Driver` |
+| **PlanetScale** | mysql | `planetscaleDriver` — built in |
+| **AWS DocumentDB** | mongo | `mongoDriver(new MongoClient(documentDbUri), dbName)` |
+| **Azure Cosmos DB (Mongo API)** | mongo | `mongoDriver(new MongoClient(cosmosUri), dbName)` |
+| **FerretDB** | mongo | `mongoDriver(new MongoClient(ferretUri), dbName)` |
+| **Turso** | sqlite | `libsqlDriver` — built in |
+| **Cloudflare D1** | sqlite | Wrap the D1 client in a thin `SqliteDriver` port (`all`/`get`/`run`/`exec`) |
+
+If your database isn't on the list and doesn't speak one of the four wire
+protocols, the answer is "implement the matching port interface" — same
+~5-method surface every built-in driver implements.
+
+### Coming soon
+
+| Database | Status | Tracking |
+|---|---|---|
+| **MSSQL upsert via `MERGE`** | INSERT/UPDATE/DELETE/SELECT work today; upsert throws NotImplemented in 2.3. | 2.4.0 |
+| **Mongo `nearTo` cross-field** | If a `near` filter targets field A and a `nearTo` orderBy targets field B, the `$geoNear` stage only honors B. | 2.4.0 |
+| **MultiPolygon / GeometryCollection** | Single-polygon `withinPolygon` works. Multi-ring / hole shapes need raw queries. | TBD |
+
+If you need another database, file an issue. The bar to add a new adapter is
+~10 small files: `dialect`, `driver`, `ddl`, `compile-from-ir`, `execute`,
+`introspect`, `migrate`, `adapter`, plus a few registration touches.
 
 ---
 
@@ -523,6 +598,17 @@ indexes: [
   // MySQL spatial / fulltext. Statement-prefix keywords on MySQL, not USING.
   { keys: { geom: 1 }, method: 'spatial' },
   { keys: { body: 1 }, method: 'fulltext' },
+
+  // MySQL FULLTEXT parser plugin — `'ngram'` for CJK, `'mecab'` for Japanese.
+  { keys: { body: 1 }, method: 'fulltext', parser: 'ngram' },
+
+  // MySQL 8+ invisible index — visible: false. The optimizer ignores it,
+  // useful for canary-testing whether an index is load-bearing before drop.
+  { keys: { obsolete: 1 }, visible: false },
+
+  // MySQL 8+ multi-valued index on a JSON array column — index every element
+  // of the array. Use `expression` with the CAST that MySQL requires.
+  { keys: {}, expression: "(CAST(tags->'$[*]' AS UNSIGNED ARRAY))" },
 ]
 ```
 
@@ -536,12 +622,14 @@ What each field does, per dialect:
 | `unique` / `sparse`         | yes                  | yes (sparse auto on optional) | yes/n/a   | yes/n/a             |
 | `expireAfterSeconds`        | yes                  | n/a                 | n/a                 | n/a                 |
 | `partialFilterExpression`   | yes                  | n/a                 | n/a                 | n/a                 |
-| `where` (object)            | alias of PFE         | warn + skip         | warn + skip         | warn + skip         |
+| `where` (object)            | alias of PFE         | translated to SQL   | warn + skip         | translated to SQL   |
 | `where` (SQL string)        | n/a                  | WHERE …             | warn + skip         | WHERE …             |
 | `include: [cols]`           | n/a                  | INCLUDE (…)         | warn + skip         | warn + skip         |
 | `expression: 'sql'`         | warn + skip          | ((expr))            | ((expr))            | (expr)              |
 | `method: gin/gist/brin/hash`| n/a                  | USING …             | warn (ignored)      | warn (ignored)      |
 | `method: spatial/fulltext`  | n/a                  | DB rejects          | statement prefix    | warn (ignored)      |
+| `parser: 'ngram'/'mecab'`   | n/a                  | warn (ignored)      | WITH PARSER … (only on fulltext) | warn (ignored) |
+| `visible: false`            | n/a                  | warn (ignored)      | INVISIBLE (MySQL 8) | warn (ignored)      |
 | `collation`                 | yes                  | n/a (use expression)| n/a                 | n/a                 |
 | `wildcardProjection`        | yes                  | n/a                 | n/a                 | n/a                 |
 
@@ -915,6 +1003,238 @@ const Post = model('posts', { id: f.id(), body: f.text().searchable() });
 
 await db.post.findMany({ where: { body: { search: 'database wrapper' } } });
 ```
+
+## Geo (geoPoint, near, nearTo)
+
+Declare a `f.geoPoint()` field and pair it with `method: 'spatial'`. The
+column type and the spatial index family come out right per dialect:
+
+```ts
+const Place = model('places', {
+  id: f.id(),
+  name: f.string(),
+  location: f.geoPoint(),                       // WGS84 / SRID 4326
+}, {
+  indexes: [{ keys: { location: 1 }, method: 'spatial', name: 'idx_places_geo' }],
+});
+
+// Insert — always { lng, lat }. Forge handles per-dialect coord-order quirks.
+await db.place.create({
+  data: { id: 'a', name: 'Lekki', location: { lng: 3.4505, lat: 6.4416 } },
+});
+
+// "Within 5 km of me", closest first, with a distance annotation.
+const nearby = await db.place.findMany({
+  where:   { location: { near: { lng: 3.45, lat: 6.44, withinMeters: 5000 } } },
+  orderBy: { location: { nearTo: { lng: 3.45, lat: 6.44 } } },
+  take: 20,
+});
+// nearby[0]._distanceMeters ≈ 0  (meters from the search point)
+```
+
+### What forge emits per dialect
+
+| | Column | Spatial index | `near` filter | `nearTo` orderBy |
+|---|---|---|---|---|
+| Mongo | GeoJSON in JSON | `2dsphere` | `$near + $maxDistance` | (sorted by `$near` implicitly) |
+| Postgres | `geography(Point, 4326)` | `USING GIST` | `ST_DWithin(...)` | `ST_Distance(...)` AS `_distanceMeters` |
+| MySQL 8 | `POINT NOT NULL SRID 4326` | `SPATIAL INDEX` | `ST_Distance_Sphere(...) < N` | `ST_Distance_Sphere(...)` |
+| SQLite | `BLOB` (SpatiaLite) | virtual `idx_<tbl>_<col>` table | `Distance(..., 1) < N` | `Distance(..., 1)` |
+| DuckDB | `GEOMETRY` (spatial ext) | `USING RTREE` | `ST_Distance_Sphere(...) < N` | `ST_Distance_Sphere(...)` |
+| MSSQL | `GEOGRAPHY` | `CREATE SPATIAL INDEX` | `col.STDistance(...) < N` | `col.STDistance(...)` |
+
+### Extensions
+
+- **Postgres** — needs PostGIS. Run `npm run forge:push -- --enable-extensions`
+  to have forge issue `CREATE EXTENSION IF NOT EXISTS postgis;` before the
+  schema push, or install it once by hand.
+- **SQLite** — needs SpatiaLite (`brew install libspatialite` /
+  `apt install libsqlite3-mod-spatialite`). The adapter calls
+  `load_extension('mod_spatialite')` automatically; failures are silent so
+  non-geo schemas keep working.
+- **DuckDB** — `INSTALL spatial; LOAD spatial;` runs at connect time. Always
+  available (bundled since DuckDB 0.9).
+- **MSSQL** — `GEOGRAPHY` is built-in. Nothing to install.
+- **MySQL 8** — spatial built-in. **5.7 works too** but without the SRID
+  metadata. `forge doctor` warns if it detects 5.7.
+- **Mongo** — `2dsphere` built-in.
+
+Run `forge doctor` to see which extensions your live DB has and what's
+missing, with copy-paste install commands.
+
+### Fallback mode (no extension)
+
+When the dialect's spatial extension is unavailable (a managed PG host
+without PostGIS, a stripped-down SQLite, a barebones DuckDB build), opt
+into fallback mode:
+
+```ts
+const Place = model('places', {
+  id: f.id(),
+  location: f.geoPoint({ fallback: true }),    // JSON storage + bbox prefilter
+});
+```
+
+The column is stored as `{lng, lat}` JSON, the SQL emits a bounding-box
+prefilter on the JSON-extracted lng/lat, and the adapter post-filters via
+Haversine in app to produce the exact distance + circle. Works without
+any extension; ~50× slower than the native path on large tables. Document
+the tradeoff and migrate to a real extension when traffic justifies it.
+
+### Coordinate-order — always lng, lat
+
+The forge API is `{ lng, lat }` everywhere. Per-dialect order differences
+(MySQL 8 axis-order, GeoJSON order, MSSQL geography ordering) are handled
+by the compile layer so you never have to think about them.
+
+### Polygon containment
+
+```ts
+const inside = await db.place.findMany({
+  where: {
+    location: {
+      withinPolygon: [
+        { lng: 3.20, lat: 6.35 },   // 3+ vertices; ring auto-closes
+        { lng: 3.60, lat: 6.35 },
+        { lng: 3.40, lat: 6.55 },
+      ],
+    },
+  },
+});
+```
+
+Per dialect:
+
+| | Compiles to |
+|---|---|
+| Mongo | `$geoWithin: { $geometry: Polygon }` |
+| Postgres | `ST_Within(loc::geometry, ST_GeogFromText(...)::geometry)` |
+| MySQL 8 | `ST_Within(loc, ST_GeomFromText('POLYGON((lat lng,…))', 4326))` |
+| SQLite | `Within(loc, GeomFromText('POLYGON((…))', 4326))` |
+| DuckDB | `ST_Within(loc, ST_GeomFromText('POLYGON((…))'::VARCHAR))` |
+| MSSQL | `geography::STGeomFromText('POLYGON((…))', 4326).STContains(loc) = 1` |
+
+Fallback mode emits an axis-aligned bbox prefilter from the polygon's
+envelope; the adapter then runs a ray-casting point-in-polygon refinement
+in app. Concave polygons work correctly.
+
+## JSON path queries
+
+Read into nested JSON columns directly from `where`. Same scalar comparison
+vocabulary as regular fields — `eq` / `ne` / `gt` / `gte` / `lt` / `lte` /
+`contains` / `in` / `has`.
+
+```ts
+const Doc = model('docs', {
+  id: f.id(),
+  meta: f.json(),
+});
+
+// Dotted-path navigation.
+await db.doc.findMany({
+  where: { meta: { path: 'profile.age', gte: 18 } },
+});
+
+// Array indexing with [N] syntax.
+await db.doc.findMany({
+  where: { meta: { path: 'addresses[0].city', eq: 'Lagos' } },
+});
+
+// Substring search on the extracted value.
+await db.doc.findMany({
+  where: { meta: { path: 'bio', contains: 'engineer' } },
+});
+
+// Explicit array form.
+await db.doc.findMany({
+  where: { meta: { path: ['tags', '0'], eq: 'urgent' } },
+});
+```
+
+Works on `f.json()` / `f.embed()` / `f.embedMany()` / `f.stringArray()` /
+`f.intArray()` fields. Non-JSON fields raise a clear error.
+
+Per dialect:
+
+| Dialect | Compiles to |
+|---|---|
+| Postgres | `(col->'a'->>'b')::numeric` (cast by operand type) |
+| MySQL | `JSON_UNQUOTE(JSON_EXTRACT(col, '$.a.b'))` |
+| SQLite | `json_extract(col, '$.a.b')` (JSON1 — built-in) |
+| DuckDB | `json_extract(col, '$.a.b')` |
+| MSSQL | `JSON_VALUE(col, '$.a.b')` |
+| Mongo | dotted key: `{ 'meta.a.b': … }` |
+
+## Vector similarity search
+
+Embedding fields with native vector indexes per dialect, queried with the
+same `near` / `nearTo` vocabulary as geo.
+
+```ts
+const Doc = model('docs', {
+  id: f.id(),
+  body: f.text(),
+  // Match the dims to your embedding model (OpenAI text-embedding-3-small = 1536).
+  embedding: f.vector(1536, { metric: 'cosine' }),
+}, {
+  indexes: [{ keys: { embedding: 1 }, method: 'vector' }],
+});
+
+await db.doc.create({
+  data: { id: 'a', body: 'cat', embedding: queryAnEmbeddingModel('cat') },
+});
+
+// "Top-10 most semantically similar documents to my query vector,
+//  within 0.4 cosine distance."
+const matches = await db.doc.findMany({
+  where:   { embedding: { near: { vector: queryVec, withinDistance: 0.4 } } },
+  orderBy: { embedding: { nearTo: queryVec } },
+  take: 10,
+});
+// matches[0]._distance ≈ 0  (cosine distance to the search vector)
+```
+
+Metrics — match to your embedding model's docs:
+
+| Metric | When |
+|---|---|
+| `'cosine'` (default) | Most text embedding models (OpenAI, Voyage, Cohere) |
+| `'l2'` | Image embeddings (CLIP), some classical models |
+| `'dot'` | Normalized vectors where you want max speed |
+
+Per dialect:
+
+| Dialect | Column | Vector index | Query |
+|---|---|---|---|
+| Postgres | `vector(N)` (pgvector) | `USING hnsw (col vector_cosine_ops)` | `col <=> $vec` operator |
+| MySQL 9 | `VECTOR(N)` | basic (community = exact only) | `DISTANCE(col, STRING_TO_VECTOR(...), 'COSINE')` |
+| SQLite | TEXT (JSON) | needs `sqlite-vec` vec0 vtab (out-of-band) | brute-force or vec0 |
+| DuckDB | `FLOAT[N]` | `USING HNSW` (vss extension) | `array_cosine_distance(col, [...])` |
+| MSSQL | `VECTOR(N)` | `USING VECTOR WITH (algorithm = 'HNSW')` | `VECTOR_DISTANCE('cosine', col, ...)` |
+| Mongo | plain array | Atlas Search Index (createSearchIndex) | `$vectorSearch` (auto-routed) |
+
+**Dimension validation**: `f.vector(1536)` rejects a 1024-dim query vector
+at IR build time — catches embedding-model mismatches before they hit the
+DB.
+
+**Required setup** per dialect:
+
+- **Postgres** — `CREATE EXTENSION vector;` (pgvector — available on every
+  managed PG host: Supabase, Neon, RDS, Crunchy, …)
+- **DuckDB** — `INSTALL vss; LOAD vss;` (load explicitly at adapter
+  connect; `spatial` auto-loads, `vss` is one extra `connection.run`)
+- **SQLite** — install `sqlite-vec` extension; the `vec0` mirror table is
+  created out-of-band (forge doesn't manage it). Use brute-force JSON
+  scanning for small datasets.
+- **MySQL** — built-in since 9.0. HeatWave Vector Store (Oracle Cloud)
+  adds HNSW/IVF; community edition is exact-only.
+- **MSSQL** — built-in in SQL Server 2025 / Azure SQL Database.
+- **Mongo** — Atlas Vector Search (Atlas-only, not on-prem or community).
+  Create the search index via the Atlas UI / CLI.
+
+When the dialect can't host a regular vector index (Mongo, SQLite), the
+`method: 'vector'` index emission warns clearly instead of silently
+emitting a useless btree.
 
 ---
 

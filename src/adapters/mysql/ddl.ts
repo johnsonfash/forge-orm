@@ -1,4 +1,5 @@
 import type { FieldDef, IndexDef, ModelDef, RelationDef } from '../../schema/types';
+import { mongoToSqlWhere } from '../shared/mongo-to-sql-where';
 import type { SchemaMap } from '../../schema';
 import type { DDLStatement } from '../postgres/ddl';
 import { MysqlDialect } from './dialect';
@@ -271,21 +272,91 @@ function buildIndexes(m: ModelDef<any>): DDLStatement[] {
       );
     }
 
-    // WHERE — MySQL does NOT support partial indexes natively. Warn + skip.
-    if (i.where) {
+    // WHERE — MySQL has no native partial indexes, but for the unique-with-
+    // filter case (by far the most common partial-index pattern) the same
+    // semantics can be expressed as a functional index over
+    // `(CASE WHEN <filter> THEN <indexed col> ELSE NULL END)`. NULLs aren't
+    // considered duplicates in a unique index on MySQL, so rows that don't
+    // match the filter all get NULL and are exempt from the constraint —
+    // exactly the partial-unique behaviour. We rewrite into that form when
+    // (a) the index is unique, (b) the keys are over plain columns (not an
+    // expression index already), and (c) the filter translates cleanly.
+    // Resolve the filter source: explicit string `where`, object-form `where`,
+    // or — as a fallback for cross-dialect schemas — `partialFilterExpression`.
+    const filterSource: string | Record<string, unknown> | undefined =
+      typeof i.where === 'string' || (i.where && typeof i.where === 'object')
+        ? (i.where as string | Record<string, unknown>)
+        : i.partialFilterExpression;
+
+    if (filterSource && i.unique && cols.length > 0 && !i.expression) {
+      const filterSql = typeof filterSource === 'string'
+        ? filterSource
+        : mongoToSqlWhere(filterSource, {
+            quoteIdent: d.quoteIdent,
+            dialect: 'mysql',
+          });
+      if (filterSql) {
+        // Build the CASE expression. For composite indexes, MySQL accepts a
+        // single `(CASE WHEN … THEN expr ELSE NULL END)` over a JSON or
+        // concat of the key columns; we use JSON_ARRAY for portability +
+        // determinism (string concatenation needs explicit separator + type
+        // handling that JSON_ARRAY handles automatically).
+        const keyExpr = cols.length === 1
+          ? d.quoteIdent(cols[0])
+          : `JSON_ARRAY(${cols.map(d.quoteIdent).join(', ')})`;
+        payload = `(CASE WHEN (${filterSql}) THEN ${keyExpr} ELSE NULL END)`;
+        // The wrapped expression replaces the column list entirely. ASC/DESC
+        // were rendered into the earlier payload but we just overwrote it,
+        // so the emitted SQL has no direction tokens — which is correct for
+        // a functional index.
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[forge:push:mysql] index '${name}' has a 'where' filter that ` +
+          `couldn't be translated into a MySQL functional index. Either ` +
+          `simplify the filter or model it as a generated column + plain index. ` +
+          `Filter ignored.`,
+        );
+      }
+    } else if (filterSource && !i.unique) {
+      // Non-unique partials don't have a clean MySQL workaround — they'd just
+      // index over fewer rows, but MySQL has no way to express that.
       // eslint-disable-next-line no-console
       console.warn(
-        `[forge:push:mysql] index '${name}' uses 'where' — MySQL does not ` +
-        `support partial indexes. Either drop the filter or model it as a ` +
-        `generated column + plain index. Ignored.`,
+        `[forge:push:mysql] index '${name}' uses 'where' on a non-unique index ` +
+        `— MySQL has no partial-index equivalent. Either drop the filter, mark ` +
+        `the index unique (forge will rewrite as a functional index over a ` +
+        `CASE expression), or model the partial scope as a generated column. ` +
+        `Filter ignored.`,
       );
     }
+
+    // FULLTEXT parser plugin — `WITH PARSER ngram` for CJK, `mecab` for
+    // Japanese morphological tokenisation. Only meaningful when this is a
+    // FULLTEXT index; warn otherwise so the user catches the misplacement.
+    let parserClause = '';
+    if (i.parser) {
+      if (i.method === 'fulltext') {
+        parserClause = ` WITH PARSER ${i.parser}`;
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[forge:push:mysql] index '${name}' sets 'parser' but is not a ` +
+          `FULLTEXT index — parser is only honoured on method: 'fulltext'. Ignored.`,
+        );
+      }
+    }
+
+    // VISIBLE / INVISIBLE (MySQL 8.0+). Default is VISIBLE; we only emit
+    // the keyword when the user opted into INVISIBLE, otherwise older
+    // MySQL versions reject the syntax.
+    const visibilityClause = i.visible === false ? ' INVISIBLE' : '';
 
     out.push({
       kind: 'index',
       name,
       table,
-      sql: `CREATE ${kindKW}INDEX ${d.quoteIdent(name)} ON ${d.quoteIdent(table)} (${payload})`,
+      sql: `CREATE ${kindKW}INDEX ${d.quoteIdent(name)} ON ${d.quoteIdent(table)} (${payload})${parserClause}${visibilityClause}`,
       dropSql: `DROP INDEX ${d.quoteIdent(name)} ON ${d.quoteIdent(table)}`,
     });
   }

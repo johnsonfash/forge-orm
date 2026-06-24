@@ -47,6 +47,14 @@ export const SqliteDialect: Dialect = {
       case 'embedMany':  return 'TEXT';           // JSON array
       case 'stringArray':return 'TEXT';           // JSON array
       case 'intArray':   return 'TEXT';           // JSON array
+      case 'geoPoint':
+        return field.geo?.fallback ? 'TEXT' : 'BLOB';
+      case 'vector':
+        // SQLite stores vectors as JSON text in the base table. The
+        // sqlite-vec virtual table (created separately) holds the indexed
+        // copy. forge-orm doesn't manage the vec0 table here — apps that
+        // want ANN search create it via `CREATE VIRTUAL TABLE … USING vec0`.
+        return 'TEXT';
     }
   },
 
@@ -68,5 +76,64 @@ export const SqliteDialect: Dialect = {
     const ftsTable = ctx.quoteIdent(`${ctx.baseTable}_fts`);
     const baseTable = ctx.quoteIdent(ctx.baseTable);
     return `${baseTable}.rowid IN (SELECT rowid FROM ${ftsTable} WHERE ${ftsTable} MATCH ${paramExpr})`;
+  },
+
+  valueExpr(field, params, value) {
+    if (field.kind === 'geoPoint' && !field.geo?.fallback && value && typeof value === 'object') {
+      const v = value as { lng: number; lat: number };
+      const srid = field.geo?.srid ?? 4326;
+      const ph = this.placeholder(params, `POINT(${v.lng} ${v.lat})`);
+      return `GeomFromText(${ph}, ${srid})`;
+    }
+    if (field.kind === 'vector' && Array.isArray(value)) {
+      // Serialize as JSON; sqlite-vec accepts json arrays via vec_f32().
+      return this.placeholder(params, JSON.stringify(value));
+    }
+    return this.placeholder(params, value);
+  },
+
+  geoNearClause(quotedCol, field, point, params) {
+    const srid = field.geo?.srid ?? 4326;
+    const lngP = this.placeholder(params, point.lng);
+    const latP = this.placeholder(params, point.lat);
+    // SpatiaLite Distance(...) — the trailing 1 selects ellipsoidal math (meters).
+    if (point.withinMeters === undefined) return 'TRUE';
+    const wm = this.placeholder(params, point.withinMeters);
+    return `Distance(${quotedCol}, MakePoint(${lngP}, ${latP}, ${srid}), 1) < ${wm}`;
+  },
+
+  geoDistanceExpr(quotedCol, field, point, params) {
+    const srid = field.geo?.srid ?? 4326;
+    const lngP = this.placeholder(params, point.lng);
+    const latP = this.placeholder(params, point.lat);
+    return `Distance(${quotedCol}, MakePoint(${lngP}, ${latP}, ${srid}), 1)`;
+  },
+
+  vectorDistanceClause(quotedCol, field, query, params) {
+    // sqlite-vec stores the index in a separate vec0 virtual table; the
+    // generic SQL path here can't traverse that. Emit a no-op TRUE and let
+    // app code use raw SQL when sqlite-vec is in play. Brute-force JSON
+    // scan is the only thing portable here.
+    void quotedCol; void field; void query; void params;
+    return 'TRUE';
+  },
+
+  vectorDistanceExpr() {
+    // Same reason — return a placeholder constant; the synthetic _distance
+    // column won't be useful on SQLite without sqlite-vec wiring.
+    return '0';
+  },
+
+  jsonPathExpr(quotedCol, path) {
+    const pathSpec = '$' + path.map((s) => /^\d+$/.test(s) ? `[${s}]` : `.${s}`).join('');
+    return `json_extract(${quotedCol}, '${pathSpec.replace(/'/g, "''")}')`;
+  },
+
+  geoWithinPolygonClause(quotedCol, field, polygon, params) {
+    const srid = field.geo?.srid ?? 4326;
+    const ring = polygon.map((v) => `${v.lng} ${v.lat}`).join(', ');
+    const wkt = `POLYGON((${ring}))`;
+    const pp = this.placeholder(params, wkt);
+    return `Within(${quotedCol}, GeomFromText(${pp}, ${srid}))`;
   },
 };

@@ -98,37 +98,49 @@ export function buildMongoCompileApi(model: ModelDef<any>): MongoCompileApi {
     // just compiled instead of executed.
     softDelete: (args: any) => {
       const sd = requireSoftDeleteField(model, 'softDelete');
-      return compileUpdate(buildUpdate(mk, model, {
+      const art = compileUpdate(buildUpdate(mk, model, {
         where: args.where,
         data: { [sd]: new Date() } as any,
+        semantic: "softDelete",
         many: false,
         returning: args,
       }), model);
+      (art as any).semanticOp = "softDelete";
+      return art;
     },
     softDeleteMany: (args?: any) => {
       const sd = requireSoftDeleteField(model, 'softDeleteMany');
-      return compileUpdate(buildUpdate(mk, model, {
+      const art = compileUpdate(buildUpdate(mk, model, {
         where: args?.where,
         data: { [sd]: new Date() } as any,
+        semantic: "softDeleteMany",
         many: true,
       }), model);
+      (art as any).semanticOp = "softDeleteMany";
+      return art;
     },
     restore: (args: any) => {
       const sd = requireSoftDeleteField(model, 'restore');
-      return compileUpdate(buildUpdate(mk, model, {
+      const art = compileUpdate(buildUpdate(mk, model, {
         where: args.where,
         data: { [sd]: null } as any,
+        semantic: "restore",
         many: false,
         returning: args,
       }), model);
+      (art as any).semanticOp = "restore";
+      return art;
     },
     restoreMany: (args?: any) => {
       const sd = requireSoftDeleteField(model, 'restoreMany');
-      return compileUpdate(buildUpdate(mk, model, {
+      const art = compileUpdate(buildUpdate(mk, model, {
         where: args?.where,
         data: { [sd]: null } as any,
+        semantic: "restoreMany",
         many: true,
       }), model);
+      (art as any).semanticOp = "restoreMany";
+      return art;
     },
 
     aggregate:  (args: { pipeline: any[]; options?: any }): MongoArtifact => ({

@@ -19,7 +19,7 @@ Usage:
                               var FORGE_DIFF_IGNORE works the same way)
   forge diff apply            Generate + run a reconciliation migration
   forge rollback              Roll back the most-recent applied migration
-  forge doctor                Pre-flight adapter checks
+  forge doctor                Pre-flight adapter checks + schema linting
 
 Schema is resolved (first hit wins):
   --schema=<path>             explicit
@@ -32,6 +32,24 @@ Schema is resolved (first hit wins):
     src/database/schema.ts
 
 Database is read from DATABASE_URL (in your .env or environment).
+
+What's in the schema:
+  Indexes: keys / unique / sparse / name / expireAfterSeconds, plus
+    where (SQL string on PG/SQLite, object on Mongo — alias of
+    partialFilterExpression), expression (SQL expression index),
+    include (PG covering columns), method ('gin'/'gist'/'brin'/'hash'
+    on PG, 'spatial'/'fulltext' on MySQL), collation +
+    wildcardProjection (Mongo), parser ('ngram'/'mecab' for MySQL
+    FULLTEXT), visible (MySQL 8 INVISIBLE), expireAfterSeconds (TTL),
+    plus Mongo IndexKey '2dsphere' / '2d' / 'hashed'.
+  Soft delete: f.dateTime().softDeleteAt() — adds .softDelete() /
+    .softDeleteMany() / .restore() / .restoreMany() to the model.
+    delete() / deleteMany() are always hard deletes since 2.0.
+  Compile: db.<model>.compile.<op>() returns the artifact instead of
+    executing. Dispatches by adapter; use .compileMongo / .compileSql
+    for a narrowed surface.
+
+Full docs: https://github.com/johnsonfash/forge-orm#readme
 `);
 }
 

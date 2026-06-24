@@ -1,4 +1,5 @@
 import type { FieldDef, IndexDef, ModelDef, RelationDef } from '../../schema/types';
+import { mongoToSqlWhere } from '../shared/mongo-to-sql-where';
 import type { SchemaMap } from '../../schema';
 import { SqliteDialect } from './dialect';
 import type { DDLStatement } from '../postgres/ddl';
@@ -68,8 +69,12 @@ export function buildSchemaDDL(schema: SchemaMap): DDLStatement[] {
 }
 
 // Auto-emit an FTS5 virtual table (`<table>_fts`) for models with
-// `.searchable()` fields. Reads aren't auto-routed through it (would need
-// executor route-rewriting); $queryRaw is the supported query path for now.
+// `.searchable()` fields. The shadow virtual table uses external-content
+// mode (content_rowid='rowid'), and the AFTER INSERT / UPDATE / DELETE
+// triggers below keep it sync'd with the base table. Queries via
+// `where: { col: { search: q } }` are JOINed through the shadow's rowid
+// by the SqliteDialect.searchClause helper — consumers don't need to
+// hand-write the FTS5 MATCH.
 function buildFtsTables(m: ModelDef<any>): DDLStatement[] {
   const d = SqliteDialect;
   const cols: string[] = [];
@@ -276,17 +281,33 @@ function buildIndexes(m: ModelDef<any>): DDLStatement[] {
         .join(', ');
     }
 
-    // SQLite supports partial indexes via WHERE. Mongo-object form is
-    // ignored with a warning — SQL needs raw SQL.
+    // SQLite supports partial indexes via WHERE natively. Mongo-shaped
+    // objects (from `where` or partialFilterExpression) are translated via
+    // the shared mongo-to-sql translator; raw SQL strings pass through.
     let whereClause = '';
     if (typeof i.where === 'string' && i.where.trim()) {
       whereClause = ` WHERE ${i.where}`;
     } else if (i.where && typeof i.where === 'object') {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[forge:push:sqlite] index '${name}' has object-form 'where' — ` +
-        `expected a raw SQL string on SQLite. Filter ignored.`,
-      );
+      const translated = mongoToSqlWhere(i.where as Record<string, unknown>, {
+        quoteIdent: d.quoteIdent,
+        dialect: 'sqlite',
+      });
+      if (translated) {
+        whereClause = ` WHERE ${translated}`;
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[forge:push:sqlite] index '${name}' has an object-form 'where' ` +
+          `that uses operators outside the translator's coverage. Pass a raw ` +
+          `SQL string in 'where' or simplify the object. Filter omitted.`,
+        );
+      }
+    } else if (i.partialFilterExpression) {
+      const translated = mongoToSqlWhere(i.partialFilterExpression, {
+        quoteIdent: d.quoteIdent,
+        dialect: 'sqlite',
+      });
+      if (translated) whereClause = ` WHERE ${translated}`;
     }
 
     // INCLUDE + method aren't supported on SQLite.
@@ -297,11 +318,44 @@ function buildIndexes(m: ModelDef<any>): DDLStatement[] {
         `Postgres-only feature. Ignored on SQLite.`,
       );
     }
-    if (i.method && i.method !== 'btree') {
+    if (i.method === 'vector') {
+      // sqlite-vec mirrors live in a vec0 virtual table — created with
+      // `CREATE VIRTUAL TABLE … USING vec0`. forge-orm doesn't auto-create
+      // that mirror; emit the regular index (mostly a no-op for ANN) and
+      // tell the user.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[forge:push:sqlite] index '${name}' uses method:'vector' — SQLite ` +
+        `vector indexes need sqlite-vec (CREATE VIRTUAL TABLE … USING vec0). ` +
+        `forge-orm doesn't auto-create the vec0 mirror; do it manually if you ` +
+        `need ANN search, or use brute-force JSON-array scans.`,
+      );
+    }
+    if (i.method === 'spatial') {
+      // SQLite's spatial index family is SpatiaLite's R*Tree virtual table,
+      // created via `SELECT CreateSpatialIndex('tbl', 'col')` — that's a
+      // SELECT, not a CREATE INDEX statement, so it bypasses the DDL path.
+      // The SQLite adapter detects geoPoint fields at connect() and runs
+      // CreateSpatialIndex() against any column with method:'spatial'.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[forge:push:sqlite] index '${name}' uses method:'spatial' — SQLite ` +
+        `spatial indexes are created by the adapter at runtime via SpatiaLite ` +
+        `(or skipped in fallback mode). The CREATE INDEX statement below ` +
+        `lands as a plain b-tree, which is mostly a no-op for geo queries.`,
+      );
+    } else if (i.method && i.method !== 'btree') {
       // eslint-disable-next-line no-console
       console.warn(
         `[forge:push:sqlite] index '${name}' specifies method='${i.method}' — ` +
         `SQLite only supports BTREE. Method ignored.`,
+      );
+    }
+    if (i.visible === false || i.parser) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[forge:push:sqlite] index '${name}' uses MySQL-only fields ` +
+        `(visible / parser). Ignored on SQLite.`,
       );
     }
 

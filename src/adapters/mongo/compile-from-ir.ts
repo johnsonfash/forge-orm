@@ -115,8 +115,53 @@ function compileLeaf(
       out.$text = { $search: String(leaf.value) };
       return out;
     }
-    case 'jsonPath':
+    case 'jsonPath': {
+      // For Mongo, jsonPath is just dot-notation against the column. The IR
+      // already separates path + subOp; emit the dotted key with the matching
+      // Mongo operator.
+      if (!leaf.jsonPath) return out;
+      const dotted = [dbKey, ...leaf.jsonPath.path].join('.');
+      const op = leaf.jsonPath.subOp;
+      const v = leaf.value;
+      if (op === 'eq') out[dotted] = v;
+      else if (op === 'ne')  out[dotted] = { $ne:  v };
+      else if (op === 'lt')  out[dotted] = { $lt:  v };
+      else if (op === 'lte') out[dotted] = { $lte: v };
+      else if (op === 'gt')  out[dotted] = { $gt:  v };
+      else if (op === 'gte') out[dotted] = { $gte: v };
+      else if (op === 'in')  out[dotted] = { $in: v as unknown[] };
+      else if (op === 'contains') out[dotted] = { $regex: escapeRegex(String(v)) };
+      else if (op === 'has') out[dotted] = v;   // array element equality
       return out;
+    }
+    case 'near': {
+      const point = leaf.value as { lng: number; lat: number; withinMeters?: number };
+      // Mongo's $near requires a 2dsphere index on the field; the schema
+      // declares it via `indexes: [{ keys: { col: 1 }, method: 'spatial' }]`
+      // which forge translates to 2dsphere at push.
+      const nearQuery: Record<string, any> = {
+        $geometry: { type: 'Point', coordinates: [point.lng, point.lat] },
+      };
+      if (point.withinMeters !== undefined) {
+        nearQuery.$maxDistance = point.withinMeters;
+      }
+      out[dbKey] = { $near: nearQuery };
+      return out;
+    }
+    case 'withinPolygon': {
+      const polygon = (leaf.value as { polygon: Array<{ lng: number; lat: number }> }).polygon;
+      out[dbKey] = {
+        $geoWithin: {
+          $geometry: {
+            type: 'Polygon',
+            // GeoJSON Polygon coordinates: [ outer-ring [, inner-rings…] ].
+            // Each ring is [lng, lat] pairs, closed.
+            coordinates: [polygon.map((v) => [v.lng, v.lat])],
+          },
+        },
+      };
+      return out;
+    }
   }
 }
 

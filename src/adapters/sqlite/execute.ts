@@ -89,6 +89,12 @@ export async function executeSqliteSelect(
   const raw = await withSqliteErrors(() => exec.all(artifact.sql, encodeParams(artifact.params)));
   let rows = raw.map((r) => decodeRow(model, r));
   if (node.distinct?.length) rows = dedupeBy(rows, node.distinct);
+  // Fallback geoPoint refinement — exact-circle + sort post-process.
+  const { extractFallbackGeoOps, applyHaversinePostFilter } = await import('../shared/haversine');
+  const geoOps = extractFallbackGeoOps(node, model);
+  if (geoOps.near || geoOps.nearTo || geoOps.withinPolygon) {
+    rows = applyHaversinePostFilter(rows, geoOps.near, geoOps.nearTo, geoOps.withinPolygon);
+  }
   if (node.projection?.counts?.length) await applyRelationCounts(exec, rows, model, node.projection.counts);
   if (node.hydration?.length) await hydrate(exec, rows, model, node.hydration);
   return rows;

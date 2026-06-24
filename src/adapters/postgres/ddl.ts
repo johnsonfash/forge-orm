@@ -1,6 +1,7 @@
 import type { FieldDef, IndexDef, ModelDef, RelationDef } from '../../schema/types';
 import type { SchemaMap } from '../../schema';
 import { PostgresDialect, type Dialect } from './dialect';
+import { mongoToSqlWhere } from '../shared/mongo-to-sql-where';
 
 // DDL generator — turns a Forge schema into the SQL statements that build the
 // physical Postgres tables, constraints, and indexes.
@@ -301,12 +302,12 @@ function buildIndexes(d: Dialect, m: ModelDef<any>): DDLStatement[] {
   const table = m.collection;
   const out: DDLStatement[] = [];
   for (const idx of m.indexes ?? []) {
-    out.push(buildIndex(d, table, idx));
+    out.push(buildIndex(d, table, idx, m));
   }
   return out;
 }
 
-function buildIndex(d: Dialect, table: string, idx: IndexDef): DDLStatement {
+function buildIndex(d: Dialect, table: string, idx: IndexDef, m: ModelDef<any>): DDLStatement {
   // Name fallback: use idx.name when supplied; otherwise derive from columns
   // (or 'expr' for expression indexes, since there are no column names then).
   const cols = Object.keys(idx.keys);
@@ -314,9 +315,24 @@ function buildIndex(d: Dialect, table: string, idx: IndexDef): DDLStatement {
   const uniqueKW = idx.unique ? 'UNIQUE ' : '';
 
   // USING <method> — gin / gist / brin / hash. Omitted when unset or
-  // 'btree' (PG's default). The DB raises a clear error if the method
-  // isn't installed (e.g. gin/gist without the extensions).
-  const method = idx.method && idx.method !== 'btree' ? ` USING ${idx.method}` : '';
+  // 'btree' (PG's default). 'spatial' is the cross-dialect alias for
+  // "spatial index family"; on PG it resolves to GIST (PostGIS-native).
+  // 'vector' resolves to HNSW with the field's distance-metric opclass
+  // (pgvector — needs `CREATE EXTENSION vector`).
+  let resolvedMethod: string | undefined = idx.method;
+  let vectorOpsClass: string | undefined;
+  if (idx.method === 'spatial') {
+    resolvedMethod = 'gist';
+  } else if (idx.method === 'vector') {
+    resolvedMethod = 'hnsw';
+    const firstCol = Object.keys(idx.keys ?? {})[0];
+    const fdef = firstCol ? (m.fields[firstCol] as any) : undefined;
+    const metric = fdef?.vector?.metric ?? 'cosine';
+    vectorOpsClass = metric === 'cosine' ? 'vector_cosine_ops'
+                    : metric === 'l2'     ? 'vector_l2_ops'
+                    : /* dot */              'vector_ip_ops';
+  }
+  const method = resolvedMethod && resolvedMethod !== 'btree' ? ` USING ${resolvedMethod}` : '';
 
   // Payload — either an arbitrary expression (CREATE INDEX … ((<expr>)))
   // or a column list. For column lists with the btree method we still
@@ -330,8 +346,9 @@ function buildIndex(d: Dialect, table: string, idx: IndexDef): DDLStatement {
       .map((c) => {
         const dir = idx.keys[c];
         if (isBtree && dir === 'text') return `${d.quoteIdent(c)} text_pattern_ops`;
-        // Non-btree methods don't take ASC/DESC and won't accept the
-        // text_pattern_ops opclass.
+        // pgvector requires the metric opclass alongside the column:
+        // `embedding vector_cosine_ops`.
+        if (vectorOpsClass) return `${d.quoteIdent(c)} ${vectorOpsClass}`;
         if (!isBtree) return d.quoteIdent(c);
         return `${d.quoteIdent(c)} ${dir === -1 ? 'DESC' : 'ASC'}`;
       })
@@ -346,19 +363,55 @@ function buildIndex(d: Dialect, table: string, idx: IndexDef): DDLStatement {
     : '';
 
   // WHERE — partial index predicate. Mongo callers pass an object via
-  // partialFilterExpression / where; SQL needs a raw SQL string. When an
-  // object is passed accidentally to a SQL schema it would be wrong to
-  // try to translate Mongo operators ($type / $exists / …) verbatim —
-  // skip it with a warning instead of producing wrong SQL.
+  // partialFilterExpression / where; SQL prefers a raw SQL string. When a
+  // Mongo-shaped object is passed on a SQL schema, attempt to translate
+  // the common operators ($eq / $ne / $in / $exists / $type / etc.) into
+  // SQL via the shared mongo-to-sql translator. Anything we can't
+  // translate falls through to a warn-and-skip so the user knows to write
+  // raw SQL.
   let whereClause = '';
   if (typeof idx.where === 'string' && idx.where.trim()) {
     whereClause = ` WHERE ${idx.where}`;
   } else if (idx.where && typeof idx.where === 'object') {
+    const translated = mongoToSqlWhere(idx.where as Record<string, unknown>, {
+      quoteIdent: d.quoteIdent,
+      dialect: 'postgres',
+    });
+    if (translated) {
+      whereClause = ` WHERE ${translated}`;
+    } else {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[forge:push:postgres] index '${name}' has an object-form 'where' ` +
+        `that uses operators outside the translator's coverage. Pass a raw ` +
+        `SQL string in 'where' or simplify the object. Filter omitted.`,
+      );
+    }
+  } else if (idx.partialFilterExpression) {
+    // Cross-dialect schemas may pass partialFilterExpression instead of `where`.
+    // Translate it the same way so a single Mongo-shaped filter drives both
+    // dialects.
+    const translated = mongoToSqlWhere(idx.partialFilterExpression, {
+      quoteIdent: d.quoteIdent,
+      dialect: 'postgres',
+    });
+    if (translated) whereClause = ` WHERE ${translated}`;
+  }
+
+  // MySQL-only fields — warn loudly if set on Postgres so a portable schema
+  // can drop them.
+  if (idx.visible === false) {
     // eslint-disable-next-line no-console
     console.warn(
-      `[forge:push:postgres] index '${name}' has object-form 'where' — ` +
-      `expected a raw SQL string on Postgres. The partial filter is being ` +
-      `omitted. (Use partialFilterExpression for Mongo and where: 'sql…' for PG.)`,
+      `[forge:push:postgres] index '${name}' sets 'visible: false' — Postgres ` +
+      `doesn't have invisible indexes. Ignored.`,
+    );
+  }
+  if (idx.parser) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[forge:push:postgres] index '${name}' sets 'parser' — Postgres uses ` +
+      `to_tsvector/configuration, not FULLTEXT parser plugins. Ignored.`,
     );
   }
 

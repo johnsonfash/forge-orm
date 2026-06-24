@@ -32,6 +32,19 @@ export async function executeSelect(
   model: ModelDef<any>,
   opts: ExecOpts = {},
 ): Promise<any[]> {
+  // Geo / vector bridge — `orderBy: { col: { nearTo } }` routes through an
+  // aggregation pipeline:
+  //   • geoPoint → $geoNear (sphere distances, `_distanceMeters`)
+  //   • vector   → $vectorSearch (Atlas only, `_distance`)
+  const nearToEntry = node.orderBy?.find((e) => e.nearTo);
+  if (nearToEntry) {
+    const fld = (model.fields as any)?.[nearToEntry.field];
+    if (fld?.kind === 'vector') {
+      return executeSelectWithVectorSearch(node, model, nearToEntry, opts);
+    }
+    return executeSelectWithGeoNear(node, model, nearToEntry, opts);
+  }
+
   const artifact = compileSelect(node, model);
   const coll = dbClient.db.collection(artifact.collection);
   const filter = artifact.args.filter ?? {};
@@ -62,6 +75,115 @@ export async function executeSelect(
     out = dedupeBy(out, node.distinct);
   }
 
+  await applyProjectionAndHydration(out, model, node, opts.session);
+  return out;
+}
+
+/**
+ * `orderBy: { col: { nearTo } }` is implemented via the $geoNear aggregation
+ * stage (which MUST be the first stage). $geoNear emits a per-doc distance
+ * field — we ask for `_distanceMeters` so the rows shape matches what the
+ * SQL adapters produce.
+ *
+ * If the SELECT also has a `near` filter on the same column, we drop it
+ * (the $near used in a find/$near query can't appear inside aggregate
+ * filters — but $geoNear's `maxDistance` covers the same semantic, so we
+ * lift it onto the stage). Any other where clauses go into a $match stage
+ * that runs after $geoNear.
+ */
+async function executeSelectWithGeoNear(
+  node: SelectNode,
+  model: ModelDef<any>,
+  nearToEntry: NonNullable<SelectNode['orderBy']>[number],
+  opts: ExecOpts,
+): Promise<any[]> {
+  const artifact = compileSelect(node, model);
+  const coll = dbClient.db.collection(artifact.collection);
+  const sessOpt = opts.session ? { session: opts.session } : undefined;
+
+  // Strip any { col: { $near: …} } from the artifact filter — its semantics
+  // are covered by the $geoNear stage. Promote $maxDistance to the stage.
+  const filter = { ...(artifact.args.filter ?? {}) };
+  const dbField = nearToEntry.field;
+  let maxDistance: number | undefined;
+  if (filter[dbField]?.$near) {
+    const n = filter[dbField].$near;
+    maxDistance = n.$maxDistance;
+    delete filter[dbField];
+  }
+  const point = nearToEntry.nearTo as { lng: number; lat: number };
+  const geoNearStage: any = {
+    $geoNear: {
+      near: { type: 'Point', coordinates: [point.lng, point.lat] },
+      distanceField: '_distanceMeters',
+      spherical: true,
+      key: dbField,
+    },
+  };
+  if (maxDistance !== undefined) geoNearStage.$geoNear.maxDistance = maxDistance;
+  if (Object.keys(filter).length > 0) geoNearStage.$geoNear.query = filter;
+
+  const options = artifact.args.options ?? {};
+  const pipeline: any[] = [geoNearStage];
+  if (options.skip) pipeline.push({ $skip: options.skip });
+  if (options.limit) pipeline.push({ $limit: options.limit });
+  if (options.projection) pipeline.push({ $project: options.projection });
+
+  const docs = await coll.aggregate(pipeline, sessOpt).toArray();
+  const ascending = nearToEntry.direction !== 'desc';
+  if (!ascending) docs.reverse(); // $geoNear returns ascending; flip for desc
+
+  let out = docs.map((r) => decodeRow(model, r));
+  if (node.distinct?.length) out = dedupeBy(out, node.distinct);
+  await applyProjectionAndHydration(out, model, node, opts.session);
+  return out;
+}
+
+/**
+ * `orderBy: { col: { nearTo: [vector] } }` on a vector field — routes to
+ * Atlas Vector Search via the $vectorSearch aggregation stage. Atlas-only;
+ * on community / self-hosted Mongo this query will error at the server.
+ *
+ * Required infrastructure (created out-of-band via Atlas):
+ *   db.<col>.createSearchIndex({
+ *     mappings: { dynamic: false, fields: { embedding: { type: 'knnVector', dimensions, similarity } } }
+ *   })
+ */
+async function executeSelectWithVectorSearch(
+  node: SelectNode,
+  model: ModelDef<any>,
+  nearToEntry: NonNullable<SelectNode['orderBy']>[number],
+  opts: ExecOpts,
+): Promise<any[]> {
+  const artifact = compileSelect(node, model);
+  const coll = dbClient.db.collection(artifact.collection);
+  const sessOpt = opts.session ? { session: opts.session } : undefined;
+  const dbField = nearToEntry.field;
+  const v = nearToEntry.nearTo as { vector: number[] };
+  const limit = (artifact.args.options as any)?.limit ?? 100;
+
+  const stage: any = {
+    $vectorSearch: {
+      index: `${dbField}_vector_index`,   // Atlas search index name; configurable below
+      path: dbField,
+      queryVector: v.vector,
+      numCandidates: Math.max(limit * 10, 50),
+      limit,
+    },
+  };
+  const filter = artifact.args.filter ?? {};
+  if (Object.keys(filter).length > 0) stage.$vectorSearch.filter = filter;
+
+  const pipeline: any[] = [
+    stage,
+    { $set: { _distance: { $meta: 'vectorSearchScore' } } },
+  ];
+  const options = artifact.args.options ?? {};
+  if (options.projection) pipeline.push({ $project: options.projection });
+
+  const docs = await coll.aggregate(pipeline, sessOpt).toArray();
+  let out = docs.map((r) => decodeRow(model, r));
+  if (node.distinct?.length) out = dedupeBy(out, node.distinct);
   await applyProjectionAndHydration(out, model, node, opts.session);
   return out;
 }

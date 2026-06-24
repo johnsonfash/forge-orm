@@ -23,8 +23,32 @@ export function buildOrderBy(orderBy: any): OrderByEntry[] | undefined {
         out.push({ field: key, direction: v === 'desc' ? 'desc' : 'asc' });
         continue;
       }
-      // Object form: { sort, nulls } — or relation-scoped order.
+      // Object form: { sort, nulls } — or geo nearTo — or relation order.
       if (typeof v === 'object') {
+        // Geo near-to ordering: `{ location: { nearTo: { lng, lat } } }`.
+        // Vector near-to ordering: `{ embedding: { nearTo: [0.1, 0.2, ...] } }`.
+        // Both produce a synthetic `_distanceMeters` (geo) or `_distance` (vector) field.
+        if (v.nearTo) {
+          if (Array.isArray(v.nearTo)) {
+            // Vector form — store as { vector } so the OrderByEntry stays a
+            // single shape; the SELECT compiler resolves by field kind.
+            out.push({
+              field: key,
+              direction: v.direction === 'desc' ? 'desc' : 'asc',
+              nearTo: { vector: v.nearTo } as any,
+            });
+            continue;
+          }
+          if (typeof v.nearTo === 'object'
+              && typeof v.nearTo.lng === 'number' && typeof v.nearTo.lat === 'number') {
+            out.push({
+              field: key,
+              direction: v.direction === 'desc' ? 'desc' : 'asc',
+              nearTo: { lng: v.nearTo.lng, lat: v.nearTo.lat },
+            });
+            continue;
+          }
+        }
         if (typeof v.sort === 'string') {
           const entry: OrderByEntry = {
             field: key,

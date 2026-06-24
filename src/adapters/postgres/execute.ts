@@ -47,6 +47,16 @@ export async function executePgSelect(
   let out = rows;
   if (node.distinct?.length) out = dedupeBy(out, node.distinct);
 
+  // Fallback geoPoint post-processing — when a `near` filter or `nearTo`
+  // orderBy references a fallback-mode geo column, the SQL emitted a bbox
+  // prefilter only (over-inclusive). Refine to the exact circle + annotate
+  // _distanceMeters in app.
+  const { extractFallbackGeoOps, applyHaversinePostFilter } = await import('../shared/haversine');
+  const ops = extractFallbackGeoOps(node, model);
+  if (ops.near || ops.nearTo || ops.withinPolygon) {
+    out = applyHaversinePostFilter(out, ops.near, ops.nearTo, ops.withinPolygon);
+  }
+
   if (node.projection?.counts?.length) {
     await applyRelationCounts(exec, out, model, node.projection.counts);
   }
@@ -55,6 +65,7 @@ export async function executePgSelect(
   }
   return out;
 }
+
 
 // Reshape flat `__agg_<bucket>_<field>` aliases back into the Prisma-shape
 // nested payload `{ <by-cols>, _count: { ... }, _avg: { ... }, ... }`.

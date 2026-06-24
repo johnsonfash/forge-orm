@@ -186,6 +186,50 @@ export const f = {
 
   stringArray: () => make<string[], 'stringArray'>('stringArray'),
   intArray: () => make<number[], 'intArray'>('intArray'),
+
+  /**
+   * 2D geographic point — always WGS84 (SRID 4326) unless overridden. The
+   * JS-side shape is `{ lng: number; lat: number }`. Per-dialect storage:
+   *
+   *   • Mongo  — GeoJSON in a JSON field (auto-coerced to/from { lng, lat }).
+   *   • PG     — geography(Point, 4326) when PostGIS is installed. With
+   *              `{ fallback: true }`, JSON storage + Haversine queries.
+   *   • MySQL  — POINT NOT NULL SRID 4326 (8.0+). Built-in, no extension.
+   *   • SQLite — SpatiaLite geometry when the extension loads. Otherwise
+   *              JSON storage when `{ fallback: true }`.
+   *   • DuckDB — GEOMETRY (spatial extension auto-loaded since 0.9).
+   *   • MSSQL  — GEOGRAPHY (built-in since SQL Server 2008).
+   *
+   * Pair with `indexes: [{ keys: { col: 1 }, method: 'spatial' }]` to opt
+   * into the dialect's spatial index family.
+   */
+  geoPoint: (opts: { srid?: number; fallback?: boolean } = {}) => {
+    // make<> returns a Field<> whose .def carries the FieldDef; mutate the
+    // FieldDef directly so the geo block lands on the shared definition the
+    // schema layer reads downstream.
+    const fld = make<{ lng: number; lat: number }, 'geoPoint'>('geoPoint');
+    fld.def.geo = { srid: opts.srid ?? 4326, fallback: !!opts.fallback };
+    return fld;
+  },
+
+  /**
+   * Dense numeric vector — embedding storage. Pair with
+   * `indexes: [{ keys: { col: 1 }, method: 'vector' }]` to opt into the
+   * dialect's vector index family (HNSW where available).
+   *
+   *   const Doc = model('docs', {
+   *     id: f.id(),
+   *     embedding: f.vector(1536, { metric: 'cosine' }),
+   *   });
+   */
+  vector: (dims: number, opts: { metric?: 'cosine' | 'l2' | 'dot' } = {}) => {
+    if (!Number.isInteger(dims) || dims <= 0) {
+      throw new Error(`[forge] f.vector(dims): dims must be a positive integer, got ${dims}`);
+    }
+    const fld = make<number[], 'vector'>('vector');
+    fld.def.vector = { dims, metric: opts.metric ?? 'cosine' };
+    return fld;
+  },
 };
 
 // Returns an object usable both at runtime (`Role.OWNER === 'OWNER'`) and as a

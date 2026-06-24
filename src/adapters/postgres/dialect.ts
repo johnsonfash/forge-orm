@@ -5,7 +5,7 @@
 import type { FieldDef } from '../../schema/types';
 
 export interface Dialect {
-  readonly name: 'postgres' | 'mysql' | 'sqlite';
+  readonly name: 'postgres' | 'mysql' | 'sqlite' | 'duckdb' | 'mssql';
   // Quote an identifier (table / column / index name). PG uses double-quotes,
   // case-sensitive when quoted. We always quote.
   quoteIdent(name: string): string;
@@ -30,6 +30,95 @@ export interface Dialect {
     quotedColumn: string,
     paramExpr: string,
     ctx: { rawColumn: string; baseTable: string; quoteIdent: (s: string) => string },
+  ): string;
+  /**
+   * Per-field value expression for INSERT VALUES / UPDATE SET. Default
+   * behaviour is to bind the value as a positional parameter (`placeholder`),
+   * but special field kinds (geoPoint) need to wrap the parameter in a
+   * dialect-specific function. The default implementation in each dialect
+   * delegates to `placeholder` for non-special kinds.
+   */
+  valueExpr?(field: FieldDef, params: unknown[], value: unknown): string;
+  /**
+   * Compile a "near + within radius" filter against a geoPoint column.
+   * Returns a SQL boolean expression that's TRUE when the row is within
+   * `withinMeters` of the search point. Each dialect implements via its
+   * native distance function:
+   *   PG     → ST_DWithin(loc, ST_GeogFromText(...), N)
+   *   MySQL  → ST_Distance_Sphere(loc, ST_GeomFromText('POINT(lat lng)', 4326)) < N
+   *   SQLite → Distance(loc, MakePoint(lng, lat, 4326), 1) < N  (SpatiaLite)
+   *   DuckDB → ST_Distance(loc, ST_Point(lng, lat)) < N         (spatial ext)
+   *   MSSQL  → loc.STDistance(geography::STGeomFromText(...)) < N
+   * When `withinMeters` is undefined the clause becomes `TRUE` and the
+   * adapter relies on ordering alone (used by `orderBy: { nearTo: … }`).
+   */
+  geoNearClause?(
+    quotedCol: string,
+    field: FieldDef,
+    point: { lng: number; lat: number; withinMeters?: number },
+    params: unknown[],
+  ): string;
+  /**
+   * Compile a "distance to point" expression. Used as the `_distanceMeters`
+   * synthetic column when `orderBy: { col: { nearTo: { … } } }` is set.
+   */
+  geoDistanceExpr?(
+    quotedCol: string,
+    field: FieldDef,
+    point: { lng: number; lat: number },
+    params: unknown[],
+  ): string;
+  /**
+   * Compile a "point inside polygon" filter. Per dialect:
+   *   PG     → ST_Within(loc, ST_GeogFromText('SRID=4326;POLYGON((…))'))
+   *   MySQL  → ST_Within(loc, ST_GeomFromText('POLYGON((lat lng,…))', 4326))
+   *   SQLite → Within(loc, GeomFromText('POLYGON((…))', 4326))
+   *   DuckDB → ST_Within(loc, ST_GeomFromText('POLYGON((…))'))
+   *   MSSQL  → geography::STGeomFromText('POLYGON((…))', 4326).STContains(loc) = 1
+   */
+  geoWithinPolygonClause?(
+    quotedCol: string,
+    field: FieldDef,
+    polygon: Array<{ lng: number; lat: number }>,
+    params: unknown[],
+  ): string;
+  /**
+   * Compile a JSON path read into a comparable SQL expression. Per dialect:
+   *   PG     → (col->'a'->'b'->>'c')::numeric  (cast by operand type)
+   *   MySQL  → JSON_EXTRACT(col, '$.a.b.c')
+   *   SQLite → json_extract(col, '$.a.b.c')
+   *   DuckDB → json_extract(col, '$.a.b.c')
+   *   MSSQL  → JSON_VALUE(col, '$.a.b.c')
+   * `operand` is provided so the dialect can choose the right cast on
+   * dialects that need typed comparisons (PG mostly).
+   */
+  jsonPathExpr?(quotedCol: string, path: string[], operand: unknown): string;
+  /**
+   * Compile a "vector near + optional withinDistance" filter. Per dialect:
+   *   PG     → ($col <=> $vec) < $d   (cosine via pgvector — also <-> for L2, <#> for dot)
+   *   MySQL  → DISTANCE($col, $vec, 'COSINE') < $d
+   *   SQLite → $col MATCH vec_f32($vec) — via sqlite-vec virtual table
+   *   DuckDB → array_cosine_distance($col, $vec) < $d
+   *   MSSQL  → VECTOR_DISTANCE('cosine', $col, $vec) < $d
+   *   Mongo  → routed to $vectorSearch aggregate stage (not via where)
+   * When withinDistance is undefined the clause becomes TRUE; the
+   * orderBy: { col: { nearTo: vec } } drives the ranking.
+   */
+  vectorDistanceClause?(
+    quotedCol: string,
+    field: FieldDef,
+    query: { vector: number[]; withinDistance?: number },
+    params: unknown[],
+  ): string;
+  /**
+   * Compile a "distance to vector" expression. Used as the `_distance`
+   * synthetic column for vector orderBy `nearTo`.
+   */
+  vectorDistanceExpr?(
+    quotedCol: string,
+    field: FieldDef,
+    vector: number[],
+    params: unknown[],
   ): string;
 }
 
@@ -78,6 +167,19 @@ export const PostgresDialect: Dialect = {
       case 'embedMany':  return 'jsonb';
       case 'stringArray':return 'text[]';
       case 'intArray':   return 'integer[]';
+      case 'geoPoint': {
+        if (field.geo?.fallback) return 'jsonb';
+        const srid = field.geo?.srid ?? 4326;
+        return `geography(Point, ${srid})`;
+      }
+      case 'vector': {
+        // pgvector. The dims must match the embedding model's output (1536
+        // for OpenAI text-embedding-3-small, 1024 for Cohere embed-english,
+        // etc.). The extension is installed via `CREATE EXTENSION vector;`.
+        const dims = field.vector?.dims;
+        if (!dims) throw new Error(`[forge:pg] vector field requires { dims }`);
+        return `vector(${dims})`;
+      }
     }
   },
 
@@ -94,5 +196,61 @@ export const PostgresDialect: Dialect = {
 
   searchClause(quotedColumn, paramExpr, _ctx) {
     return `to_tsvector('simple', ${quotedColumn}) @@ plainto_tsquery('simple', ${paramExpr})`;
+  },
+
+  valueExpr(field, params, value) {
+    if (field.kind === 'geoPoint' && !field.geo?.fallback && value && typeof value === 'object') {
+      const v = value as { lng: number; lat: number };
+      const srid = field.geo?.srid ?? 4326;
+      const ph = this.placeholder(params, `SRID=${srid};POINT(${v.lng} ${v.lat})`);
+      return `ST_GeogFromText(${ph})`;
+    }
+    if (field.kind === 'vector' && Array.isArray(value)) {
+      // pgvector accepts the bracketed text form `[0.1, 0.2, …]`.
+      const ph = this.placeholder(params, `[${(value as number[]).join(',')}]`);
+      return `${ph}::vector`;
+    }
+    return this.placeholder(params, value);
+  },
+
+  geoNearClause(quotedCol, field, point, params) {
+    const srid = field.geo?.srid ?? 4326;
+    const ewkt = `SRID=${srid};POINT(${point.lng} ${point.lat})`;
+    const pp = this.placeholder(params, ewkt);
+    if (point.withinMeters === undefined) return 'TRUE';
+    const wm = this.placeholder(params, point.withinMeters);
+    return `ST_DWithin(${quotedCol}, ST_GeogFromText(${pp}), ${wm})`;
+  },
+
+  geoDistanceExpr(quotedCol, field, point, params) {
+    const srid = field.geo?.srid ?? 4326;
+    const ewkt = `SRID=${srid};POINT(${point.lng} ${point.lat})`;
+    const pp = this.placeholder(params, ewkt);
+    return `ST_Distance(${quotedCol}, ST_GeogFromText(${pp}))`;
+  },
+
+  vectorDistanceClause(quotedCol, field, query, params) {
+    const metric = field.vector?.metric ?? 'cosine';
+    const op = metric === 'cosine' ? '<=>' : metric === 'l2' ? '<->' : '<#>';
+    const ph = this.placeholder(params, `[${query.vector.join(',')}]`);
+    if (query.withinDistance === undefined) return 'TRUE';
+    const wd = this.placeholder(params, query.withinDistance);
+    return `(${quotedCol} ${op} ${ph}::vector) < ${wd}`;
+  },
+
+  vectorDistanceExpr(quotedCol, field, vector, params) {
+    const metric = field.vector?.metric ?? 'cosine';
+    const op = metric === 'cosine' ? '<=>' : metric === 'l2' ? '<->' : '<#>';
+    const ph = this.placeholder(params, `[${vector.join(',')}]`);
+    return `(${quotedCol} ${op} ${ph}::vector)`;
+  },
+
+  geoWithinPolygonClause(quotedCol, field, polygon, params) {
+    const srid = field.geo?.srid ?? 4326;
+    const ring = polygon.map((v) => `${v.lng} ${v.lat}`).join(', ');
+    const ewkt = `SRID=${srid};POLYGON((${ring}))`;
+    const pp = this.placeholder(params, ewkt);
+    // ST_Within works on the geography type for cast-friendly comparison.
+    return `ST_Within(${quotedCol}::geometry, ST_GeogFromText(${pp})::geometry)`;
   },
 };

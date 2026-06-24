@@ -19,6 +19,14 @@ export type { MysqlDriver, MysqlQueryable } from './adapters/mysql/driver';
 //   createDb({ schema, driver: mongoDriver(new MongoClient(uri, opts), 'mydb') })
 export { mongoDriver, isMongoDriver } from './adapters/mongo/driver';
 export type { MongoDriver } from './adapters/mongo/driver';
+// DuckDB — embedded analytics DB. Default driver wraps @duckdb/node-api.
+//   createDb({ schema, driver: duckdbDriver(connection) })
+export { duckdbDriver, isDuckdbDriver } from './adapters/duckdb/driver';
+export type { DuckdbDriver, DuckdbQueryable } from './adapters/duckdb/driver';
+// SQL Server — T-SQL. Default driver wraps the `mssql` package (Tedious).
+//   createDb({ schema, driver: mssqlDriver(pool) })
+export { mssqlDriver, isMssqlDriver } from './adapters/mssql/driver';
+export type { MssqlDriver, MssqlQueryable } from './adapters/mssql/driver';
 export type { Adapter, AdapterKind, AdapterCapabilities, DoctorReport } from './adapters/types';
 export { ForgeMissingDriverError } from './adapters/missing-driver';
 export { detectAdapterKind } from './adapters/detect';

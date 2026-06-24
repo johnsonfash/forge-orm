@@ -1,8 +1,355 @@
 # Changelog
 
 All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
-multi-database wrapper for MongoDB, PostgreSQL, MySQL, and SQLite - one code
-path, no codegen, no external query engine.
+multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
+SQL Server — one code path, no codegen, no external query engine.
+
+## 2.3.0 — DuckDB + MSSQL adapters, end-to-end geo, JSON path queries, vector search
+
+**Feature release.** Two new dialects, a complete geo layer (schema, index,
+typed `where`/`orderBy`, fallback mode, doctor probe, extension auto-install),
+typed JSON path queries, and typed vector / similarity search. The wrapper
+surface stays the same: every new feature works through `findMany` /
+`create` / etc. with the same code on every dialect.
+
+### Two new database adapters
+
+**DuckDB.** Embedded analytical OLAP database — PG-compatible SQL with no
+FK enforcement. Bundled `spatial` extension auto-loads at connect; `vss`
+extension is available for vector search.
+
+```ts
+import { createDb, duckdbDriver } from 'forge-orm';
+import { DuckDBInstance } from '@duckdb/node-api';
+
+const instance = await DuckDBInstance.create('analytics.duckdb');
+const connection = await instance.connect();
+const db = await createDb({ schema, driver: duckdbDriver(connection) });
+```
+
+URL prefix: `duckdb:` (e.g. `duckdb:./data.duckdb`, `duckdb::memory:`).
+Capabilities: ACID transactions, parallel scans, columnar storage. No
+foreign-key enforcement (forge's app-side cascade walker handles it),
+no `SAVEPOINT` (migration failures abort the batch).
+
+**SQL Server (MSSQL).** Cross-platform Linux/Windows. On ARM Macs the
+`doctor` probe + `smoke:drivers` script default to `azure-sql-edge`
+(multi-arch); on x86 the full `mssql/server:2022-latest` image works
+natively.
+
+```ts
+import { createDb, mssqlDriver } from 'forge-orm';
+import sql from 'mssql';
+
+const pool = await sql.connect({ server: 'localhost', user: 'sa', password: '…', database: 'app' });
+const db = await createDb({ schema, driver: mssqlDriver(pool) });
+```
+
+URL prefix: `mssql:` / `sqlserver:`. Capabilities: ACID, native cascades,
+`GEOGRAPHY` built-in, `VECTOR(N)` on SQL Server 2025 / Azure SQL. T-SQL
+specifics handled by the compile layer:
+
+- `[brackets]` for identifiers, `@p1,@p2,…` named placeholders
+- `LIMIT/OFFSET` → `OFFSET … ROWS FETCH NEXT … ROWS ONLY`
+- `RETURNING *` → `OUTPUT INSERTED.*` / `OUTPUT DELETED.*`
+- PG's `ctid` single-row trick → `[pk] IN (SELECT TOP 1 [pk] …)`
+- `IF NOT EXISTS` wrapped in `IF NOT EXISTS (SELECT 1 FROM sys.tables …) BEGIN … END`
+- `CREATE EXTENSION` replaced with the equivalent built-in feature
+
+Upsert (`ON CONFLICT`) is **not** supported in 2.3 — the T-SQL `MERGE`
+rewrite lands in 2.4. Until then, do `findFirst → update / create` at the
+app layer when targeting MSSQL.
+
+### Driver smoke harness — verify every driver installs + connects in isolation
+
+`scripts/driver-smoke.mjs` creates a throwaway tmpdir, `npm install`s every
+driver forge-orm supports plus `testcontainers`, runs a minimal `connect →
+SELECT 1 → close` per driver, prints a results table, and tears the tmpdir
+and any running containers down. Useful for confirming a Node upgrade or
+a published forge-orm release won't break against the underlying clients
+in the wild.
+
+```bash
+npm run smoke:drivers              # everything
+npm run smoke:drivers -- --only=pg # filter by substring(s)
+npm run smoke:drivers -- --keep    # leave tmpdir for inspection
+npm run smoke:drivers -- --verbose # surface npm install output
+```
+
+Covers: `better-sqlite3`, `@libsql/client`, `@duckdb/node-api` (embedded);
+`pg`, `postgres` (porsager), `mysql2`, `mariadb`, `mongodb`, `mssql`
+(server, via Testcontainers); `expo-sqlite`, `@op-engineering/op-sqlite`
+(install-only — exec needs an iOS/Android runtime); `@planetscale/database`
+(skipped without `PLANETSCALE_URL`).
+
+ARM Macs: the MSSQL container auto-swaps to `azure-sql-edge` (multi-arch)
+instead of the AMD64-only `mssql/server:2022`. First-run cost is dominated
+by Docker image pulls (~3-6 min cold, ~15s warm).
+
+### Geo — `f.geoPoint()`, spatial indexes, typed near / nearTo / withinPolygon
+
+Schema-level geo, end-to-end. The same code targets MongoDB, Postgres
+(with PostGIS), MySQL 8 spatial, SQLite + SpatiaLite, DuckDB spatial, and
+SQL Server's `GEOGRAPHY`.
+
+```ts
+const Place = model('places', {
+  id: f.id(),
+  name: f.string(),
+  location: f.geoPoint(),                       // WGS84 / SRID 4326
+}, {
+  indexes: [{ keys: { location: 1 }, method: 'spatial' }],
+});
+
+// Insert — always { lng, lat }. Coord-order quirks handled by the compiler.
+await db.place.create({
+  data: { id: 'a', name: 'Lekki', location: { lng: 3.4505, lat: 6.4416 } },
+});
+
+// "Find places within 5 km of me, closest first, top 20".
+const nearby = await db.place.findMany({
+  where:   { location: { near: { lng: 3.45, lat: 6.44, withinMeters: 5000 } } },
+  orderBy: { location: { nearTo: { lng: 3.45, lat: 6.44 } } },
+  take: 20,
+});
+// nearby[0]._distanceMeters ≈ 0  (meters from the search point)
+```
+
+**Per-dialect compile**:
+
+| Dialect | Column | Spatial index | `near` filter | `nearTo` orderBy |
+|---|---|---|---|---|
+| Mongo | GeoJSON in JSON | `2dsphere` | `$near + $maxDistance` | `$geoNear` aggregate (auto-routed) |
+| Postgres | `geography(Point, 4326)` | `USING GIST` (PostGIS) | `ST_DWithin(...)` | `ST_Distance(...) AS _distanceMeters` |
+| MySQL 8 | `POINT NOT NULL SRID 4326` | `CREATE SPATIAL INDEX` | `ST_Distance_Sphere(...) < N` | `ST_Distance_Sphere(...) AS _distanceMeters` |
+| SQLite | `BLOB` (SpatiaLite) | virtual `idx_<tbl>_<col>` | `Distance(..., 1) < N` | `Distance(..., 1) AS _distanceMeters` |
+| DuckDB | `GEOMETRY` (spatial ext) | `USING RTREE` | `ST_Distance_Sphere(...) < N` | `ST_Distance_Sphere(...) AS _distanceMeters` |
+| MSSQL | `GEOGRAPHY` | `CREATE SPATIAL INDEX` | `col.STDistance(...) < N` | `col.STDistance(...) AS _distanceMeters` |
+
+**Polygon containment**:
+
+```ts
+const inside = await db.place.findMany({
+  where: {
+    location: {
+      withinPolygon: [
+        { lng: 3.20, lat: 6.35 },
+        { lng: 3.60, lat: 6.35 },
+        { lng: 3.40, lat: 6.55 },        // 3+ vertices; ring auto-closes
+      ],
+    },
+  },
+});
+```
+
+Compiles to `ST_Within` / `Within` / `STContains` / `$geoWithin` per
+dialect. Fallback mode emits a bbox prefilter from the polygon's axis-
+aligned envelope and runs ray-casting point-in-polygon in app — concave
+polygons work correctly.
+
+**Fallback mode** for environments without the spatial extension:
+
+```ts
+location: f.geoPoint({ fallback: true }),    // JSON storage + Haversine
+```
+
+Column becomes JSON `{lng, lat}`. SQL emits a degrees-radius bbox
+prefilter on the JSON-extracted lng/lat, and the adapter runs an exact
+Haversine refinement + sort in app. Slower than native (no index on JSON
+path; O(n) within bbox), but works without any extension. Fine for
+prototypes and small datasets; migrate to native when traffic justifies.
+
+The Haversine post-filter is wired into the Postgres, MySQL, SQLite,
+DuckDB, and MSSQL executors. The Mongo executor doesn't have a fallback
+mode (Mongo's 2dsphere is built-in).
+
+**`forge doctor` extension probe**:
+
+```bash
+$ forge doctor
+
+  Live capability probe:
+    ✓ Postgres 16.2 reachable
+    ⚠ PostGIS NOT installed
+           Install: CREATE EXTENSION postgis;
+    ⚠ pg_trgm NOT installed
+           Install: CREATE EXTENSION pg_trgm;
+```
+
+Per dialect, doctor connects (best-effort), reads the version + extension
+list, and prints actionable install commands. Failures don't raise — the
+probe stays optional so the env-only output is still useful when the DB
+is down.
+
+**`forge push --enable-extensions`**: when the schema declares geoPoint
+fields and you pass `--enable-extensions`, push issues
+`CREATE EXTENSION IF NOT EXISTS postgis;` before the table DDL. DuckDB
+always `LOAD spatial`s at connect time. SQLite tries `load_extension('mod_spatialite')`
+silently at connect time.
+
+**Mongo `nearTo` without `near`** auto-routes to a `$geoNear` aggregate
+pipeline (which would otherwise be a community-only no-op). Direction
+flipping (asc/desc) is honored.
+
+### JSON path queries — typed reads + comparisons on nested JSON
+
+The `jsonPath` op (reserved in the IR since 2.1) is now implemented across
+all six dialects. User-facing shape:
+
+```ts
+const Doc = model('docs', { id: f.id(), meta: f.json() });
+
+// Dotted-path navigation, with the same scalar comparison vocabulary as
+// regular `where`: eq / ne / gt / gte / lt / lte / contains / in / has.
+await db.doc.findMany({
+  where: { meta: { path: 'profile.age', gte: 18 } },
+});
+
+// Array indexing with `[N]` syntax.
+await db.doc.findMany({
+  where: { meta: { path: 'addresses[0].city', eq: 'Lagos' } },
+});
+
+// Pass an explicit segment array if you prefer.
+await db.doc.findMany({
+  where: { meta: { path: ['tags', '0'], eq: 'urgent' } },
+});
+
+// Substring on the extracted value.
+await db.doc.findMany({
+  where: { meta: { path: 'bio', contains: 'engineer' } },
+});
+```
+
+Per-dialect compile:
+
+- **PG** — `(col->'a'->'b'->>'c')::numeric` with auto-cast based on
+  operand type. Array indexes are emitted as numeric `->N` segments.
+- **MySQL** — `JSON_UNQUOTE(JSON_EXTRACT(col, '$.a.b.c'))`. UNQUOTE
+  unwraps the JSON-wrapped string so equality against a plain param works.
+- **SQLite** — `json_extract(col, '$.a.b.c')` (JSON1 extension; built-in
+  in modern builds).
+- **DuckDB** — `json_extract(col, '$.a.b.c')`.
+- **MSSQL** — `JSON_VALUE(col, '$.a.b.c')`.
+- **Mongo** — dotted-key form: `{ 'meta.profile.age': { $gte: 18 } }`.
+
+Works on `f.json()` / `f.embed()` / `f.embedMany()` / `f.stringArray()` /
+`f.intArray()` fields. Non-JSON fields raise a clear error.
+
+### Vector — `f.vector(dims)`, vector indexes, typed similarity search
+
+The same `near` / `nearTo` vocabulary as geo, applied to embedding vectors.
+Production-grade similarity search across PG (pgvector), MySQL 9.0+,
+SQLite (sqlite-vec), DuckDB (vss), MSSQL (SQL Server 2025 / Azure SQL),
+and Mongo (Atlas Vector Search).
+
+```ts
+const Doc = model('docs', {
+  id: f.id(),
+  body: f.text(),
+  embedding: f.vector(1536, { metric: 'cosine' }),    // OpenAI text-embedding-3-small
+}, {
+  indexes: [{ keys: { embedding: 1 }, method: 'vector' }],
+});
+
+await db.doc.create({
+  data: { id: 'a', body: 'cat', embedding: [0.1, 0.2, /* … 1536 floats … */] },
+});
+
+// "Top-10 nearest documents to my query vector, within 0.4 cosine distance."
+const matches = await db.doc.findMany({
+  where:   { embedding: { near: { vector: queryVec, withinDistance: 0.4 } } },
+  orderBy: { embedding: { nearTo: queryVec } },
+  take: 10,
+});
+// matches[0]._distance ≈ 0  (cosine distance to the query vector)
+```
+
+Metrics: `'cosine'` (default — most embedding models), `'l2'` (Euclidean),
+`'dot'` (inner product). Pick to match your embedding model's docs.
+
+**Per-dialect compile**:
+
+| Dialect | Column | Vector index | `near` filter | `nearTo` orderBy |
+|---|---|---|---|---|
+| Postgres | `vector(N)` (pgvector) | `USING hnsw (col vector_<metric>_ops)` | `(col <=> $vec) < $d` | `col <=> $vec AS _distance` |
+| MySQL 9 | `VECTOR(N)` | basic — exact only (community) | `DISTANCE(col, STRING_TO_VECTOR(...), 'COSINE') < $d` | `DISTANCE(...) AS _distance` |
+| SQLite | TEXT (JSON) | needs `sqlite-vec` vec0 virtual table (out-of-band) | brute-force / vec0 raw query | not portable |
+| DuckDB | `FLOAT[N]` | `USING HNSW` (vss extension) | `array_cosine_distance(col, [...]) < $d` | `array_cosine_distance(...) AS _distance` |
+| MSSQL | `VECTOR(N)` | `USING VECTOR WITH (algorithm = 'HNSW')` | `VECTOR_DISTANCE('cosine', col, ...) < $d` | `VECTOR_DISTANCE(...) AS _distance` |
+| Mongo | plain array | Atlas Search Index (createSearchIndex) | routed to `$vectorSearch` pipeline | routed to `$vectorSearch` pipeline |
+
+**Dimension validation**: `f.vector(1536)` rejects a 1024-dim query vector
+at IR-build time with a clear error — catches embedding-model mismatches
+before they hit the DB.
+
+**Extensions**:
+- PG: `CREATE EXTENSION vector;` — works on every managed PG host
+  (Supabase, Neon, RDS, Crunchy, …)
+- DuckDB: `INSTALL vss; LOAD vss;` — adapter auto-loads `spatial`; `vss`
+  is one extra `connection.run` away
+- SQLite: install `sqlite-vec` extension; the vec0 mirror table is
+  created out-of-band (forge doesn't manage it)
+- MySQL: 9.0+ has the type built-in; HeatWave Vector Store adds HNSW/IVF
+- MSSQL: SQL Server 2025 / Azure SQL only
+- Mongo: Atlas Vector Search (Atlas-only, not on-prem)
+
+When a method is unavailable on the target DB, the index emission warns
+clearly (e.g. "Mongo vector indexes live in Atlas Search, not createIndex
+— create via Atlas UI/CLI").
+
+### Other changes
+
+- **Schema linter (`forge doctor`)** now recognises `'vector'` and
+  `'spatial'` as portable methods and points users at the right install
+  command when the live DB lacks the extension.
+- **`AdapterKind`** widened to include `'duckdb' | 'mssql'`. The `Dialect`
+  interface's `name` union and the `SQLDialect` compile union widened to
+  match.
+- **`Dialect` gains** `valueExpr` (per-field insert/update wrapping for
+  geo + vector), `geoNearClause` / `geoDistanceExpr` / `geoWithinPolygonClause`
+  (geo compile hooks), `vectorDistanceClause` / `vectorDistanceExpr`
+  (vector compile hooks), `jsonPathExpr` (per-dialect JSON extraction).
+  All optional — default implementations live in PostgresDialect.
+- **Shared cross-adapter helpers** moved to `src/adapters/shared/`:
+  `haversine.ts` (great-circle distance + ray-casting point-in-polygon),
+  `mongo-to-sql-where.ts` (the where-tree translator from earlier work).
+- **`IndexMethod`** gains `'vector'`. `'spatial'` and `'vector'` are
+  cross-dialect aliases that resolve per-dialect to the native index
+  family.
+- **Soft-delete + restore artifacts carry `semanticOp`** (continued from
+  2.2.1) so OTel / audit pipelines can filter mutations by intent.
+- **MSSQL upsert** returns a clear NotImplemented error pointing at the
+  v2.4 MERGE rewrite, instead of silently falling back to a half-baked
+  INSERT.
+
+### Test posture
+
+- **439 unit tests** across 33 suites (was 354 in 2.2.1 — +85 new geo /
+  JSON path / vector / Phase-1-6 tests).
+- **Live regressions on DuckDB** for geo (`regression-geo-duckdb.ts` —
+  8/8 incl. polygon) and vector (`regression-vector-duckdb.ts` — 7/7
+  through the `vss` extension end-to-end).
+- All four existing dialect live integrations (Postgres, MySQL, SQLite,
+  Mongo) still green — no regressions from the unioned changes.
+- New driver smoke harness verifies every driver installs and connects
+  on a clean Node.
+
+### Migration from 2.2.x
+
+Drop-in. No breaking changes. The four new adapters and the new field
+kinds are additive; existing schemas keep compiling to the same SQL.
+The new `'vector'` index method is a no-op on dialects without vector
+support — it warns instead of erroring.
+
+If you're moving to DuckDB or MSSQL, install the driver and add the URL
+prefix to your connection string. If you're adopting geo, add the
+`f.geoPoint()` fields + `method: 'spatial'` index and run `forge doctor`
+to confirm the extensions are available. If you're adopting vector, add
+the `f.vector(dims, { metric })` fields + `method: 'vector'` and install
+the dialect's vector extension (e.g. `CREATE EXTENSION vector` for PG).
+
+
 
 ## 2.2.1 — drift detection for the new index shapes, plus a nested-write adapter bug
 
