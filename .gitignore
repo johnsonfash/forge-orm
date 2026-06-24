@@ -13,3 +13,6 @@ dist/
 
 # Wave 5c — generated drift/reconciliation migrations (transient in this demo repo)
 migrations/
+
+# Local npm pack artifacts (from `npm pack` / leftover publish residue)
+*.tgz
