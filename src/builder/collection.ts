@@ -1,5 +1,29 @@
 import type { ClientSession, Collection, Document } from 'mongodb';
-import { randomUUID } from 'crypto';
+// Use the WebCrypto global — present in browsers, Node 16+, Deno, Bun, Workers.
+// Falls back to a Math.random v4 layout only if WebCrypto is missing entirely
+// (which is exotic — older Node without --experimental-global-webcrypto). The
+// fallback is NOT cryptographically secure; in those environments install a
+// polyfill or upgrade to Node 16+.
+const randomUUID = (): string => {
+  const c: { randomUUID?: () => string; getRandomValues?: (a: Uint8Array) => Uint8Array } | undefined =
+    (globalThis as { crypto?: typeof globalThis.crypto }).crypto;
+  if (c?.randomUUID) return c.randomUUID();
+  if (c?.getRandomValues) {
+    const b = c.getRandomValues(new Uint8Array(16));
+    b[6] = (b[6]! & 0x0f) | 0x40;
+    b[8] = (b[8]! & 0x3f) | 0x80;
+    const h = [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+  }
+  let s = '';
+  for (let i = 0; i < 36; i++) {
+    if (i === 8 || i === 13 || i === 18 || i === 23) s += '-';
+    else if (i === 14) s += '4';
+    else if (i === 19) s += ((Math.random() * 4) | 0 | 8).toString(16);
+    else s += ((Math.random() * 16) | 0).toString(16);
+  }
+  return s;
+};
 import { dbClient } from '../adapters/mongo/client';
 import {
   CreateInput,
