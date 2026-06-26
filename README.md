@@ -69,10 +69,10 @@ Try forge-orm without installing anything — every example is one click away on
 | [Hono + PGlite REST API](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/05-hono-pglite-api) | Backend API, zero external DB |
 | [Next.js + PGlite full-stack](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/06-nextjs-pglite-fullstack) | App Router + Server Actions |
 
-| Needs a cloud VM | Why |
+| Auto-runs on Replit / CodeSandbox | Why |
 |---|---|
-| [DuckDB analytics](https://codespaces.new/johnsonfash/forge-orm-examples?devcontainer_path=.devcontainer/devcontainer.json) | `@duckdb/node-api` is a native addon — open in Codespaces, then `cd 03-duckdb-cli-needs-vm && npm i && npm run dev` |
-| [Bun + SQLite blog](https://codespaces.new/johnsonfash/forge-orm-examples?devcontainer_path=.devcontainer/devcontainer.json) | Bun's SQLite is native — open in Codespaces, install Bun, then `cd 07-bun-cli-needs-vm && bun run dev` |
+| [DuckDB analytics](https://replit.com/new/github/johnsonfash/forge-orm-examples) | `@duckdb/node-api` is a native addon — pick `03-duckdb-cli-needs-vm`, hit Run |
+| [Bun + SQLite blog](https://replit.com/new/github/johnsonfash/forge-orm-examples) | Bun's SQLite is native — pick `07-bun-cli-needs-vm`, hit Run |
 
 | Feature deep-dives | Pattern |
 |---|---|
