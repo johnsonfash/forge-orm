@@ -57,8 +57,48 @@ you usually have to drop to raw SQL for:
 
 ---
 
+## Sandbox / runnable examples
+
+Try forge-orm without installing anything — every example is one click away on StackBlitz:
+
+| Browser-runnable | One-liner |
+|---|---|
+| [SQLite browser todo](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/01-sqlite-browser-todo) | OPFS-persisted todo app, no server |
+| [Offline-first with sync outbox](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/02-sqlite-browser-offline-first) | Optimistic writes + drain loop |
+| [DuckDB analytics](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/03-duckdb-analytics-browser) | 5K-row aggregation in a tab |
+| [Node + SQLite CLI](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/04-node-sqlite-cli) | Smallest possible forge-orm program |
+| [Hono + PGlite REST API](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/05-hono-pglite-api) | Backend API, zero external DB |
+| [Next.js + PGlite full-stack](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/06-nextjs-pglite-fullstack) | App Router + Server Actions |
+| [Bun + SQLite blog](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/07-bun-sqlite-blog) | Bun's built-in SQLite, zero deps |
+
+| Feature deep-dives | Pattern |
+|---|---|
+| [Geo search](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/08-geo-search) | `geoPoint` + `nearTo` (PostGIS / Mongo / wasm fallback) |
+| [Vector RAG](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/09-vector-rag) | `f.vector(N)` + cosine similarity |
+| [Recipe / BOM](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/10-recipe-bom) | Recursive sub-recipe rollup |
+| [Multi-tenant scoping](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/11-multi-tenant) | Soft RLS via app-layer wrapper |
+| [Audit log](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/12-audit-log) | `db.$events.on("mutation", …)` |
+| [Full-text search](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/13-fulltext-search) | `.search()` index across dialects |
+| [Transactions](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/14-transactions) | Atomic batch + nested savepoints |
+| [Migrations + drift](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/15-migrations-drift) | `db.$migrate()` + `db.$diff()` |
+
+| Real DB (point at your own) | Setup |
+|---|---|
+| [MongoDB Atlas blog](https://github.com/johnsonfash/forge-orm-examples/tree/main/16-mongo-atlas-blog) | Free Atlas tier, paste URI into `.env` |
+| [MSSQL ERP / MERGE](https://github.com/johnsonfash/forge-orm-examples/tree/main/17-mssql-merge-erp) | Docker SQL Server, `.env` |
+| [Postgres + RLS auth](https://github.com/johnsonfash/forge-orm-examples/tree/main/18-postgres-rls-auth) | Hard multi-tenant via `current_setting` |
+
+All 18 examples live at **[johnsonfash/forge-orm-examples](https://github.com/johnsonfash/forge-orm-examples)**. Clone any folder:
+
+```sh
+npx degit johnsonfash/forge-orm-examples/01-sqlite-browser-todo my-app
+```
+
+---
+
 ## Contents
 
+* [Sandbox / runnable examples](#sandbox--runnable-examples)
 * [What forge is, and what it is not](#what-forge-is-and-what-it-is-not)
   * [What's new](#whats-new)
 * [Install and pick your driver](#install-and-pick-your-driver)
