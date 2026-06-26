@@ -69,10 +69,10 @@ Try forge-orm without installing anything — every example is one click away on
 | [Hono + PGlite REST API](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/05-hono-pglite-api) | Backend API, zero external DB |
 | [Next.js + PGlite full-stack](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/06-nextjs-pglite-fullstack) | App Router + Server Actions |
 
-| Auto-runs on Replit / CodeSandbox | Why |
+| Auto-runs on CodeSandbox | Why |
 |---|---|
-| [DuckDB analytics](https://replit.com/new/github/johnsonfash/forge-orm-examples) | `@duckdb/node-api` is a native addon — pick `03-duckdb-cli-needs-vm`, hit Run |
-| [Bun + SQLite blog](https://replit.com/new/github/johnsonfash/forge-orm-examples) | Bun's SQLite is native — pick `07-bun-cli-needs-vm`, hit Run |
+| [DuckDB analytics](https://codesandbox.io/p/devbox/github/johnsonfash/forge-orm-examples/main/03-duckdb-cli-needs-vm) | `@duckdb/node-api` is a native addon |
+| [Bun + SQLite blog](https://codesandbox.io/p/devbox/github/johnsonfash/forge-orm-examples/main/07-bun-cli-needs-vm) | Bun's SQLite is native |
 
 | Feature deep-dives | Pattern |
 |---|---|
