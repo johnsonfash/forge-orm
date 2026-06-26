@@ -65,7 +65,7 @@ Try forge-orm without installing anything — every example is one click away on
 |---|---|
 | [SQLite browser todo](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/01-sqlite-browser-todo) | OPFS-persisted todo app, no server |
 | [Offline-first with sync outbox](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/02-sqlite-browser-offline-first) | Optimistic writes + drain loop |
-| [DuckDB analytics](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/03-duckdb-analytics-browser) | 5K-row aggregation in a tab |
+| [DuckDB analytics](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/03-duckdb-analytics) | 5K-row groupBy + raw-SQL revenue rollup |
 | [Node + SQLite CLI](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/04-node-sqlite-cli) | Smallest possible forge-orm program |
 | [Hono + PGlite REST API](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/05-hono-pglite-api) | Backend API, zero external DB |
 | [Next.js + PGlite full-stack](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/06-nextjs-pglite-fullstack) | App Router + Server Actions |
@@ -77,7 +77,7 @@ Try forge-orm without installing anything — every example is one click away on
 | [Vector RAG](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/09-vector-rag) | `f.vector(N)` + cosine similarity |
 | [Recipe / BOM](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/10-recipe-bom) | Recursive sub-recipe rollup |
 | [Multi-tenant scoping](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/11-multi-tenant) | Soft RLS via app-layer wrapper |
-| [Audit log](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/12-audit-log) | `db.$events.on("mutation", …)` |
+| [Audit log](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/12-audit-log) | `db.$on("query", …)` filtering mutating ops |
 | [Full-text search](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/13-fulltext-search) | `.search()` index across dialects |
 | [Transactions](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/14-transactions) | Atomic batch + nested savepoints |
 | [Migrations + drift](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/15-migrations-drift) | `db.$migrate()` + `db.$diff()` |
