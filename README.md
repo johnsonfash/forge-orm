@@ -71,8 +71,8 @@ Try forge-orm without installing anything — every example is one click away on
 
 | Needs a cloud VM | Why |
 |---|---|
-| [DuckDB analytics](https://codesandbox.io/p/sandbox/github/johnsonfash/forge-orm-examples/main/03-duckdb-cli-needs-vm) | `@duckdb/node-api` is a native addon — open in CodeSandbox DevBox |
-| [Bun + SQLite blog](https://codesandbox.io/p/sandbox/github/johnsonfash/forge-orm-examples/main/07-bun-cli-needs-vm) | Bun's SQLite is native — open in CodeSandbox / Replit |
+| [DuckDB analytics](https://codespaces.new/johnsonfash/forge-orm-examples?devcontainer_path=.devcontainer/devcontainer.json) | `@duckdb/node-api` is a native addon — open in Codespaces, then `cd 03-duckdb-cli-needs-vm && npm i && npm run dev` |
+| [Bun + SQLite blog](https://codespaces.new/johnsonfash/forge-orm-examples?devcontainer_path=.devcontainer/devcontainer.json) | Bun's SQLite is native — open in Codespaces, install Bun, then `cd 07-bun-cli-needs-vm && bun run dev` |
 
 | Feature deep-dives | Pattern |
 |---|---|
