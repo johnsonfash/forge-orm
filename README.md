@@ -65,11 +65,14 @@ Try forge-orm without installing anything — every example is one click away on
 |---|---|
 | [SQLite browser todo](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/01-sqlite-browser-todo) | OPFS-persisted todo app, no server |
 | [Offline-first with sync outbox](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/02-sqlite-browser-offline-first) | Optimistic writes + drain loop |
-| [DuckDB analytics](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/03-duckdb-analytics) | 5K-row groupBy + raw-SQL revenue rollup |
-| [Node + SQLite CLI](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/04-node-sqlite-cli) | Smallest possible forge-orm program |
+| [Node CLI (smallest)](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/04-node-cli) | Smallest possible forge-orm program |
 | [Hono + PGlite REST API](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/05-hono-pglite-api) | Backend API, zero external DB |
 | [Next.js + PGlite full-stack](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/06-nextjs-pglite-fullstack) | App Router + Server Actions |
-| [Bun + SQLite blog](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/07-bun-sqlite-blog) | Bun's built-in SQLite, zero deps |
+
+| Needs a cloud VM | Why |
+|---|---|
+| [DuckDB analytics](https://codesandbox.io/p/sandbox/github/johnsonfash/forge-orm-examples/main/03-duckdb-cli-needs-vm) | `@duckdb/node-api` is a native addon — open in CodeSandbox DevBox |
+| [Bun + SQLite blog](https://codesandbox.io/p/sandbox/github/johnsonfash/forge-orm-examples/main/07-bun-cli-needs-vm) | Bun's SQLite is native — open in CodeSandbox / Replit |
 
 | Feature deep-dives | Pattern |
 |---|---|
