@@ -191,6 +191,12 @@ function instantiateAdapter(kind: AdapterKind, driver?: ForgeDriver): Adapter {
       return new DuckdbAdapter(driver as import('./adapters/duckdb/driver').DuckdbDriver | undefined);
     case 'mssql':
       return new MssqlAdapter(driver as import('./adapters/mssql/driver').MssqlDriver | undefined);
+    case 'indexeddb': {
+      // Lazy-import so server bundles that never touch IDB don't pay for the
+      // adapter's browser-only globals at eval time.
+      const { IndexeddbAdapter } = require('./adapters/indexeddb/adapter') as typeof import('./adapters/indexeddb/adapter');
+      return new IndexeddbAdapter(driver as import('./adapters/indexeddb/driver').IdbDriver | undefined);
+    }
   }
 }
 
