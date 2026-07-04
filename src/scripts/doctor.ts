@@ -13,7 +13,7 @@ import type { IndexDef, ModelDef } from '../schema/types';
 // dialect mismatches and common index-feature gotchas.
 
 async function main() {
-  const ALL: AdapterKind[] = ['mongo', 'postgres', 'mysql', 'sqlite', 'duckdb', 'mssql'];
+  const ALL: AdapterKind[] = ['mongo', 'postgres', 'mysql', 'sqlite', 'duckdb', 'mssql', 'indexeddb'];
   const url = process.env.DATABASE_URL;
   const detected = url ? detectAdapterKind(url) : null;
 

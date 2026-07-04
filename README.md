@@ -68,6 +68,7 @@ Try forge-orm without installing anything — every example is one click away on
 | [Node CLI (smallest)](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/04-node-cli) | Smallest possible forge-orm program |
 | [Hono + PGlite REST API](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/05-hono-pglite-api) | Backend API, zero external DB |
 | [Next.js + PGlite full-stack](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/06-nextjs-pglite-fullstack) | App Router + Server Actions |
+| [IndexedDB zero-install](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/19-indexeddb-zero-install) | Full CRUD + geo + vector + FTS, no wasm |
 
 | Auto-runs on CodeSandbox | Why |
 |---|---|
@@ -107,6 +108,7 @@ npx degit johnsonfash/forge-orm-examples/01-sqlite-browser-todo my-app
 * [Install and pick your driver](#install-and-pick-your-driver)
 * [Connecting](#connecting)
   * [Pluggable drivers](#pluggable-drivers)
+  * [Browser (zero install) — IndexedDB](#browser-zero-install--indexeddb)
   * [Wire-compatible databases (no new code needed)](#wire-compatible-databases-no-new-code-needed)
   * [Coming soon](#coming-soon)
 * [Defining a schema](#defining-a-schema)
@@ -308,6 +310,7 @@ The README is the surface reference. For more depth — extra examples, edge cas
 |---|---|
 | Backend — server integration (hyper-express, Fastify, NestJS, Bun+Hono, pools, tx, BullMQ, multi-tenant, replicas, OTel, health, CI) | **[docs/BACKEND.md](docs/BACKEND.md)** |
 | Browser — full sqlite-wasm + OPFS reference (URL schemes, worker, bundlers, `$migrate`, browserDoctor, ITP, multi-tab, pro build) | **[docs/BROWSER.md](docs/BROWSER.md)** |
+| IndexedDB (zero-install browser) — planner scoring, IDB versioning migrations, FTS via multiEntry, Haversine + brute-force fallback, quota + ITP, server-safety guard | **[docs/INDEXEDDB.md](docs/INDEXEDDB.md)** |
 | Browser frameworks — React+Vite, Next.js, Vue, Nuxt, SvelteKit, Angular, SolidStart, Astro, Remix, React Native, Tauri (11 recipes) | **[docs/BROWSER-FRAMEWORKS.md](docs/BROWSER-FRAMEWORKS.md)** |
 | React — hooks, TanStack Query, Suspense, server vs client components, optimistic updates, sync, code-splitting, testing, 6 worked patterns | **[docs/REACT.md](docs/REACT.md)** |
 | Mobile — RN bare, Expo, Capacitor, Tauri, SQLCipher, sync patterns, background tasks, testing, migration cookbooks | **[docs/MOBILE.md](docs/MOBILE.md)** |
@@ -338,6 +341,25 @@ this out.
 
 Full release history is in [CHANGELOG.md](./CHANGELOG.md). Recent highlights:
 
+- **2.6 — IndexedDB adapter: zero-install browser tier.** A second browser
+  adapter alongside sqlite-wasm — no wasm download, no worker file, no
+  bundler plugin. URL prefix `idb:` / `indexeddb:` selects the adapter and
+  the string after the colon is the IDB database name. The Prisma-shape
+  surface is identical to every other dialect; the executor pipeline runs
+  `Args → IR → planner picks ONE index → cursor scan → JS residual filter
+  → JS sort → limit/offset`. Selectivity-scored index selection (primary-key
+  eq > compound eq > unique eq > compound eq > single-column eq > `in` >
+  range > free sort > full scan), every plan carries an `explain` string.
+  Non-destructive migrations via native IDB versioning (add-field is a
+  no-op, `createIndex` back-populates existing rows automatically,
+  destructive changes go under `pending`). FTS via multiEntry token index
+  (index-backed AND-of-tokens, not a full scan). Geo via Haversine JS +
+  bbox prefilter (MultiPolygon with holes, `_distanceMeters` annotation).
+  Vector via JS brute-force cosine / l2 / dot (fine ≤ 1 k rows). Cascade
+  walker matches the Mongo pattern. Server-safety guard throws a specific
+  `[P2010]` message on Node / SSR instead of a cryptic `ReferenceError`.
+  Ships at the `forge-orm/indexeddb` subpath export. See
+  [Browser (zero install) — IndexedDB](#browser-zero-install--indexeddb).
 - **2.5 — MSSQL `MERGE` upsert, Mongo cross-field `nearTo`, browser `$doctor`/`$diff`, MultiPolygon + GeometryCollection, 3D / Z coordinates, non-WGS84 SRIDs.**
   Closes the entire "Coming soon" list from 2.4. MSSQL upsert now compiles
   to a proper `MERGE INTO … USING (VALUES) … WHEN MATCHED THEN UPDATE …
@@ -425,6 +447,7 @@ at all.
 | DuckDB            | `duckdb:`                          | `npm install @duckdb/node-api`|
 | SQL Server (MSSQL)| `mssql:` or `sqlserver:`           | `npm install mssql`           |
 | Browser (SQLite)  | `opfs:`, `opfs-sahpool:`, `:memory:` | `npm install @sqlite.org/sqlite-wasm` |
+| Browser (IndexedDB) | `idb:` or `indexeddb:`             | none — browser built-in                |
 
 ```sh
 npm install forge-orm      # the library, no drivers
@@ -563,6 +586,40 @@ Each port is a small interface, so any other client fits too:
 One caveat: `forge push` / `applyMigration` (DDL) still assume each database's
 **default** driver. With an injected driver, run runtime queries through forge
 and manage schema/DDL with the default client (or separately).
+
+### Browser (zero install) — IndexedDB
+
+The IndexedDB adapter is forge's zero-install browser tier. Every browser has
+IndexedDB natively, so there's no wasm to download, no worker file to bundle,
+no COOP / COEP headers to set. Trade native SQL power for zero install:
+
+```ts
+import { createDb } from 'forge-orm';
+
+const db = await createDb({ url: 'idb:appname', schema });
+await db.user.create({ data: { email: 'a@x.co', name: 'Alice' } });
+```
+
+The full Prisma-shape API works — reads, writes, relations, sorts, paging,
+aggregations, JSON path queries, geo `near` / `withinPolygon`, vector `near`
+/ `nearTo`, full-text `search`, upsert, soft-delete + restore, `.compile`,
+`$transaction`, `$migrate`, `$doctor`, `$diff`.
+
+The tradeoff vs sqlite-wasm:
+
+| | sqlite-wasm | IndexedDB |
+|---|---|---|
+| Bundle cost | ~1 MB wasm + worker | zero |
+| Query engine | real SQL | IR → cursor scan + JS predicate |
+| Vector | native (sqlite-vec HNSW) | brute-force JS (< 1 k rows) |
+| Geo | native (R-Tree via SpatiaLite) | Haversine JS + bbox prefilter |
+| FTS | FTS5 with BM25 | multiEntry token index, AND-of-tokens |
+| Multi-tab | needs SAHPool VFS | native |
+
+Both adapters read the same schema and take the same query calls, so swapping
+between them is a URL change.
+
+Deep dive: **[docs/INDEXEDDB.md](docs/INDEXEDDB.md)**.
 
 ### Wire-compatible databases (no new code needed)
 
