@@ -4,6 +4,200 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.6.0 — IndexedDB adapter: zero-install browser tier
+
+**Feature release.** Adds a native IndexedDB adapter alongside the sqlite-wasm
+adapter shipped in 2.4. Every modern browser has IndexedDB natively, so the new
+tier has no wasm blob to download, no worker file to bundle, no COOP/COEP
+headers to set, no bundler plugin. Drop-in upgrade — the URL prefix `idb:` /
+`indexeddb:` is new; no other prefix behaviour shifted.
+
+### New URL schemes
+
+`detectAdapterKind()` now recognises two browser-side prefixes that resolve
+to the new `indexeddb` kind:
+
+| URL | Backend | Persistence | Multi-tab |
+|---|---|---|---|
+| `idb:<name>` | IndexedDB | Full | **Native** — IDB coordinates writers |
+| `indexeddb:<name>` | IndexedDB (alias of `idb:`) | Full | Native |
+
+```ts
+import { createDb } from 'forge-orm';
+
+const db = await createDb({ url: 'idb:appname', schema });
+await db.user.create({ data: { email: 'a@x.co', name: 'Alice' } });
+```
+
+The string after the colon is the IndexedDB database name — the same name you
+would pass to `indexedDB.open(name)` by hand.
+
+### New adapter — `forge-orm/indexeddb`
+
+The Prisma-shape surface is identical to every other adapter — reads, writes,
+relations, sorts, paging, aggregations, JSON path queries, geo `near` /
+`withinPolygon`, vector `near` / `nearTo`, full-text `search`, atomic update
+ops, upsert, soft-delete + restore, `.compile` escape hatch, `$transaction`,
+`$migrate`, `$doctor`, `$diff`.
+
+The adapter is exported at the `forge-orm/indexeddb` subpath so bundlers
+tree-shake it out of any server bundle that doesn't import it. A driver
+factory is exposed alongside the URL form for consumers that want to hand in
+a pre-opened `IDBDatabase`:
+
+```ts
+import { indexedDbDriver } from 'forge-orm/indexeddb';
+
+const db = await createDb({
+  driver: indexedDbDriver({ name: 'appname' }),
+  schema,
+});
+```
+
+### Query planner
+
+Every read runs through the same pipeline: `Args → IR → planner picks ONE
+index → cursor scan → JS residual filter → JS sort → limit/offset`. The
+planner scores candidate scan strategies 0–100 and picks the highest:
+
+| Score | Strategy |
+|---:|---|
+| 100 | primary-key `eq` |
+| 95 | full compound-index equality (all keys) |
+| 90 | unique-index single-column `eq` |
+| 85 | non-unique compound equality on all keys |
+| 70 | non-unique single-column `eq` |
+| 60 | `in` on indexed column |
+| 50 | range op (`lt` / `lte` / `gt` / `gte` / `startsWith`) on indexed column |
+| 20 | orderBy on indexed column with no `where` match (free sort) |
+| 0 | full-table scan (no index applicable) |
+
+Whichever leaves the range didn't absorb become a `(row) => boolean` residual
+predicate applied per cursor result. `AND` at the root unlocks index
+optimisation; `OR` and `NOT` at the root fall back to a full-table scan +
+residual. Every plan carries an `explain` string — feed it through
+`$on('query')` to watch which index each request lands on.
+
+### Migrations via native IDB versioning
+
+IndexedDB's `onupgradeneeded` maps cleanly to forge's non-destructive
+migration model. `$migrate()` fingerprints the DDL plan (fnv-1a over sorted
+store + index metadata) and only bumps the IDB version when the fingerprint
+changes:
+
+| Change | Behaviour on IDB |
+|---|---|
+| Add a field | No-op — IDB is schemaless |
+| Add an index | `store.createIndex()` runs inside `onupgradeneeded`; IDB re-scans existing rows and back-populates the index automatically |
+| Rename / drop an index | `store.deleteIndex()` (+ create for renames) |
+| Add a store | `createObjectStore()` |
+| Drop a store | Destructive — surfaces in `report.pending`, opt-in only |
+| Change a field's type | No-op at DDL level — coerce at write side |
+| Change a `keyPath` | Destructive — not supported natively; surfaced under pending |
+
+Same fingerprint → no version bump → no upgrade cycle at all. `$migrate()`
+on an unchanged schema is effectively a boot-time metadata check.
+
+### Full-text search via multiEntry index
+
+Every `.searchable()` field gets a shadow `_tokens_<field>: string[]` column
+maintained by the executor at write time, indexed with `multiEntry`. Search
+compiles `bio: { search: 'baker cyclist' }` into one `getAll` per token, then
+intersects the ID sets — index-backed AND-of-tokens with real per-token
+complexity, not a full-table cursor scan. Tokeniser rules: lowercase, split
+on non-`\p{L}\p{N}\s`, dedupe, drop tokens longer than 40 chars, single-char
+tokens kept (matters for CJK and Greek).
+
+### Geo — Haversine fallback with bbox prefilter
+
+Points are stored as `{ lng, lat }` (or `{ lng, lat, alt }` for 3D) inside
+the row — same wire shape the sqlite adapter uses in fallback mode. A `[lng,
+lat]` compound index (when declared) cursors just the bounding box; Haversine
+JS then post-filters for exact `withinMeters` / `withinPolygon` / `orderBy
+nearTo`. `_distanceMeters` annotations match every other dialect.
+MultiPolygon with holes uses the same ray-cast + even-odd rule as the 2.5
+fallback path.
+
+### Vector — JS brute force
+
+Vectors are plain `number[]` on the row. Filter and sort route through the
+same executor pipeline as geo. Metrics: `cosine`, `l2`, `dot`. Dimension
+mismatch → `Infinity` distance (silent — the row falls to the back).
+Brute force is O(N × dims) per query — fine for lists of ≤ ~1 k vectors
+× 100–1500 dims. Route heavier workloads to the sqlite-wasm-pro adapter
+(sqlite-vec HNSW compiled in) or to a server tier.
+
+### Transactions
+
+IDB transactions auto-commit as soon as the microtask queue idles — awaiting
+a non-IDB promise inside the callback silently commits the txn early. The
+adapter's `$transaction(fn)` opens per-op txns and reuses them within the fn
+body: best-effort atomicity across the batch, rollback on throw, but **not**
+strict serialisability across arbitrary awaits. For strict atomicity of
+interleaved reads + writes on the same store, use the batch form —
+`$transaction([...ops])` maps to one IDB `readwrite` txn spanning every
+store, committed atomically.
+
+### Cascade walker
+
+IDB has no foreign-key enforcement, so the adapter runs a JS cascade walker
+before every delete — same pattern the Mongo adapter uses:
+
+| `onDelete` | Behaviour |
+|---|---|
+| `Cascade` | Recurse (leaves-first) into child rows, then delete parent |
+| `SetNull` | `$unset` the FK column on child rows, then delete parent |
+| `Restrict` | Throw `[P2003] Restrict: cannot delete X` if children exist |
+| `NoAction` / undefined | Skip — orphans allowed |
+
+The walker tracks visited `collection:id` pairs so self-referential schemas
+(`comment.parent_id → comment.id`) can't infinite-loop.
+
+### Server-safety guard
+
+The adapter references `indexedDB` and `IDBKeyRange` only inside function
+bodies — never at module import time. On Node / edge / SSR runtimes,
+`import { indexedDbDriver } from 'forge-orm/indexeddb'` succeeds; only
+`openDb()` / `driver.open()` triggers a runtime check. When a server code
+path does reach the adapter, the guard throws a specific `[P2010]` message
+naming the runtime instead of a cryptic `ReferenceError`.
+
+### Other changes
+
+- `AdapterKind` widened to include `'indexeddb'`. `DRIVER_PACKAGE_FOR` reports
+  `(none — browser built-in)` for the new kind so `forge doctor`'s driver
+  table stays useful.
+- New `docs/INDEXEDDB.md` (deep-dive companion to the README's new Browser
+  (zero install) section) covering URL scheme, planner scoring, migration
+  semantics, FTS/Geo/Vector/JSON-path behaviour, transactions, cascades,
+  quota + Safari ITP, server safety, and the compatibility matrix.
+- README gains a "Browser (zero install) — IndexedDB" subsection under
+  Connecting (with the tradeoff table vs sqlite-wasm), a StackBlitz row for
+  the new `19-indexeddb-zero-install` example, and an `INDEXEDDB.md` row in
+  the Deep-dive companions "Runtime targets" table.
+
+### Tests
+
+**113/113** jest tests in the new `test/adapters/indexeddb/` suite via
+`fake-indexeddb`. Covers CRUD, every operator, relations, pagination, cursor,
+aggregations, planner scoring, migrations (add store / add index / drop
+index / no-op field / destructive pending), geo (Haversine correctness,
+antipodes, polygon with holes), vector (all three metrics), FTS (Unicode,
+punctuation, no-match), JSON path (deep nesting, missing intermediate), soft
+delete, transactions, cascades (all four actions), edge cases (limit 0,
+offset beyond length, unique constraint, updatedAt stamping), a 1000-row
+stress test, and the server-guard. Total across the repo: 585 tests (was
+472 in 2.5.3).
+
+### Compatibility
+
+- **Drop-in upgrade** for 2.5.x consumers. No schema or API changes for any
+  server-side code path. The URL prefix `idb:` / `indexeddb:` is new; no
+  other prefix behaviour shifted.
+- Runs in every browser since 2017 (IndexedDB is universal). React Native
+  isn't supported — use `opSqliteDriver` there. Server runtimes throw a
+  specific message when the adapter is reached by mistake.
+
 ## 2.5.3 — Docs expansion to 80 files (no code change)
 
 **Docs-only patch.** No runtime change; the published `dist/` is byte-identical to 2.5.2. The release bumps the npm registry version so the expanded 80-doc tree is the default thing readers land on.

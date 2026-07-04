@@ -14,6 +14,10 @@ const URL_PREFIX_TO_KIND: Array<[RegExp, AdapterKind]> = [
   // and route through the wasm driver injected by createDb({ driver }).
   [/^opfs(-sahpool)?:/i, 'sqlite'],
   [/^:memory:$/i, 'sqlite'],
+  // Browser IndexedDB — zero-install browser tier. `idb:` is the canonical
+  // prefix, `indexeddb:` the long-form alias. Both resolve to the indexeddb
+  // adapter (a browser-only adapter with a server-safety guard).
+  [/^(idb|indexeddb):/i, 'indexeddb'],
   [/^duckdb:/i, 'duckdb'],
   // mssql / sqlserver — both prefixes are in the wild.
   [/^(mssql|sqlserver):\/\//i, 'mssql'],
@@ -36,4 +40,5 @@ export const DRIVER_PACKAGE_FOR: Record<AdapterKind, string> = {
   sqlite: 'better-sqlite3',
   duckdb: '@duckdb/node-api',
   mssql: 'mssql',
+  indexeddb: '(none — browser built-in)',
 };
