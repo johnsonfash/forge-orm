@@ -162,6 +162,12 @@ export class CollectionWrapper<
         case 'sqlite':   this._compileApi = buildSqliteCompileApi(this.model);   break;
         case 'duckdb':   this._compileApi = buildDuckdbCompileApi(this.model);   break;
         case 'mssql':    this._compileApi = buildMssqlCompileApi(this.model);    break;
+        case 'indexeddb':
+          throw new Error(
+            '[forge] .compile is not implemented for the IndexedDB adapter yet ' +
+            '(no SQL or aggregation pipeline shape — IDB is native). Use the ' +
+            'model methods (findMany, create, …) directly.',
+          );
         case 'mongo':
         default:         this._compileApi = buildMongoCompileApi(this.model);    break;
       }
