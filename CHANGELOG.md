@@ -4,6 +4,28 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.6.1 — `$migrate()` on indexeddb
+
+**Patch.** `db.$migrate()` now dispatches to the IndexedDB adapter's
+`runMigrate` alongside the existing sqlite path. Under 2.6.0 the call threw
+`$migrate() is only supported on sqlite adapters today`, which contradicted
+`docs/INDEXEDDB.md` — the adapter shipped the machinery but the factory
+didn't wire it up. Fixed.
+
+Behaviour: on IDB, `createDb()` already runs the schema upgrade inside
+`indexedDB.open()`'s native `onupgradeneeded`, so `$migrate()` is a
+second, idempotent open — a metadata check that returns the standard
+`RuntimeApplyReport { applied, skipped, failures, alteredColumns: [],
+pending, version }`. Same signature as the sqlite path.
+
+```ts
+const db = await createDb({ url: 'idb:app', schema });
+const r = await db.$migrate();
+// { applied: [...], pending: [...], version: 2, ... }
+```
+
+No other changes. Drop-in for 2.6.0.
+
 ## 2.6.0 — IndexedDB adapter: zero-install browser tier
 
 **Feature release.** Adds a native IndexedDB adapter alongside the sqlite-wasm
