@@ -4,6 +4,33 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.6.3 — @tauri-apps/plugin-sql driver
+
+**Patch.** New `tauriSqlDriver` wraps a `Database` opened via
+`@tauri-apps/plugin-sql` and exposes the standard `SqliteDriver` port.
+Tauri 2 apps now get a real SQLite backend via sqlx on the Rust side
+without leaving the forge query API — one schema runs the same on
+Node (better-sqlite3), browser (sqlite-wasm+OPFS), and Tauri (native
+sqlx).
+
+```ts
+import Database from '@tauri-apps/plugin-sql';
+import { createDb, tauriSqlDriver } from 'forge-orm';
+
+const sqlite = await Database.load('sqlite:app.db');
+export const db = await createDb({ schema, driver: tauriSqlDriver(sqlite) });
+await db.$migrate();  // runtime DDL — same seam as the wasm/expo drivers
+```
+
+The port handles the plugin's one-statement-per-execute constraint by
+splitting DDL batches on `;`, so the migrator's multi-statement output
+runs unchanged. Prior versions treated Tauri as an unshipped driver
+in the docs' walk-through — it's now `import { tauriSqlDriver } from
+'forge-orm'` with a passing regression covering DDL, CRUD, atomic
+guards, groupBy, transactions, and multi-statement exec.
+
+No other changes. Drop-in for 2.6.2.
+
 ## 2.6.2 — IDB pagination + orderBy double-slice fix
 
 **Patch.** `findMany({ take, skip, orderBy })` on the IndexedDB adapter

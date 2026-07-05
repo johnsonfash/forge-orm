@@ -519,7 +519,7 @@ Built-in drivers:
 
 | Database  | Default driver                            | Built-in alternatives                                                                 |
 | --------- | ----------------------------------------- | ------------------------------------------------------------------------------------- |
-| SQLite    | `betterSqlite3Driver` (`better-sqlite3`)  | `expoSqliteDriver` (Expo/RN), `opSqliteDriver` (bare RN), `libsqlDriver` (libsql/Turso/edge), `wasmSqliteDriver` (browser + OPFS) |
+| SQLite    | `betterSqlite3Driver` (`better-sqlite3`)  | `expoSqliteDriver` (Expo/RN), `opSqliteDriver` (bare RN), `libsqlDriver` (libsql/Turso/edge), `wasmSqliteDriver` (browser + OPFS), `tauriSqlDriver` (`@tauri-apps/plugin-sql` — Tauri 2 desktop + mobile) |
 | Postgres  | `pgDriver` (`pg`)                          | `postgresJsDriver` (`postgres.js`)                                                     |
 | MySQL     | `mysql2Driver` (`mysql2`)                  | `mariadbDriver` (MariaDB connector), `planetscaleDriver` (`@planetscale/database`)     |
 | MongoDB   | built-in `mongodb` client                 | `mongoDriver(client)` — your own `MongoClient` (DocumentDB, Cosmos, FerretDB, custom)  |
@@ -542,6 +542,13 @@ const db = await createDb({ schema, driver: libsqlDriver(createClient({ url: pro
 import { createDb, wasmSqliteDriver } from 'forge-orm';
 const worker = new Worker(new URL('forge-orm/wasm/worker', import.meta.url), { type: 'module' });
 const db = await createDb({ schema, driver: wasmSqliteDriver({ worker, url: 'opfs-sahpool:///app.sqlite' }) });
+
+// SQLite in a Tauri 2 app — @tauri-apps/plugin-sql (sqlx on Rust side).
+import Database from '@tauri-apps/plugin-sql';
+import { createDb, tauriSqlDriver } from 'forge-orm';
+const sqlite = await Database.load('sqlite:app.db');
+const db = await createDb({ schema, driver: tauriSqlDriver(sqlite) });
+await db.$migrate();  // runtime DDL on first boot
 await db.$migrate();   // runtime DDL apply (browser replacement for `forge push`)
 
 // Postgres via postgres.js

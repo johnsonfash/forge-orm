@@ -103,6 +103,42 @@ export function libsqlDriver(client: any): SqliteDriver {
   };
 }
 
+// ─── @tauri-apps/plugin-sql (async; Tauri 2 desktop + mobile) ──────────────
+// Wraps a `Database` opened via `Database.load('sqlite:app.db')`. The plugin
+// bridges JS to sqlx on the Rust side; execute() and select() are the only
+// two calls the port needs.
+//
+// - `all` / `get` route through `select`; both flavours accept `?` positional
+//   parameters, which is what the SQLite IR compiler emits.
+// - `run` returns the plugin's own {rowsAffected, lastInsertId} shape — the
+//   port normalises to {changes, lastInsertRowid}.
+// - `exec` splits multi-statement DDL that the migrator emits into single
+//   statements because tauri-plugin-sql's execute() runs one at a time.
+export function tauriSqlDriver(db: any): SqliteDriver {
+  return {
+    kind: 'sqlite',
+    all: async (sql, params) =>
+      (await db.select(sql, params as unknown[])) as any[],
+    get: async (sql, params) => {
+      const rows = (await db.select(sql, params as unknown[])) as any[];
+      return rows[0];
+    },
+    run: async (sql, params) => {
+      const r = await db.execute(sql, params as unknown[]);
+      return { changes: r.rowsAffected ?? 0, lastInsertRowid: r.lastInsertId };
+    },
+    // Tauri's execute is one statement per call; the migrator emits batches
+    // separated by `;`. Split defensively and drop empty tail segments so a
+    // trailing newline / semicolon doesn't fire an empty `execute`.
+    exec: async (sql) => {
+      for (const stmt of sql.split(/;\s*(?:\r?\n|$)/).map((s) => s.trim()).filter(Boolean)) {
+        await db.execute(stmt);
+      }
+    },
+    close: async () => { await db.close?.(); },
+  };
+}
+
 export function isSqliteDriver(v: unknown): v is SqliteDriver {
   return !!v && typeof v === 'object' && (v as any).kind === 'sqlite' &&
     typeof (v as any).all === 'function' && typeof (v as any).run === 'function';

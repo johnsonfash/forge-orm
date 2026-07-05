@@ -1,6 +1,6 @@
 {
   "name": "forge-orm",
-  "version": "2.6.2",
+  "version": "2.6.3",
   "description": "Prisma-shape multi-database ORM/wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB & SQL Server from one codebase — typed geo / vector / JSON path / full-text search, no codegen, no query engine. Bring your own schema.",
   "license": "MIT",
   "author": "johnsonfash",
@@ -101,7 +101,7 @@
     "forge:integration:mysql": "ts-node --transpile-only --project tsconfig.json integration-mysql.ts && npm run forge:regression:mysql",
     "forge:regression:mysql": "ts-node --transpile-only --project tsconfig.json regression-mariadb-driver.ts && ts-node --transpile-only --project tsconfig.json regression-mysql-partial-index.ts",
     "forge:integration:sqlite": "ts-node --transpile-only --project tsconfig.json integration-sqlite.ts && npm run forge:regression:sqlite",
-    "forge:regression:sqlite": "ts-node --transpile-only --project tsconfig.json regression-libsql-driver.ts && ts-node --transpile-only --project tsconfig.json regression-sqlite-fts5.ts",
+    "forge:regression:sqlite": "ts-node --transpile-only --project tsconfig.json regression-libsql-driver.ts && ts-node --transpile-only --project tsconfig.json regression-tauri-sql-driver.ts && ts-node --transpile-only --project tsconfig.json regression-sqlite-fts5.ts",
     "forge:integration:duckdb": "ts-node --transpile-only --project tsconfig.json regression-duckdb.ts && ts-node --transpile-only --project tsconfig.json regression-geo-duckdb.ts",
     "forge:integration:geo": "ts-node --transpile-only --project tsconfig.json regression-geo-duckdb.ts",
     "smoke:drivers": "node scripts/driver-smoke.mjs",
