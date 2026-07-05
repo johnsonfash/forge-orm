@@ -4,6 +4,21 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.6.2 — IDB pagination + orderBy double-slice fix
+
+**Patch.** `findMany({ take, skip, orderBy })` on the IndexedDB adapter
+returned wrong pages when the `orderBy` field wasn't natively covered by
+an IDB index. `cursorScan` sliced the stream in index order first, the
+executor sorted the survivors in JS, then applied `take`/`skip` a
+second time on the already-sliced result. On a 4-row store, page 2
+(`{ take: 2, skip: 2 }`) came back empty.
+
+Fix: defer `cursorScan`'s slice whenever `orderBy` needs a JS post-sort
+(same condition already used for `nearTo` orderings and cursor
+pagination). One slice, applied after the sort.
+
+No other changes. Drop-in for 2.6.1.
+
 ## 2.6.1 — `$migrate()` on indexeddb
 
 **Patch.** `db.$migrate()` now dispatches to the IndexedDB adapter's

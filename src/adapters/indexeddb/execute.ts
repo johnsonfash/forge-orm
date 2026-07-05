@@ -65,10 +65,14 @@ export async function executeSelect(
 
     // Plan the range scan against the where tree stripped of post-filter ops.
     const plan = planSelect(model, stripPostFilterOps(node.where), node.orderBy);
-    // Defer slicing whenever we still owe post-sort work (geo/vector nearTo)
-    // or the caller supplied a cursor — cursor semantics need the full ordered
-    // stream to locate the anchor row.
-    const deferSlice = !!nearOrder || (!!node.cursor && Object.keys(node.cursor.fields).length > 0);
+    // Defer slicing whenever we still owe post-sort work (geo/vector nearTo,
+    // or a plain orderBy the planner can't cover natively) or the caller
+    // supplied a cursor — cursor semantics need the full ordered stream to
+    // locate the anchor row. Without this, cursorScan slices in index-order
+    // BEFORE the JS re-sort, then the executor slices AGAIN post-sort, and
+    // page 2 of an unindexed orderBy returns empty.
+    const needsPostSort = !!node.orderBy?.length && !plan.orderByFree;
+    const deferSlice = !!nearOrder || (!!node.cursor && Object.keys(node.cursor.fields).length > 0) || needsPostSort;
     let rows: Record<string, unknown>[] = await cursorScan(db, {
       storeName,
       plan,
