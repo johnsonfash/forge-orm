@@ -6,7 +6,8 @@ export type { ForgeDb, CreateDbOptions, CreateDbOptionsUrl, CreateDbOptionsStruc
 //   createDb({ schema, driver: expoSqliteDriver(SQLite.openDatabaseSync('app.db')) })  // Expo/RN
 //   createDb({ schema, driver: wasmSqliteDriver({ worker }) })  // browser (sqlite-wasm + OPFS)
 export {
-  betterSqlite3Driver, expoSqliteDriver, opSqliteDriver, libsqlDriver, isSqliteDriver,
+  betterSqlite3Driver, expoSqliteDriver, opSqliteDriver, libsqlDriver,
+  tauriSqlDriver, isSqliteDriver,
 } from './adapters/sqlite/driver';
 export type { SqliteDriver } from './adapters/sqlite/driver';
 export { wasmSqliteDriver, isWasmSqliteDriver } from './adapters/sqlite/wasm-driver';

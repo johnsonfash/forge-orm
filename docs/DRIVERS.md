@@ -249,38 +249,27 @@ port. You own the client's lifecycle — forge doesn't instantiate it.
 
 ## Wrapping a new sqlite driver
 
-Walk-through: a hypothetical `tauriSqlDriver` over `tauri-plugin-sql`.
-The plugin gives you async `execute(sql, params)` and `select(sql, params)`.
+`tauriSqlDriver` (shipped as of 2.6.3) wraps `@tauri-apps/plugin-sql`.
+The plugin gives you async `execute(sql, params)` and `select(sql, params)`
+against sqlx on the Rust side; the port normalises the return shape to
+the SqliteDriver contract and splits multi-statement DDL because tauri's
+execute runs one statement at a time.
 
 ```ts
-import type { SqliteDriver } from 'forge-orm';
 import Database from '@tauri-apps/plugin-sql';
+import { createDb, tauriSqlDriver } from 'forge-orm';
 
-export function tauriSqlDriver(db: Database): SqliteDriver {
-  return {
-    kind: 'sqlite',
-    all: async (sql, params) =>
-      (await db.select(sql, params as unknown[])) as any[],
-    get: async (sql, params) => {
-      const rows = (await db.select(sql, params as unknown[])) as any[];
-      return rows[0];
-    },
-    run: async (sql, params) => {
-      const r = await db.execute(sql, params as unknown[]);
-      return { changes: r.rowsAffected, lastInsertRowid: r.lastInsertId };
-    },
-    // Tauri's execute is one statement at a time; the migrator emits batches.
-    exec: async (sql) => {
-      for (const s of sql.split(/;\s*$/m).filter((x) => x.trim())) {
-        await db.execute(s);
-      }
-    },
-    close: async () => { await db.close(); },
-  };
-}
+const sqlite = await Database.load('sqlite:app.db');
+export const db = await createDb({ schema, driver: tauriSqlDriver(sqlite) });
+await db.$migrate();  // runtime DDL, same as wasm/expo
 ```
 
-Five things to get right:
+If you'd rather write your own wrapper (older forge, custom auth
+plumbing on top of the plugin's execute), the source is intentionally
+short — copy from `src/adapters/sqlite/driver.ts` under the
+`tauriSqlDriver` block.
+
+Five things any sqlite driver wrapper has to get right:
 
 1. **Async wrapping.** Declare every method `async` even when the
    underlying call is sync (better-sqlite3 is). The executor `await`s.
@@ -297,13 +286,9 @@ Five things to get right:
 5. **Close idempotency.** May be called twice. `db.close?.()` is the
    pattern.
 
-```ts
-const sqlite = await Database.load('sqlite:app.db');
-export const db = await createDb({ schema, driver: tauriSqlDriver(sqlite) });
-```
-
-You can run `db.$migrate()` on a sqlite driver to apply the schema at
-runtime — see [BROWSER](./BROWSER.md#runtime-migrate).
+You can run `db.$migrate()` on any sqlite driver — including
+`tauriSqlDriver` — to apply the schema at runtime. See
+[BROWSER](./BROWSER.md#runtime-migrate).
 
 ---
 
