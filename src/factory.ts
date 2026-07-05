@@ -273,18 +273,30 @@ function makeDb(adapter: Adapter, _url: string, runtime: { strict: boolean } = {
   // Runtime DDL apply for the wasm path. Lazy-imports the migrator so the
   // mongo/pg/mysql bundles never pull in the sqlite DDL emitter.
   async function $migrate(opts?: { logger?: (line: string) => void }) {
-    if (adapter.kind !== 'sqlite') {
-      throw new Error(
-        `[forge] $migrate() is only supported on sqlite adapters today. ` +
-        `For ${adapter.kind} use the CLI: 'npx forge push'.`,
-      );
+    if (adapter.kind === 'sqlite') {
+      const { runMigrate } = await import('./wasm/migrate');
+      // adapter.db is the SqliteDriver after connect; the sqlite adapter exposes
+      // it as a getter so an injected wasm driver works the same as a default
+      // better-sqlite3 driver.
+      const driver = (adapter as unknown as { db: import('./adapters/sqlite/driver').SqliteDriver }).db;
+      return runMigrate(driver, opts);
     }
-    const { runMigrate } = await import('./wasm/migrate');
-    // adapter.db is the SqliteDriver after connect; the sqlite adapter exposes
-    // it as a getter so an injected wasm driver works the same as a default
-    // better-sqlite3 driver.
-    const driver = (adapter as unknown as { db: import('./adapters/sqlite/driver').SqliteDriver }).db;
-    return runMigrate(driver, opts);
+    if (adapter.kind === 'indexeddb') {
+      // IDB opens are idempotent when the fingerprint matches (same version
+      // → no upgrade cycle at all). So the second-open pattern used here
+      // is essentially a metadata check + report — cheap.
+      const { runMigrate } = await import('./adapters/indexeddb/migrate');
+      const url = _url ?? 'forge';
+      const name = url.startsWith('idb:') ? (url.slice(4) || 'forge')
+                 : url.startsWith('indexeddb:') ? (url.slice(10) || 'forge')
+                 : (url || 'forge');
+      const { getActiveSchema } = await import('./schema/active');
+      return runMigrate({ name, schema: getActiveSchema(), logger: opts?.logger }) as unknown as import('./wasm/migrate').RuntimeApplyReport;
+    }
+    throw new Error(
+      `[forge] $migrate() is only supported on sqlite + indexeddb adapters today. ` +
+      `For ${adapter.kind} use the CLI: 'npx forge push'.`,
+    );
   }
 
   // Runtime capability probe. sqlite adapter routes through the rich
