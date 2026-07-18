@@ -45,6 +45,15 @@ const Post = model('posts', {
   author: rel.one('user', { on: 'authorId', refs: 'id' }),
 }));
 
+// Typed-JSON column coverage (2.6.4). `prefs` carries a concrete shape;
+// `meta` uses the bare `f.json()` which now defaults to `unknown`.
+type AccountPrefs = { theme: 'light' | 'dark'; density: number };
+const Account = model('accounts', {
+  id: f.id(),
+  prefs: f.json<AccountPrefs>(),
+  meta: f.json(),
+});
+
 const schema = { user: User, post: Post } as const;
 
 // --- Type-level equality helpers -------------------------------------------
@@ -130,6 +139,24 @@ describe('Infer<typeof Model> — single-model inference', () => {
     expect(create.email).toBe('a@b.co');
     expect(update.name).toBe('New');
     expect(where.id).toBe('u1');
+  });
+});
+
+describe('f.json<T>() — typed JSON columns', () => {
+  test('InferRow carries the parameterised JSON type; bare json is unknown', () => {
+    type R = InferRow<typeof Account>;
+    type Has = Equal<R['prefs'], AccountPrefs> & Equal<R['meta'], unknown>;
+    acceptOnly<Has>();
+    expect(true).toBe(true);
+  });
+
+  test('InferCreate type-checks the JSON shape', () => {
+    type C = InferCreate<typeof Account>;
+    const ok: C = { prefs: { theme: 'dark', density: 2 }, meta: { anything: true } };
+    expect(ok.prefs?.theme).toBe('dark');
+    // @ts-expect-error — 'neon' is not assignable to the typed theme union
+    const bad: C = { prefs: { theme: 'neon', density: 2 }, meta: null };
+    void bad;
   });
 });
 

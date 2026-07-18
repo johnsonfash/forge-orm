@@ -4,6 +4,29 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.6.4 — typed JSON columns
+
+**Patch.** `f.json()` now takes an optional type parameter that flows
+through to the row read type and the create/update input:
+
+```ts
+type Prefs = { theme: 'light' | 'dark'; density: number };
+
+const Account = model('accounts', {
+  id: f.id(),
+  prefs: f.json<Prefs>(),   // row.prefs is Prefs; writes are checked
+  meta: f.json(),           // no parameter -> unknown (was any)
+});
+```
+
+The bare `f.json()` default changed from `any` to `unknown`, so a column
+you haven't typed forces a narrow at the read site instead of silently
+handing back `any`. This is the only behavioural change and it is
+read-only — writes still accept any JSON value, and every existing
+schema keeps compiling. Pass `f.json<any>()` to restore the old
+per-column behaviour. `InferRow` / `InferCreate` / `InferUpdate` carry
+the parameter through; `WhereInput` is unchanged.
+
 ## 2.6.3 — @tauri-apps/plugin-sql driver
 
 **Patch.** New `tauriSqlDriver` wraps a `Database` opened via
