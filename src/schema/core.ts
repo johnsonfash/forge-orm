@@ -151,7 +151,11 @@ export const f = {
 
   bool: () => make<boolean, 'bool'>('bool'),
   dateTime: () => make<Date, 'dateTime'>('dateTime'),
-  json: () => make<any, 'json'>('json'),
+  // Typed JSON column. `f.json<Shape>()` carries `Shape` through to the row
+  // read type and the create/update input; the default is `unknown` so an
+  // un-parameterised `f.json()` forces callers to narrow rather than handing
+  // back `any`. Pass `f.json<any>()` to opt back into the pre-2.6.4 behaviour.
+  json: <T = unknown>() => make<T, 'json'>('json'),
 
   enumOf: <const V extends readonly string[]>(values: V) =>
     new Field<V[number], 'enum'>({
@@ -420,9 +424,10 @@ export type _Val<X> = X extends Field<infer T, any> ? T : never;
 
 // Input-side variant — accepts ISO date strings for dateTime, loosens embedded
 // shapes (defaults applied at create, so every embed field is optional on
-// write), and falls back to `any` for json. The `[X] extends [...]` tuple-wrap
-// is essential: it makes the conditional non-distributive, so `Field<any,
-// 'json'>` doesn't trigger both branches via TypeScript's `any`-flow rules.
+// write), and carries the parameterised type through for json. The `[X]
+// extends [...]` tuple-wrap is essential: it makes the conditional
+// non-distributive, so `Field<any, 'json'>` doesn't trigger both branches via
+// TypeScript's `any`-flow rules.
 type _InputVal<X> = [X] extends [Field<Date, 'dateTime'>]
   ? Date | string
   : [X] extends [Field<infer T, 'embed'>]
@@ -431,8 +436,8 @@ type _InputVal<X> = [X] extends [Field<Date, 'dateTime'>]
       ? [T] extends [(infer U)[]]
         ? Partial<U>[]
         : never
-      : [X] extends [Field<any, 'json'>]
-        ? any
+      : [X] extends [Field<infer T, 'json'>]
+        ? T
         : _Val<X>;
 
 type StringFilter = {
