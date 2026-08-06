@@ -30,7 +30,8 @@ export interface CreateDbOptionsUrl {
   // keys); strict closes it, catching typos.
   strict?: boolean;
   // Bring-your-own schema — your `model(...)` map. When omitted, forge uses
-  // the bundled sample schema. One active schema per process.
+  // the bundled sample schema. The map is bound to this connection, so several
+  // dbs with different schemas can be open at once.
   schema?: SchemaShape;
 }
 
@@ -136,6 +137,23 @@ const PROXY_PASSTHROUGH = new Set<PropertyKey>([
   'asymmetricMatch', '$$typeof', 'nodeType',
 ]);
 
+// A missing model used to resolve to `undefined`, so the first symptom was
+// `Cannot read properties of undefined (reading 'findMany')` several frames away
+// from the cause. Naming the key and listing what IS active points straight at
+// the real problem — usually a typo or a schema that never reached createDb.
+function unknownModel(key: string, models: Record<string, unknown>): Error {
+  let available = '<none>';
+  try {
+    available = Object.keys(models).sort().join(', ') || '<none>';
+  } catch {
+    available = '<no active schema>';
+  }
+  return new Error(
+    `[forge] unknown model "${key}". Active schema exposes: ${available}. ` +
+    'Pass your model map as createDb({ schema }) and check the key spelling.',
+  );
+}
+
 export async function createDb<S extends SchemaShape = SchemaMap>(
   opts: CreateDbOptions & { schema?: S },
 ): Promise<ForgeDb<S>> {
@@ -143,7 +161,7 @@ export async function createDb<S extends SchemaShape = SchemaMap>(
   // anything reads the schema. Defaults to the bundled sample otherwise.
   if (opts.schema) setActiveSchema(opts.schema);
   const { adapter, url } = await pickAndConnect(opts);
-  return makeDb(adapter, url, { strict: opts.strict === true }) as unknown as ForgeDb<S>;
+  return makeDb(adapter, url, { strict: opts.strict === true, models: opts.schema }) as unknown as ForgeDb<S>;
 }
 
 async function pickAndConnect(opts: CreateDbOptions): Promise<{ adapter: Adapter; url: string }> {
@@ -233,8 +251,18 @@ function makeRawCaller<R>(run: (frag: SqlFragment) => Promise<R>) {
   };
 }
 
-function makeDb(adapter: Adapter, _url: string, runtime: { strict: boolean } = { strict: false }): ForgeDb<any> {
+function makeDb(
+  adapter: Adapter,
+  _url: string,
+  runtime: { strict: boolean; models?: SchemaShape } = { strict: false },
+): ForgeDb<any> {
   const cache: Partial<Record<keyof SchemaMap, CollectionWrapper<any>>> = {};
+
+  // Bound to THIS db rather than read from the global registry, so a process can
+  // hold several connections with different schemas at once — opening a second
+  // db used to move the global pointer and strand every model on the first.
+  // Falls back to the live global proxy when no schema was passed to createDb.
+  const models: any = runtime.models ?? schema;
 
   const root: any = new Proxy({}, {
     get: (_t, prop) => {
@@ -251,8 +279,8 @@ function makeDb(adapter: Adapter, _url: string, runtime: { strict: boolean } = {
       if (key === '$diff') return $diff;
       if (key === '$on') return (event: any, cb: any) => adapter.emitter.on(event, cb);
       if (key === '$off') return (event: any, cb: any) => adapter.emitter.off(event, cb);
-      const model = (schema as any)[key] as ModelDef<any> | undefined;
-      if (!model) return undefined;
+      const model = models[key] as ModelDef<any> | undefined;
+      if (!model) throw unknownModel(key, models);
       if (!cache[key as keyof SchemaMap]) {
         // Wrapper takes the active adapter so every execute / coerce / decode /
         // cascade call dispatches through the right dialect — otherwise every
@@ -290,8 +318,7 @@ function makeDb(adapter: Adapter, _url: string, runtime: { strict: boolean } = {
       const name = url.startsWith('idb:') ? (url.slice(4) || 'forge')
                  : url.startsWith('indexeddb:') ? (url.slice(10) || 'forge')
                  : (url || 'forge');
-      const { getActiveSchema } = await import('./schema/active');
-      return runMigrate({ name, schema: getActiveSchema(), logger: opts?.logger }) as unknown as import('./wasm/migrate').RuntimeApplyReport;
+      return runMigrate({ name, schema: models, logger: opts?.logger }) as unknown as import('./wasm/migrate').RuntimeApplyReport;
     }
     throw new Error(
       `[forge] $migrate() is only supported on sqlite + indexeddb adapters today. ` +
@@ -321,7 +348,7 @@ function makeDb(adapter: Adapter, _url: string, runtime: { strict: boolean } = {
       );
     }
     const introspection = await adapter.introspect();
-    return diffIntrospection(schema as Record<string, any>, introspection, opts?.ignore ?? []);
+    return diffIntrospection(models as Record<string, any>, introspection, opts?.ignore ?? []);
   }
 
   // Mongo-only — it's the BSON command channel. SQL consumers reach for
@@ -352,8 +379,8 @@ function makeDb(adapter: Adapter, _url: string, runtime: { strict: boolean } = {
         if (key === '$disconnect') return () => adapter.close();
         if (key === '$on') return (event: any, cb: any) => adapter.emitter.on(event, cb);
         if (key === '$off') return (event: any, cb: any) => adapter.emitter.off(event, cb);
-        const model = (schema as any)[key] as ModelDef<any> | undefined;
-        if (!model) return undefined;
+        const model = models[key] as ModelDef<any> | undefined;
+        if (!model) throw unknownModel(key, models);
         if (!txCache[key]) {
           // Tx wrapper: same adapter, plus the opaque session from
           // adapter.$transaction (ClientSession / PoolClient / ...).
