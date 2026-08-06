@@ -4,6 +4,46 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.6.5 — a schema belongs to its db, not to the process
+
+**Patch.** Two `createDb({ schema })` calls in one process fought over a
+single global registry. The schema was stored in a module-level slot on
+a last-write-wins basis, so opening a second connection moved the
+pointer and every model on the first handle resolved to `undefined`:
+
+```ts
+const app = await createDb({ schema: appSchema, url: 'idb:app' });
+const sync = await createDb({ schema: syncSchema, url: 'idb:sync' });
+
+app.invoice.findMany();   // TypeError: Cannot read properties of
+                          // undefined (reading 'findMany')
+```
+
+A db now binds the map its own `createDb` received, so several
+connections with different schemas coexist. `$migrate` and `$diff` read
+that bound map too, instead of whichever schema happened to be active.
+Handles created without a `schema` keep reading the global registry, so
+single-schema code behaves exactly as before.
+
+The bundled sample also stopped overwriting consumer schemas.
+`schema/index.ts` installs it at module load; under Node's CJS that
+always evaluates before `createDb` runs, but bundlers that defer CJS
+initialisation give no such guarantee — esbuild wraps a CJS module in a
+lazy `__commonJS` whose body runs on first property access, which in a
+Vite dev graph can land after `createDb`. It now installs through an
+internal `setDefaultSchema` that declines to replace a schema a consumer
+already set. `setActiveSchema` keeps last-write-wins for explicit calls.
+
+A missing model no longer resolves to `undefined`. `db.<name>` for a key
+the bound schema does not have throws, naming the key and listing what
+IS available — the old failure surfaced as `Cannot read properties of
+undefined (reading 'findMany')` several frames from the cause:
+
+```
+[forge] unknown model "outbox". Active schema exposes: syncEvent.
+Pass your model map as createDb({ schema }) and check the key spelling.
+```
+
 ## 2.6.4 — typed JSON columns
 
 **Patch.** `f.json()` now takes an optional type parameter that flows

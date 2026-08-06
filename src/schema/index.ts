@@ -6,7 +6,7 @@
 
 import { rel as $rel, embed, enums, f, ModelRelations, RelationInfo } from './core';
 import { model } from './core';
-import { getActiveSchema, setActiveSchema, type SchemaShape } from './active';
+import { getActiveSchema, setDefaultSchema, type SchemaShape } from './active';
 
 const rel = $rel;
 
@@ -221,8 +221,11 @@ export const sampleSchema = {
   postStats: PostStats,
 } as const;
 
-// Default the active schema to the sample on module load.
-setActiveSchema(sampleSchema as unknown as SchemaShape);
+// Default the active schema to the sample on module load. Never overwrites a
+// consumer schema already installed by `createDb({ schema })` — under bundlers
+// that defer CJS initialisation this module can evaluate after the consumer's
+// call, and an unconditional set would wipe their models.
+setDefaultSchema(sampleSchema as unknown as SchemaShape);
 
 // `schema` is a LIVE VIEW of whichever schema is currently active (the sample by
 // default; whatever `createDb({ schema })` set otherwise). The whole codebase
