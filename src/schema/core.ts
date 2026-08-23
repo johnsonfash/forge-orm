@@ -440,11 +440,15 @@ type _InputVal<X> = [X] extends [Field<Date, 'dateTime'>]
         ? T
         : _Val<X>;
 
-type StringFilter = {
-  equals?: string;
-  not?: string | StringFilter;
-  in?: string[];
-  notIn?: string[];
+// `N` carries the field's nullability into equals/not/in/notIn — an
+// `.optional()` column can be compared to null, but the ordering / pattern
+// operators still take the bare scalar (comparing against null in `lte` or
+// `contains` is never meaningful).
+type StringFilter<N = never> = {
+  equals?: string | N;
+  not?: string | N | StringFilter<N>;
+  in?: (string | N)[];
+  notIn?: (string | N)[];
   lt?: string;
   lte?: string;
   gt?: string;
@@ -455,31 +459,31 @@ type StringFilter = {
   mode?: 'default' | 'insensitive';
 };
 
-type NumberFilter = {
-  equals?: number;
-  not?: number | NumberFilter;
-  in?: number[];
-  notIn?: number[];
+type NumberFilter<N = never> = {
+  equals?: number | N;
+  not?: number | N | NumberFilter<N>;
+  in?: (number | N)[];
+  notIn?: (number | N)[];
   lt?: number;
   lte?: number;
   gt?: number;
   gte?: number;
 };
 
-type DateFilter = {
-  equals?: Date | string;
-  not?: Date | string | DateFilter;
-  in?: (Date | string)[];
-  notIn?: (Date | string)[];
+type DateFilter<N = never> = {
+  equals?: Date | string | N;
+  not?: Date | string | N | DateFilter<N>;
+  in?: (Date | string | N)[];
+  notIn?: (Date | string | N)[];
   lt?: Date | string;
   lte?: Date | string;
   gt?: Date | string;
   gte?: Date | string;
 };
 
-type BoolFilter = {
-  equals?: boolean;
-  not?: boolean | BoolFilter;
+type BoolFilter<N = never> = {
+  equals?: boolean | N;
+  not?: boolean | N | BoolFilter<N>;
 };
 
 type ListFilter<T> = {
@@ -494,17 +498,23 @@ type ListFilter<T> = {
   none?: Partial<T> | any;
 };
 
-type ScalarFilterFor<T> = [T] extends [string]
-  ? StringFilter
-  : [T] extends [number]
-    ? NumberFilter
-    : [T] extends [boolean]
-      ? BoolFilter
-      : [T] extends [Date]
-        ? DateFilter
-        : [T] extends [(infer U)[]]
-          ? ListFilter<U>
-          : { equals?: T; not?: T; in?: T[]; notIn?: T[] };
+// Branch on NonNullable<T>: an `.optional()` column has type `T | null`,
+// which does not extend the bare scalar, so it used to fall through every
+// branch to the generic equals/not/in/notIn fallback — silently losing
+// lt/lte/gt/gte/contains/… on precisely the columns that need casting the
+// most. Nullability is preserved separately via the `N` parameter.
+type ScalarFilterFor<T, NN = NonNullable<T>, N = [null] extends [T] ? null : never> =
+  [NN] extends [string]
+    ? StringFilter<N>
+    : [NN] extends [number]
+      ? NumberFilter<N>
+      : [NN] extends [boolean]
+        ? BoolFilter<N>
+        : [NN] extends [Date]
+          ? DateFilter<N>
+          : [NN] extends [(infer U)[]]
+            ? ListFilter<U>
+            : { equals?: T; not?: T; in?: T[]; notIn?: T[] };
 
 // WhereInput — autocompletes scalar field names + AND/OR/NOT. The
 // `[k: string]: any` fallback accepts composite-unique synthetic keys (e.g.

@@ -34,6 +34,86 @@ const COL_REF_OPS: ReadonlySet<WhereOp> = new Set<WhereOp>([
   'eq', 'ne', 'lt', 'lte', 'gt', 'gte',
 ]);
 
+// Every key a filter object may legally carry: scalar ops plus the special
+// forms handled before the SCALAR_OPS loop.
+const KNOWN_FILTER_KEYS: ReadonlySet<string> = new Set([
+  ...Object.keys(SCALAR_OPS), 'mode', 'near', 'withinPolygon', 'path',
+]);
+
+// Column kinds whose contents can be addressed with a path (dotted key or
+// `path` filter). Mirrors the allowlist in the `path` branch below.
+const CONTAINER_KINDS: ReadonlySet<string> = new Set([
+  'json', 'embed', 'embedMany', 'stringArray', 'intArray',
+]);
+
+// Filter-object keys that translate to a jsonPath sub-op (dotted-key form).
+const PATH_SUB_OPS: Record<string, 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte' | 'contains' | 'in' | 'has'> = {
+  equals: 'eq',
+  not: 'ne',
+  lt: 'lt',
+  lte: 'lte',
+  gt: 'gt',
+  gte: 'gte',
+  contains: 'contains',
+  in: 'in',
+  has: 'has',
+};
+
+// Small edit-distance for "did you mean" — enough to catch one-or-two-character
+// slips without pulling in a dependency.
+function editDistance(a: string, b: string): number {
+  const m = a.length, n = b.length;
+  if (Math.abs(m - n) > 2) return 3;
+  const row = Array.from({ length: n + 1 }, (_, i) => i);
+  for (let i = 1; i <= m; i++) {
+    let prev = row[0];
+    row[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const tmp = row[j];
+      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = tmp;
+    }
+  }
+  return row[n];
+}
+
+function closestFilterKey(op: string): string | undefined {
+  let best: string | undefined;
+  let bestD = 3;
+  for (const k of KNOWN_FILTER_KEYS) {
+    const d = editDistance(op.toLowerCase(), k.toLowerCase());
+    if (d < bestD) { bestD = d; best = k; }
+  }
+  return best;
+}
+
+// A filter with an operator forge doesn't know used to be DROPPED silently,
+// so the condition vanished and the query matched every row — the worst
+// possible failure for a scoping or money filter. Throw instead, with the
+// most likely correction first.
+function unknownOpError(model: ModelDef<any>, field: string, op: string): Error {
+  const bare = op.startsWith('$') ? op.slice(1) : undefined;
+  const fdef: any = model.fields?.[field];
+  let hint: string;
+  if (bare && bare in SCALAR_OPS) {
+    hint = `Did you mean '${bare}'? forge uses bare operator names, not Mongo's $-prefixed ones.`;
+  } else {
+    const close = closestFilterKey(op);
+    hint = close ? `Did you mean '${close}'?` : '';
+  }
+  if (fdef && CONTAINER_KINDS.has(fdef.kind)) {
+    hint += `${hint ? ' ' : ''}To filter inside a ${fdef.kind} column use ` +
+      `{ ${field}: { path: '<sub.path>', equals: … } }, the dotted form ` +
+      `{ '${field}.<sub>': … }, or { ${field}: { equals: <whole value> } } for exact match.`;
+  }
+  return new Error(
+    `[forge] unknown operator '${op}' on '${model.collection}.${field}'. ` +
+    `Valid: ${Object.keys(SCALAR_OPS).join(', ')}, mode, near, withinPolygon, path.` +
+    (hint ? `\n  ${hint}` : '') +
+    `\n  (forge used to drop unknown operators silently, which made the filter match every row.)`,
+  );
+}
+
 // Resolve a `col()` reference. Requiring a declared scalar field gives a clear
 // error on typos and closes the only identifier-injection surface (the value
 // becomes a SQL identifier / Mongo `$field` path downstream).
@@ -93,6 +173,43 @@ export function buildWhereTree(
       if (inner.length === 1) children.push({ kind: 'not', child: inner[0] });
       else if (inner.length > 1) children.push({ kind: 'not', child: { kind: 'and', children: inner } });
       continue;
+    }
+
+    // Dotted path into a container column — `{ 'address.city': 'sf' }` or
+    // `{ 'meta.stats.views': { gte: 10 } }`. Translated to the same jsonPath
+    // leaf the `path` filter produces, so it compiles on every dialect
+    // (Mongo: dot notation; SQL: native JSON path) instead of only working
+    // by accident on Mongo. Dotted keys whose head is NOT a declared
+    // container column fall through to the legacy leaf below (loose-mode
+    // passthrough for raw Mongo shapes).
+    if (key.includes('.')) {
+      const dot = key.indexOf('.');
+      const head = key.slice(0, dot);
+      const fdef: any = model.fields?.[head];
+      if (fdef && CONTAINER_KINDS.has(fdef.kind)) {
+        const path = parseJsonPath(key.slice(dot + 1));
+        if (value && typeof value === 'object' && !Array.isArray(value) && !isDate(value)) {
+          for (const op of Object.keys(value)) {
+            const subOp = PATH_SUB_OPS[op];
+            if (!subOp) {
+              throw new Error(
+                `[forge] unsupported operator '${op}' on path '${key}' ` +
+                `('${model.collection}'). Paths support: ${Object.keys(PATH_SUB_OPS).join(', ')}.`,
+              );
+            }
+            children.push({
+              kind: 'leaf', field: head, op: 'jsonPath', value: value[op],
+              jsonPath: { path, subOp },
+            });
+          }
+        } else {
+          children.push({
+            kind: 'leaf', field: head, op: 'jsonPath', value,
+            jsonPath: { path, subOp: 'eq' },
+          });
+        }
+        continue;
+      }
     }
 
     const rel = relations[key];
@@ -212,32 +329,7 @@ export function buildWhereTree(
         });
         continue;
       }
-      for (const op of Object.keys(value)) {
-        if (op === 'mode') continue;
-        if (op === 'near') continue; // handled above
-        if (op === 'withinPolygon') continue; // handled above
-        if (op === 'path') continue; // handled above (jsonPath)
-        const irOp = SCALAR_OPS[op];
-        if (!irOp) continue;
-        const operand = value[op];
-        if (isColRef(operand)) {
-          children.push({
-            kind: 'leaf',
-            field: key,
-            op: irOp,
-            value: undefined,
-            rhsField: resolveColRef(model, irOp, operand),
-          });
-          continue;
-        }
-        children.push({
-          kind: 'leaf',
-          field: key,
-          op: irOp,
-          value: operand,
-          caseInsensitive: insensitive || undefined,
-        });
-      }
+      buildOperatorLeaves(model, key, value, insensitive, children);
     } else {
       children.push({ kind: 'leaf', field: key, op: 'eq', value });
     }
@@ -246,6 +338,67 @@ export function buildWhereTree(
   if (children.length === 0) return undefined;
   if (children.length === 1) return children[0];
   return { kind: 'and', children };
+}
+
+// Turn one filter object (`{ gte: 5, mode: 'insensitive', not: {...} }`) into
+// leaves. Shared by the top-level operator branch and nested `not` objects.
+function buildOperatorLeaves(
+  model: ModelDef<any>,
+  field: string,
+  obj: Record<string, any>,
+  insensitive: boolean,
+  children: WhereTree[],
+): void {
+  for (const op of Object.keys(obj)) {
+    if (op === 'mode') continue;
+    if (op === 'near') continue; // handled by the caller's earlier branch
+    if (op === 'withinPolygon') continue; // handled by the caller's earlier branch
+    if (op === 'path') continue; // handled by the caller's earlier branch
+    const operand = obj[op];
+    if (operand === undefined) continue;
+
+    // Nested filter under `not` — `{ title: { not: { contains: 'x' } } }`.
+    // The typed surface has always advertised `not?: T | Filter`, but the
+    // object form used to compile to a literal `$ne: { contains: 'x' }`,
+    // which matches every row. Build the inner filter and negate it.
+    // Container columns (json/embed) keep the literal comparison: there
+    // `not: { … }` means "not equal to this exact value", and its keys are
+    // data, not operators.
+    const fkind = (model.fields?.[field] as any)?.kind;
+    if (
+      op === 'not' && operand !== null && typeof operand === 'object' &&
+      !Array.isArray(operand) && !isDate(operand) && !isColRef(operand) &&
+      (operand as any)._bsontype === undefined &&
+      !(fkind && CONTAINER_KINDS.has(fkind))
+    ) {
+      const inner: WhereTree[] = [];
+      const innerInsensitive = insensitive || (operand as any).mode === 'insensitive';
+      buildOperatorLeaves(model, field, operand, innerInsensitive, inner);
+      if (inner.length === 1) children.push({ kind: 'not', child: inner[0] });
+      else if (inner.length > 1) children.push({ kind: 'not', child: { kind: 'and', children: inner } });
+      continue;
+    }
+
+    const irOp = SCALAR_OPS[op];
+    if (!irOp) throw unknownOpError(model, field, op);
+    if (isColRef(operand)) {
+      children.push({
+        kind: 'leaf',
+        field,
+        op: irOp,
+        value: undefined,
+        rhsField: resolveColRef(model, irOp, operand),
+      });
+      continue;
+    }
+    children.push({
+      kind: 'leaf',
+      field,
+      op: irOp,
+      value: operand,
+      caseInsensitive: insensitive || undefined,
+    });
+  }
 }
 
 function notUndef<T>(v: T | undefined): v is T {
