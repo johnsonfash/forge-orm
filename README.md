@@ -2517,6 +2517,44 @@ type DB   = ForgeDb<typeof schema>;
 type User = Row<typeof User>;     // { id: string; email: string; name: string; … }
 ```
 
+### Checking whether a model exists (`in`, `db.$models`)
+
+Reading a model forge doesn't know about **throws**, on purpose — a typo'd
+name should fail at the access, not surface as
+`Cannot read properties of undefined` several frames later:
+
+```ts
+db.Tpyo   // throws: [forge] unknown model "Tpyo". Active schema exposes: …
+```
+
+When a model is genuinely optional, guard with `in`. It never throws:
+
+```ts
+const view = 'OrgIndustryMixView' in db ? db.OrgIndustryMixView : null;
+if (!view) return;            // not registered — skip, don't crash
+await view.refresh();
+```
+
+`in` is exact and case-sensitive (`'user' in db` is `false` when the model
+is registered as `User`), and it reports the `$` helpers too, so
+`'$transaction' in db` is `true`. Do **not** reach for `?.` or `??` to do
+this job — the throw happens during the property read, so neither ever
+runs.
+
+`db.$models` gives the full sorted list, which is the quickest way to
+confirm a schema actually reached `createDb`:
+
+```ts
+db.$models   // ['Gadget', 'Widget']
+```
+
+Both work inside `$transaction`. The tx handle reports only what it
+serves, so `'$migrate' in tx` is `false`.
+
+> `Object.keys(db)` returns `[]` by design. Making model keys enumerable
+> would make `JSON.stringify(db)` walk every collection wrapper; use
+> `$models`.
+
 ### Direct-from-model inference (`Infer*`)
 
 When you want a create/update/where shape for a service signature, DTO,
