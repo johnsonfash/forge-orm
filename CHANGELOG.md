@@ -4,6 +4,55 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.7.1 — you can ask the db what it has
+
+**Patch.** 2.7.0 made reading an unregistered model throw, which is right —
+a typo'd model name should be loud. But there was no way to *ask* first:
+`'User' in db` returned `false` even for a model that was registered,
+because the proxy never defined a `has` trap and `in` fell through to its
+empty target. The one idiom that should have let you check before reading
+was quietly wrong, so the only pattern that worked was `try`/`catch`
+around a property access.
+
+That combination bit a consumer at boot. A module wrote:
+
+```ts
+const db = getDb() as unknown as { orgIndustryMixView?: ViewLike };
+return db.orgIndustryMixView ?? null;   // "use the view if it's registered"
+```
+
+The key was mis-cased (`OrgIndustryMixView`), so the read threw, the `??`
+never ran, and an unhandled throw took down the process at startup. The
+intent — degrade when the model isn't there — was reasonable. Forge just
+gave it no way to express that.
+
+**`in` now answers honestly**, and never throws:
+
+```ts
+'User'   in db   // true  — registered
+'user'   in db   // false — case matters
+'Typo'   in db   // false — no throw
+'$transaction' in db  // true — the $ helpers are reported too
+
+const view = 'OrgIndustryMixView' in db ? db.OrgIndustryMixView : null;
+```
+
+**New `db.$models`** — the registered model names, sorted. Handy for
+tooling, diagnostics, and asserting a schema reached `createDb`:
+
+```ts
+db.$models   // ['Gadget', 'Widget']
+```
+
+Both work inside `$transaction` too; the tx handle reports only the
+helpers it actually serves, so `'$migrate' in tx` is `false` rather than
+claiming a key whose access would throw.
+
+Unchanged on purpose: reading an unknown model still throws, and
+`Object.keys(db)` still returns `[]`. Making model keys enumerable would
+have made `JSON.stringify(db)` walk every collection wrapper — a worse
+regression than the gap it closed. `$models` covers that need without it.
+
 ## 2.7.0 — a filter that doesn't filter is worse than an error
 
 **Minor, deliberately stricter.** Five places used to swallow a malformed

@@ -130,12 +130,51 @@ export type ForgeDb<S extends SchemaShape = SchemaMap> = Collections<S> & {
     (event: 'query', cb: (e: import('./events').QueryEvent) => void): void;
     (event: 'error', cb: (e: import('./events').ErrorEvent) => void): void;
   };
+  // Names of every model this db exposes, sorted. Reading an unregistered
+  // model THROWS (see unknownModel), which is deliberate — a typo should be
+  // loud. But that left no way to ask whether a model exists, so callers
+  // wrapping optional models had to use try/catch. Prefer `'X' in db`, or
+  // this when you need the whole list.
+  readonly $models: string[];
 };
 
 const PROXY_PASSTHROUGH = new Set<PropertyKey>([
   'then', 'toJSON', 'toString', 'valueOf', 'inspect', 'constructor',
   'asymmetricMatch', '$$typeof', 'nodeType',
 ]);
+
+// Everything the db proxy answers besides the registered models. `has` must
+// report these too, or `'$transaction' in db` would be false on a db that
+// plainly has one. The tx proxy serves a strict subset — $migrate/$doctor/
+// $diff are not available mid-transaction — so it gets its own set rather
+// than claiming keys whose access would throw.
+const DB_HELPER_KEYS = new Set<string>([
+  'adapter', '$models', '$transaction', '$runCommandRaw', '$queryRaw',
+  '$executeRaw', '$disconnect', '$migrate', '$doctor', '$diff', '$on', '$off',
+]);
+const TX_HELPER_KEYS = new Set<string>([
+  'adapter', '$models', '$transaction', '$runCommandRaw', '$queryRaw',
+  '$executeRaw', '$disconnect', '$on', '$off',
+]);
+
+// `models` may be the live global schema proxy, so neither the lookup nor the
+// key listing is guaranteed side-effect free. Both are defensive: a probe for
+// "does this exist" must never be the thing that throws.
+function modelExists(models: Record<string, unknown>, key: string): boolean {
+  try {
+    return models[key] != null;
+  } catch {
+    return false;
+  }
+}
+
+function modelNames(models: Record<string, unknown>): string[] {
+  try {
+    return Object.keys(models).sort();
+  } catch {
+    return [];
+  }
+}
 
 // A missing model used to resolve to `undefined`, so the first symptom was
 // `Cannot read properties of undefined (reading 'findMany')` several frames away
@@ -279,6 +318,7 @@ function makeDb(
       if (key === '$diff') return $diff;
       if (key === '$on') return (event: any, cb: any) => adapter.emitter.on(event, cb);
       if (key === '$off') return (event: any, cb: any) => adapter.emitter.off(event, cb);
+      if (key === '$models') return modelNames(models);
       const model = models[key] as ModelDef<any> | undefined;
       if (!model) throw unknownModel(key, models);
       if (!cache[key as keyof SchemaMap]) {
@@ -288,6 +328,16 @@ function makeDb(
         cache[key as keyof SchemaMap] = new CollectionWrapper(model, undefined, adapter, runtime.strict);
       }
       return cache[key as keyof SchemaMap];
+    },
+    // Without this, `'User' in db` was FALSE for a registered model — the
+    // trap was never defined, so `in` fell through to the empty target. That
+    // is worse than unhelpful: reading an unknown model throws, so `in` was
+    // the natural way to check first, and it lied. Now it answers honestly
+    // and gives callers a probe that cannot throw.
+    has: (_t, prop) => {
+      if (typeof prop === 'symbol' || PROXY_PASSTHROUGH.has(prop)) return false;
+      const key = String(prop);
+      return DB_HELPER_KEYS.has(key) || modelExists(models, key);
     },
   });
 
@@ -379,6 +429,7 @@ function makeDb(
         if (key === '$disconnect') return () => adapter.close();
         if (key === '$on') return (event: any, cb: any) => adapter.emitter.on(event, cb);
         if (key === '$off') return (event: any, cb: any) => adapter.emitter.off(event, cb);
+        if (key === '$models') return modelNames(models);
         const model = models[key] as ModelDef<any> | undefined;
         if (!model) throw unknownModel(key, models);
         if (!txCache[key]) {
@@ -387,6 +438,11 @@ function makeDb(
           txCache[key] = new CollectionWrapper(model, session, adapter, runtime.strict);
         }
         return txCache[key];
+      },
+      has: (_t, prop) => {
+        if (typeof prop === 'symbol' || PROXY_PASSTHROUGH.has(prop)) return false;
+        const key = String(prop);
+        return TX_HELPER_KEYS.has(key) || modelExists(models, key);
       },
     });
   }
