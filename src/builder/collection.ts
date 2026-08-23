@@ -50,7 +50,7 @@ import { buildSqliteCompileApi } from '../adapters/sqlite/compile';
 import { buildDuckdbCompileApi } from '../adapters/duckdb/compile';
 import { buildMssqlCompileApi } from '../adapters/mssql/compile';
 import type { CompileApi, MongoCompileApi, SQLCompileApi } from '../compile';
-import { buildCount, buildDelete, buildGroupBy, buildInsert, buildProjection, buildSelect, buildUpdate } from '../ir/build';
+import { buildCount, buildDelete, buildGroupBy, buildInsert, buildProjection, buildSelect, buildUpdate, buildUpdateData } from '../ir/build';
 import type { Adapter } from '../adapters/types';
 import { getDefaultMongoAdapter } from '../adapters/mongo/adapter';
 
@@ -116,28 +116,87 @@ export class CollectionWrapper<
   private static readonly _whereOps = new Set([
     'AND', 'OR', 'NOT', '_withDeleted',
   ]);
-  private _strictKeysCache?: Set<string>;
+  // Synthetic composite-unique keys mirror Prisma: ['a','b'] → 'a_b'.
+  // Cached per ModelDef (static WeakMap) so relation-target lookups share it.
   private _allowedWhereKeys(): Set<string> {
-    if (this._strictKeysCache) return this._strictKeysCache;
-    const keys = new Set<string>(CollectionWrapper._whereOps);
-    for (const fieldName of Object.keys(this.model.fields)) keys.add(fieldName);
-    for (const rel of Object.keys(this.model.relations())) keys.add(rel);
-    // Synthetic composite-unique keys mirror Prisma: ['a','b'] → 'a_b'.
-    for (const cols of this.model.uniques ?? []) keys.add(cols.join('_'));
-    this._strictKeysCache = keys;
-    return keys;
+    return CollectionWrapper._allowedKeysFor(this.model);
   }
   private _assertStrictWhere(where: any): void {
     if (!this._strict || !where || typeof where !== 'object') return;
-    const allowed = this._allowedWhereKeys();
+    this._assertStrictWhereOn(this.model, where, this._allowedWhereKeys());
+  }
+
+  // Recursive strict check. The old version only looked at the top level, so
+  // `{ AND: [{ bogusField: 1 }] }` sailed through and silently matched
+  // nothing — the same typo one level down that strict mode exists to catch.
+  private _assertStrictWhereOn(model: ModelDef<any>, where: any, allowed: Set<string>): void {
+    const relations = model.relations();
     for (const key of Object.keys(where)) {
-      if (allowed.has(key)) continue;
+      const value = where[key];
+      if (key === 'AND' || key === 'OR' || key === 'NOT') {
+        const arr = Array.isArray(value) ? value : [value];
+        for (const w of arr) {
+          if (w && typeof w === 'object') this._assertStrictWhereOn(model, w, allowed);
+        }
+        continue;
+      }
+      if (allowed.has(key)) {
+        // Relation filter — recurse into its modes against the TARGET model,
+        // so `{ author: { is: { bogus: 1 } } }` is caught too.
+        const rel = relations[key];
+        if (rel && value && typeof value === 'object') {
+          const target: any = (schema as any)?.[rel.target];
+          if (target?.fields) {
+            const targetAllowed = CollectionWrapper._allowedKeysFor(target);
+            for (const mode of ['is', 'isNot', 'some', 'every', 'none'] as const) {
+              const nested = (value as any)[mode];
+              if (nested && typeof nested === 'object') {
+                this._assertStrictWhereOn(target, nested, targetAllowed);
+              }
+            }
+          }
+        }
+        continue;
+      }
+      // Dotted path into a container column — `address.city`, `meta.stats.views`.
+      // Runtime supports these (compiled as a jsonPath leaf), so strict mode
+      // must not reject them. For embeds the first segment is validated
+      // against the embed's declared fields; json columns accept any path.
+      if (key.includes('.')) {
+        const head = key.slice(0, key.indexOf('.'));
+        const fdef: any = model.fields?.[head];
+        const kind = fdef?.kind;
+        if (kind === 'json' || kind === 'stringArray' || kind === 'intArray') continue;
+        if (kind === 'embed' || kind === 'embedMany') {
+          const sub = key.slice(key.indexOf('.') + 1).split('.')[0].replace(/\[\d+\]/g, '');
+          const embedFields = fdef.embedOf?.()?.fields;
+          if (embedFields && !(sub in embedFields)) {
+            throw new Error(
+              `[forge:strict] unknown embed field '${sub}' in where key '${key}' on ` +
+              `'${model.collection}'. Fields of '${head}': ${Object.keys(embedFields).join(', ')}.`,
+            );
+          }
+          continue;
+        }
+      }
       throw new Error(
-        `[forge:strict] unknown where key '${key}' on '${this.model.collection}'.\n` +
-        `  Known fields: ${Object.keys(this.model.fields).join(', ')}.\n` +
+        `[forge:strict] unknown where key '${key}' on '${model.collection}'.\n` +
+        `  Known fields: ${Object.keys(model.fields).join(', ')}.\n` +
         `  (strict mode is on — disable with createDb({ strict: false }) to allow loose keys.)`,
       );
     }
+  }
+
+  private static readonly _allowedKeysCache = new WeakMap<object, Set<string>>();
+  private static _allowedKeysFor(model: ModelDef<any>): Set<string> {
+    const hit = CollectionWrapper._allowedKeysCache.get(model as object);
+    if (hit) return hit;
+    const keys = new Set<string>(CollectionWrapper._whereOps);
+    for (const fieldName of Object.keys(model.fields)) keys.add(fieldName);
+    for (const rel of Object.keys(model.relations())) keys.add(rel);
+    for (const cols of model.uniques ?? []) keys.add(cols.join('_'));
+    CollectionWrapper._allowedKeysCache.set(model as object, keys);
+    return keys;
   }
 
   // Returns a session-bound wrapper for use inside $transaction(callback). The
@@ -554,6 +613,57 @@ export class CollectionWrapper<
     this._assertWritable('upsert');
     this._assertStrictWhere(args.where);
     const mk = this._modelKey();
+
+    // A field that `create` seeds AND `update` hits with an atomic op
+    // (increment / multiply / push / unset) cannot be expressed in one Mongo
+    // upsert: the op path conflicts with $setOnInsert, and dropping the
+    // create value (the old behaviour) meant a counter upserted with
+    // `create: { seq: 100 }, update: { seq: { increment: 1 } }` came back 1,
+    // not 100 — the seed silently vanished. For that case fall back to
+    // update-then-create with a duplicate-key retry, which gives Prisma
+    // semantics exactly: insert applies create only, update applies update
+    // only. Plain `$set` overlap keeps the single atomic op — writing the
+    // same field either way is well-defined and documented.
+    const frag = buildUpdateData(this.model, args.update ?? {});
+    const atomicPaths = [
+      ...Object.keys(frag.increment ?? {}),
+      ...Object.keys(frag.multiply ?? {}),
+      ...Object.keys(frag.push ?? {}),
+      ...(frag.unset ?? []),
+    ];
+    const createKeys = new Set(Object.keys((args.create as object) ?? {}));
+    // Mongo-only: SQL upserts (INSERT … ON CONFLICT) and IndexedDB
+    // (select-then-insert) already apply create on insert and update on
+    // conflict, so the overlap is well-defined there.
+    const destructiveOverlap =
+      this.adapter.kind === 'mongo' && atomicPaths.some((k) => createKeys.has(k));
+
+    if (destructiveOverlap) {
+      const node = buildUpdate(
+        mk, this.model,
+        { where: args.where, data: this._applyUpdatedAt(args.update), many: false },
+        schema as any,
+      );
+      let { doc } = await this.adapter.executeUpdate(node, this.model, { session: this._session });
+      if (!doc) {
+        try {
+          return await this.create({
+            data: args.create,
+            select: (args as any).select,
+            include: (args as any).include,
+            omit: (args as any).omit,
+          } as any) as any;
+        } catch (err: any) {
+          // Raced with a concurrent insert — the row exists now, so the
+          // update leg must succeed. Anything else is a real error.
+          if (!(err instanceof DbKnownError) || err.code !== 'P2002') throw err;
+          ({ doc } = await this.adapter.executeUpdate(node, this.model, { session: this._session }));
+          if (!doc) throw err;
+        }
+      }
+      return this._returnOne(doc, args);
+    }
+
     // Build a coerced create payload for $setOnInsert. The compile-from-ir
     // layer applies defaults; we only need to pre-coerce here so user-supplied
     // ids/dates become BSON types before going through Mongo's BSON.
@@ -666,13 +776,28 @@ export class CollectionWrapper<
 
   // Replaces Prisma's aggregateRaw — same signature, returns plain documents
   // with stringified ObjectIds for ergonomic parity.
-  async aggregate(args: { pipeline: any[]; options?: any }): Promise<any[]> {
+  async aggregate(args: { pipeline: any[]; options?: any } | any[]): Promise<any[]> {
+    // Accept both `aggregate({ pipeline })` and the bare-array form
+    // `aggregate([...])`. The bare form used to fall through to an EMPTY
+    // pipeline — a silent full-collection scan — because `args.pipeline` was
+    // undefined. Anything that isn't a pipeline in either shape now throws.
+    const raw = Array.isArray(args)
+      ? args
+      : Array.isArray(args?.pipeline)
+        ? args.pipeline
+        : undefined;
+    if (!raw) {
+      throw new Error(
+        `[forge] aggregate() needs a pipeline: aggregate({ pipeline: [...] }) ` +
+        `or aggregate([...]). Got ${args === null ? 'null' : typeof args}.`,
+      );
+    }
     // Coerce MongoDB extended-JSON markers in the pipeline ({$oid, $date})
     // to native ObjectId/Date — Prisma's aggregateRaw did this transparently.
-    const raw = Array.isArray(args.pipeline) ? args.pipeline : [];
     const pipeline = coerceExtendedJSON(raw);
+    const options = Array.isArray(args) ? undefined : args.options;
     const docs = await this.collection
-      .aggregate(pipeline, { ...args.options, ...this.sessOpt })
+      .aggregate(pipeline, { ...options, ...this.sessOpt })
       .toArray();
     return docs.map(stringifyObjectIds);
   }

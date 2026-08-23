@@ -341,6 +341,18 @@ this out.
 
 Full release history is in [CHANGELOG.md](./CHANGELOG.md). Recent highlights:
 
+- **2.7 — malformed queries throw instead of silently doing something
+  else.** Unknown `where` operators (`$gte`, `contians`) used to be
+  dropped from the tree, so the filter matched **every row**; typoed
+  update operators (`{ incrment: 5 }`) were written through `$set`,
+  replacing a number with an object. Both throw now, with the correction
+  in the message ("Did you mean 'gte'? forge uses bare operator names").
+  `not: { contains: … }` actually negates, strict mode recurses into
+  AND/OR/NOT and relation filters, `upsert` keeps the `create` seed when
+  `update` increments the same field, `aggregate([...])` works
+  positionally, dotted container paths (`'address.city'`) compile
+  portably on every dialect, and `.optional()` columns get their full
+  operator set back in the types.
 - **2.6 — IndexedDB adapter: zero-install browser tier.** A second browser
   adapter alongside sqlite-wasm — no wasm download, no worker file, no
   bundler plugin. URL prefix `idb:` / `indexeddb:` selects the adapter and
@@ -1102,9 +1114,15 @@ All operators, with the field kinds they apply to.
 | `some` / `every` / `none` | `embedMany` / relations         | quantified filter on the nested rows                                    |
 | `search`        | `f.text().searchable()` columns         | full-text search (see [Full-text search](#full-text-search))            |
 | `path` + sub-op | `f.json()` / `f.embed()` / `f.embedMany()` / arrays | typed JSON path read (see [JSON path queries](#json-path-queries)) |
+| dotted key (`'address.city'`) | `f.json()` / `f.embed()` / `f.embedMany()` / arrays | shorthand for a `path` filter — `{ 'address.city': 'sf' }`, `{ 'meta.stats.views': { gte: 10 } }`. Compiles portably on every dialect; strict mode validates embed sub-fields |
 | `near`          | `f.geoPoint()` / `f.vector()`            | within distance (see [Geo](#geo-geopoint-near-nearto-withinpolygon) / [Vector](#vector-similarity-search)) |
 | `withinPolygon` | `f.geoPoint()`                          | point lies inside a polygon                                             |
 | `AND` / `OR` / `NOT` | top level                          | boolean combinators (accept arrays or single objects)                   |
+
+An operator forge doesn't recognise **throws** (since 2.7) rather than being
+dropped — a dropped condition means the filter silently matches every row.
+The error names the column and suggests the fix, so `$gte` says "use `gte`"
+and `contians` says "did you mean `contains`".
 
 ### Comparing two columns: `col()`
 
@@ -1221,6 +1239,22 @@ await db.post.update({
 
 Pair an atomic op with `col()` in `where` for a single-statement, race-safe
 guard (see [Comparing two columns](#comparing-two-columns-col)).
+
+Operator objects are validated against the column (since 2.7): a typo like
+`{ incrment: 5 }`, a numeric op on a string column, or two ops in one
+object (`{ set: 1, increment: 2 }`) throws instead of silently writing the
+object into the field.
+
+For an atomic **seeded counter**, upsert with an increment — insert applies
+`create` only, update applies `update` only (Prisma semantics, race-safe):
+
+```ts
+const row = await db.counter.upsert({
+  where:  { key: 'invoice-number' },
+  create: { key: 'invoice-number', seq: 1000 },   // first call → 1000
+  update: { seq: { increment: 1 } },              // later calls → 1001, 1002, …
+});
+```
 
 ### Writing related records in one call
 

@@ -4,6 +4,114 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.7.0 — a filter that doesn't filter is worse than an error
+
+**Minor, deliberately stricter.** Five places used to swallow a malformed
+query and run something else instead. All five now throw with the
+correction in the message. Found in production: a filter written
+Mongo-style matched **every row in the collection** and nothing flagged
+it — twice.
+
+**Unknown `where` operators throw.** Strict mode always rejected an
+unknown *field*, but an unknown *operator* on a real field was dropped
+from the tree — the condition vanished and the query matched everything:
+
+```ts
+await db.bill.findMany({ where: { postedAt: { lte: cutoff } } });   // 198 rows
+await db.bill.findMany({ where: { postedAt: { $lte: cutoff } } });  // ALL 240 rows, silently
+```
+
+Now, in every mode (this is IR-level, so it covers all six dialects):
+
+```
+[forge] unknown operator '$lte' on 'bills.postedAt'. Valid: equals, not, in, …
+  Did you mean 'lte'? forge uses bare operator names, not Mongo's $-prefixed ones.
+```
+
+Typos get a closest-match suggestion (`contians` → "Did you mean
+'contains'?"), and container columns are pointed at `path` filters.
+
+**Update operators are validated against the column.** A typo in an
+atomic-op object used to be written through `$set`, replacing the number
+with the object — silent data corruption on a schemaless store:
+
+```ts
+await db.post.update({ data: { view_count: { incrment: 5 } } });
+// before: view_count is now the OBJECT { incrment: 5 }
+// after:  [forge] invalid update for 'posts.view_count': object { incrment }
+//         is not a valid operator form for a int column …
+```
+
+`increment` on a string column and ambiguous multi-op objects
+(`{ set: 1, increment: 2 }`) throw too. json / embed / geo columns are
+exempt — objects are their values.
+
+**`not: { filter }` actually negates.** The typed surface always
+advertised `not?: value | Filter`, and the README documents it, but the
+object form compiled to a literal `$ne: { contains: 'x' }` — which
+matches every row. It now builds the inner filter and wraps it in a
+real NOT, on every dialect. `not: null` and `not: <value>` are untouched.
+
+**Strict mode recurses.** `{ AND: [{ bogusField: 1 }] }` used to pass the
+strict check (top-level keys only) and then silently match nothing.
+Strict now walks AND/OR/NOT and relation filters (`author: { is: … }` is
+validated against the *target* model's fields).
+
+**`upsert` no longer loses the create value under an atomic op.** On
+Mongo, a field seeded by `create` and incremented by `update` conflicts
+with `$setOnInsert`, and the old resolution dropped the seed:
+
+```ts
+await db.counter.upsert({
+  where: { key }, create: { key, seq: 100 }, update: { seq: { increment: 1 } },
+});
+// before: first call returns seq 1 (create's 100 vanished)
+// after:  first call returns 100; second returns 101
+```
+
+That case now runs update-then-create with a duplicate-key retry, which
+is exactly Prisma's semantics: insert applies `create` only, update
+applies `update` only. Plain `$set` overlap keeps the single atomic op.
+SQL dialects (`INSERT … ON CONFLICT`) and IndexedDB were already correct
+and are unchanged.
+
+**`aggregate` accepts both call shapes.** `aggregate([...])` (positional
+array, the natural way to write it) used to read as an *empty* pipeline
+— a silent full-collection scan. Both `aggregate({ pipeline })` and
+`aggregate([...])` now work; anything else throws.
+
+**Dotted container paths, typed and portable.**
+`{ 'address.city': 'sf' }` and `{ 'meta.stats.views': { gte: 10 } }`
+compile through the same IR leaf as `path` filters — Mongo emits dot
+notation, SQL dialects emit native JSON paths — instead of only working
+by accident on Mongo. Strict mode accepts them and validates embed
+sub-fields against the embed's declared fields:
+
+```
+[forge:strict] unknown embed field 'bogus' in where key 'address.bogus'
+on 'users'. Fields of 'address': street, city, zip, country.
+```
+
+**Optional columns get their operators back (types).** An `.optional()`
+column's type is `T | null`, which failed every `[T] extends [string]`
+branch in the filter types, so nullable columns silently fell back to
+`equals/not/in/notIn` only — no `lte`, no `contains`, on exactly the
+columns that pushed people to `as never` (and from there into the silent
+drops above). The branch is on `NonNullable<T>` now; `equals: null` /
+`not: null` stay typed.
+
+Verified by the new `regression-where-op-safety.ts` live suite (19
+scenarios, wired into `forge:regression:mongo`),
+`src/__tests__/where-op-validation.spec.ts` (15 unit tests), and
+`type-probe-nullable-filters.ts` (compile-time probe with negative
+assertions). All 482 pre-existing jest tests and the Mongo + SQLite
+integration suites pass unchanged.
+
+**Upgrade note:** code that was accidentally shipping `$gte`-style
+operators, typoed update ops, or object-form `not` was already broken —
+it just failed silently. After this release those queries throw at the
+call site instead. That is the point.
+
 ## 2.6.5 — a schema belongs to its db, not to the process
 
 **Patch.** Two `createDb({ schema })` calls in one process fought over a
