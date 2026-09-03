@@ -212,7 +212,7 @@ function mongoKeys(
 
 // Coarse categories so type comparison survives dialect quirks. Returns
 // undefined for shapes we can't confidently categorise — then we don't flag.
-function fieldCategory(kind: string): string | undefined {
+export function fieldCategory(kind: string): string | undefined {
   switch (kind) {
     case 'id': case 'objectId': case 'string': case 'text': case 'uuid': case 'enum': return 'string';
     case 'int': return 'int';
@@ -226,7 +226,7 @@ function fieldCategory(kind: string): string | undefined {
   }
 }
 
-function dbTypeCategory(type: string): string | undefined {
+export function dbTypeCategory(type: string): string | undefined {
   const t = type.toLowerCase();
   if (/^(text|varchar|char|character|uuid|citext)/.test(t)) return 'string';
   if (/^(bigint|int8)/.test(t)) return 'bigint';

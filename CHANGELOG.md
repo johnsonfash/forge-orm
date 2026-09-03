@@ -4,6 +4,82 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.10.0 — a column change is emitted, or refused with the fix
+
+**Minor.** Stage 2 of the migration plan. A column whose **type** or
+**nullability** changed used to be silently absent from a generated
+migration: the schema said `varchar(255)`, the database kept
+`varchar(64)`, the file applied cleanly, and nothing said a word.
+
+Silently omitting a change is the worst of the three options. It is now
+one of the other two.
+
+### Widening is emitted
+
+`varchar(64)` → `varchar(255)`, `varchar` → `text`, `int` → `bigint`,
+`numeric(10,2)` → `numeric(12,2)`, and dropping `NOT NULL`. Every
+existing row still fits, so the statement cannot fail on data.
+
+The `down` carries a warning, because the reverse of a widening is a
+narrowing and it can fail on rows written since:
+
+```sql
+-- narrowing hits back to int can fail on rows added since;
+-- review before rolling back.
+ALTER TABLE `orgs` MODIFY COLUMN `hits` int;
+```
+
+A file that says "rollback" without saying that is lying to whoever runs
+it at 3am.
+
+### Everything else is refused, with the migration to write instead
+
+```
+✖ orgs.name: text → int
+  orgs.name changes from text to int, which is not a widening — existing
+  rows may not fit, or may not convert at all.
+  → forge will not guess at this. Write it with `forge generate
+    --custom`: add the new column, backfill it with whatever conversion
+    is correct for YOUR data, verify, then drop the old one and rename.
+```
+
+Exit **2**, and nothing is written — including the safe changes in the
+same diff. A migration that applies cleanly while leaving the schema and
+the database disagreeing is the failure this removes, not a smaller
+version of it.
+
+**The refusal is the feature.** A tool that emits `ALTER COLUMN … TYPE
+int` against a column holding text is more dangerous than one that emits
+nothing, because the migration *looks reviewed*.
+
+### `NULL` → `NOT NULL` is always refused
+
+…and the message says why the obvious fix does not work: **a `DEFAULT`
+applies to new rows, not to the NULLs already there.** The guidance is
+the two-step migration — backfill with `--custom`, confirm the count is
+zero, then make the column required and generate again, at which point
+the refusal turns into the `ALTER`.
+
+### SQLite
+
+Refused for any type or nullability change. SQLite has no `ALTER COLUMN`;
+the answer is its documented twelve-step rebuild, and forge will not
+generate that blind. Copying the column is the easy part — the indexes,
+triggers and views pointing at the old table are what a generator cannot
+see, and getting that wrong drops them silently.
+
+### Not compared
+
+A type forge cannot categorise (`tsvector`, a domain or extension type)
+is left alone rather than rewritten. Mongo is skipped entirely —
+introspection reports no column types, so there is nothing to compare.
+
+`fieldCategory` and `dbTypeCategory` are shared with the drift report
+rather than copied, so the migration generator and `forge diff` can never
+disagree about what two types are.
+
+553 tests (was 538).
+
 ## 2.9.0 — a migration you can generate without a database
 
 **Minor.** `forge generate` writes a migration by diffing the schema

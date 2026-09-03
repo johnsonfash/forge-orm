@@ -83,6 +83,31 @@ async function main(): Promise<void> {
   // with no idea it did not come from a database.
   const pairs = custom ? [] : generateMigration(schema as Record<string, unknown>, snapshot);
 
+  // A refused change stops the whole run. Writing the file without it
+  // would produce a migration that applies cleanly and leaves the schema
+  // and the database disagreeing — which is the failure this stage
+  // exists to remove, not a smaller version of it.
+  const blocked = pairs.filter((p) => p.unsafe);
+  if (blocked.length > 0) {
+    console.error(
+      `\n[forge:generate] refusing to generate ${blocked.length} change(s). ` +
+        `Each needs a decision forge cannot make for you.\n`,
+    );
+    for (const b of blocked) {
+      console.error(`  ✖ ${b.note}`);
+      console.error(`    ${b.unsafe!.reason}`);
+      console.error(`    → ${b.unsafe!.guidance}\n`);
+    }
+    const safe = pairs.length - blocked.length;
+    if (safe > 0) {
+      console.error(
+        `  ${safe} other change(s) in this diff are safe and were NOT written — ` +
+          `fix or revert the above, then run again.\n`,
+      );
+    }
+    process.exit(2);
+  }
+
   if (!custom && pairs.length === 0) {
     console.log('[forge:generate] schema matches the last snapshot — nothing to generate.');
     return;
