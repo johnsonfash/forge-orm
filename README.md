@@ -2379,6 +2379,42 @@ npx forge --help
 
 `DATABASE_URL` is read from your `.env` or environment.
 
+### `forge generate` — a migration without a database
+
+```bash
+npx forge generate --name add-org-slug
+```
+
+Diffs your schema against the **last committed snapshot** in
+`migrations/meta/` and writes a numbered `.sql` plus a new snapshot.
+Nothing connects.
+
+```
+migrations/
+  meta/_journal.json          ordering
+  meta/0002_snapshot.json     the schema's shape after 0002
+  0002_add-org-slug.sql
+```
+
+`forge diff apply` still generates by introspecting the live database —
+that is the right tool for **adopting** a database somebody else created.
+For everyday work it is the wrong one: CI has no database, so nothing can
+check that a schema change shipped with its migration, and two developers
+on two branches each generate against their own local state.
+
+A snapshot is just **what `introspect()` would return if the schema were
+applied**, so the differ takes it without knowing it came from a file.
+
+```bash
+npx forge generate --check      # CI: exit 3 if a migration is missing
+npx forge generate --custom     # empty up/down for a backfill
+```
+
+It is a projection, not a recording: it describes the schema, never what
+a database contains. `forge diff` against the live database remains the
+answer to *"is production actually what we think it is?"* See
+[MIGRATIONS.md](./docs/MIGRATIONS.md).
+
 ### Asking a command what it does
 
 Every subcommand takes `--help`, anywhere in the arguments:

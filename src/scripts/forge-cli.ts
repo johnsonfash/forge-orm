@@ -11,6 +11,7 @@ function help() {
 forge — schema sync for MongoDB, PostgreSQL, MySQL & SQLite.
 
 Usage:
+  forge generate              Write a migration from the last snapshot (no DB)
   forge push                  Idempotently sync your schema to the live DB
   forge diff                  Show drift between the live DB and your schema
   forge diff --json           Same, machine-readable
@@ -55,6 +56,21 @@ Full docs: https://github.com/johnsonfash/forge-orm#readme
 
 /** What each subcommand does, for `forge <cmd> --help`. */
 const SUBCOMMAND_HELP: Record<string, string> = {
+  generate: `forge generate — write a migration WITHOUT a database.
+
+  Diffs the schema against the last committed snapshot in
+  migrations/meta/ and writes a numbered .sql plus a new snapshot. The
+  same schema always produces the same SQL, so the migration is
+  reviewable in the pull request that changes the schema.
+    --name <label>      name the file
+    --dialect <kind>    postgres | mysql | sqlite (else read from
+                        DATABASE_URL's scheme — nothing connects)
+    --check             exit 3 if the schema has changes with no
+                        migration (for CI)
+    --custom            empty up/down, for a data migration
+
+  Use \`forge diff apply\` instead when ADOPTING an existing database:
+  that one introspects what is really there.`,
   push: `forge push — idempotently sync the schema to the live database.
 
   Creates and rebuilds INDEXES to match the schema. It does not create,
@@ -103,6 +119,9 @@ async function main() {
   switch (cmd) {
     case 'push':
       await import('./push');
+      return;
+    case 'generate':
+      await import('./generate');
       return;
     case 'diff': {
       if (args[1] === 'apply') {

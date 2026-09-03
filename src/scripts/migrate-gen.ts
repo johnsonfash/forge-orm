@@ -1,9 +1,10 @@
 import type { DbIntrospection } from '../adapters/types';
 import type { Dialect } from '../adapters/postgres/dialect';
+import { dialectFor } from './dialects';
+import { buildSchemaDDL as buildPgDDL } from '../adapters/postgres/ddl';
+import { buildSchemaDDL as buildMysqlDDL } from '../adapters/mysql/ddl';
+import { buildSchemaDDL as buildSqliteDDL } from '../adapters/sqlite/ddl';
 import type { FieldDef, ModelDef, RelationDef } from '../schema/types';
-import { PostgresDialect } from '../adapters/postgres/dialect';
-import { MysqlDialect } from '../adapters/mysql/dialect';
-import { SqliteDialect } from '../adapters/sqlite/dialect';
 
 // Reconciliation migration generator. Compares the declared schema to a
 // DbIntrospection snapshot and emits SQL to bring the DB up to the schema
@@ -13,13 +14,6 @@ import { SqliteDialect } from '../adapters/sqlite/dialect';
 // Mongo is index-managed via forge push, not SQL migrations — SQL-only here.
 
 export interface MigrationPair { up: string; down: string; note: string; }
-
-function dialectFor(kind: string): Dialect | null {
-  if (kind === 'postgres') return PostgresDialect;
-  if (kind === 'mysql') return MysqlDialect;
-  if (kind === 'sqlite') return SqliteDialect;
-  return null;
-}
 
 function colDef(d: Dialect, name: string, f: FieldDef): string {
   const type = d.columnType(f);
@@ -35,11 +29,23 @@ function idxName(table: string, unique: boolean, cols: string[]): string {
   return `forge_${table}_${unique ? 'uq' : 'idx'}_${cols.join('_')}`;
 }
 
+/** The full CREATE DDL for one model, in the right dialect. */
+function buildDDLFor(
+  kind: string,
+  one: Record<string, unknown>,
+): { kind: string; sql: string; name: string }[] {
+  if (kind === 'postgres') return buildPgDDL(one as never);
+  if (kind === 'mysql') return buildMysqlDDL(one as never);
+  if (kind === 'sqlite') return buildSqliteDDL(one as never);
+  return [];
+}
+
 export function generateMigration(
   schema: Record<string, any>,
   actual: DbIntrospection,
 ): MigrationPair[] {
   const d = dialectFor(actual.kind);
+  const kind = actual.kind;
   if (!d) return [];
   const pairs: MigrationPair[] = [];
   const actualTables = new Map(actual.tables.map((t) => [t.name, t]));
@@ -50,13 +56,26 @@ export function generateMigration(
     const q = d.quoteIdent(m.collection);
     const act = actualTables.get(m.collection);
 
-    // Whole table missing → defer to buildSchemaDDL for the full create.
+    // Whole table missing → the real CREATE TABLE, plus its indexes and
+    // constraints.
+    //
+    // This used to emit a COMMENT — `-- create table 'x' via forge:push`
+    // — on the assumption that push would do the work. For a migration
+    // generated against a live database that was survivable, because
+    // push had usually just run. For one generated against a snapshot it
+    // is not: the file is the only record, and a migration whose `up` is
+    // a comment applies cleanly and creates nothing.
     if (!act) {
-      pairs.push({
-        up: `-- create table '${m.collection}' via forge:push (full DDL)`,
-        down: `DROP TABLE IF EXISTS ${q}`,
-        note: `create table ${m.collection}`,
-      });
+      const ddl = buildDDLFor(kind, { [key]: m } as Record<string, unknown>);
+      for (const stmt of ddl) {
+        pairs.push({
+          up: stmt.sql,
+          // Dropping the table takes its indexes and constraints with it,
+          // so only the table statement needs a reverse.
+          down: stmt.kind === 'table' ? `DROP TABLE IF EXISTS ${q}` : '-- (dropped with the table)',
+          note: `${stmt.kind === 'table' ? 'create table' : `create ${stmt.kind}`} ${stmt.name}`,
+        });
+      }
       continue;
     }
 

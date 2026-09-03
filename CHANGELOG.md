@@ -4,6 +4,89 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.9.0 — a migration you can generate without a database
+
+**Minor.** `forge generate` writes a migration by diffing the schema
+against the **last committed snapshot** instead of against a live
+database.
+
+```bash
+npx forge generate --name add-org-slug
+```
+
+```
+migrations/
+  meta/_journal.json          ordering
+  meta/0002_snapshot.json     the schema's shape after 0002
+  0002_add-org-slug.sql
+```
+
+### Why
+
+`forge diff apply` generates by introspecting `DATABASE_URL`. That is
+right for **adopting** a database somebody else created and wrong for
+everything else:
+
+- CI has no database, so nothing could verify that a schema change
+  shipped with its migration
+- two developers on two branches each generated against their own local
+  state, so each file was correct only relative to a world that stops
+  existing at the merge
+- the same schema did not reliably produce the same SQL, so a reviewer
+  could not regenerate a migration to check it against the schema change
+  in the same pull request
+
+A snapshot is simply **what `introspect()` would return if this schema
+were applied**. `diffIntrospection` already takes a `DbIntrospection` as
+its "actual" side and cannot tell where it came from — so the change is
+about supplying that from a committed file rather than a socket, and the
+comparison code did not move at all.
+
+### The CI gate this unlocks
+
+```bash
+npx forge generate --check     # exit 3, and names what is missing
+```
+
+```
+[forge:generate] 1 change(s) are in the schema but not in any migration.
+  - add orgs.region
+```
+
+That check is impossible for a database-backed generator, and it is the
+main reason to adopt snapshots.
+
+### Also
+
+**`--custom`** writes an empty up/down that takes its place in the
+ordered history — for a backfill, or the first half of a two-step change
+(clean the NULLs, *then* add `NOT NULL`). Its snapshot is deliberately
+unchanged: forge cannot know what hand-written SQL does, and guessing
+would corrupt every later diff.
+
+**A create-table migration now contains the `CREATE TABLE`.** It emitted
+`-- create table 'x' via forge:push` on the assumption push had just run.
+Survivable when generating against a live database; not when the file is
+the only record — a migration whose `up` is a comment applies cleanly and
+creates nothing.
+
+**Snapshots are sorted** — tables, columns, indexes, keys — so reordering
+two models in the schema file produces no diff, and the diff you see in
+review is the change you made.
+
+**One dialect per folder**, refused rather than diffed. Column types and
+index shapes differ, so diffing a postgres schema against a mysql
+snapshot would emit an `ALTER` for every column in the schema.
+
+**Mongo refuses**, and should: there is no DDL to migrate, indexes are
+reconciled by `forge push`, which is idempotent and needs no history.
+
+`forge diff apply` is unchanged and remains the tool for adopting an
+existing database. See [MIGRATIONS.md](./docs/MIGRATIONS.md) and
+[VS-DRIZZLE.md](./docs/VS-DRIZZLE.md).
+
+538 tests (was 524).
+
 ## 2.8.1 — the 2.8.0 changes, written down
 
 **Patch.** No code change. 2.8.0 shipped six fixes and two additions and
