@@ -2442,6 +2442,33 @@ not work: a `DEFAULT` applies to new rows, not to the NULLs already
 there. SQLite is refused for any of it — it has no `ALTER COLUMN`, and
 forge will not generate the twelve-step rebuild blind.
 
+### `renamedFrom` — a rename is not a drop and an add
+
+Comparing two schema states shows only that one name is gone and another
+appeared. A rename and a drop-plus-add look identical from there, and
+they do opposite things to the data.
+
+```ts
+name: f.string().renamedFrom('full_name'),
+```
+
+```sql
+ALTER TABLE "orgs" RENAME COLUMN "full_name" TO "name";
+```
+
+Without the annotation, a same-typed drop+add is **refused** with the
+line to add printed, and `--allow-drop` is how you confirm a column
+really is going.
+
+drizzle-kit asks this with an interactive prompt. Same question, wrong
+medium — a prompt answered once at 2am is recorded nowhere, cannot run in
+CI, and is invisible in review. An annotation is in the schema, the diff
+and the pull request.
+
+Renaming **and** changing a type emits both statements, in order. That
+one is a known drizzle-kit bug where the type change is silently lost.
+See [MIGRATIONS.md](./docs/MIGRATIONS.md).
+
 ### Asking a command what it does
 
 Every subcommand takes `--help`, anywhere in the arguments:

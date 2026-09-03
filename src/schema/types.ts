@@ -113,6 +113,9 @@ export interface FieldDef {
   //                 AUTO_INCREMENT, SQLite INTEGER PRIMARY KEY AUTOINCREMENT).
   //                 Throws on Mongo at push. JS: number.
   idType?: 'auto' | 'uuid' | 'bigserial' | 'string';
+ /** The column's previous name, so a migration emits RENAME COLUMN
+  *  instead of a drop and an add. Generation-time only. */
+  renamedFrom?: string;
 }
 
 /**

@@ -23,6 +23,7 @@ import {
 //   npx forge generate --dialect postgres # when DATABASE_URL is absent
 //   npx forge generate --check            # CI: fail if a migration is missing
 //   npx forge generate --custom           # empty up/down for a data migration
+//   npx forge generate --allow-drop       # yes, that column really is going
 //
 // The difference from `forge diff apply` is where the "before" comes
 // from. `diff apply` introspects the live database, which is right when
@@ -81,7 +82,12 @@ async function main(): Promise<void> {
 
   // The snapshot IS a DbIntrospection, so the existing differ takes it
   // with no idea it did not come from a database.
-  const pairs = custom ? [] : generateMigration(schema as Record<string, unknown>, snapshot);
+  // `--allow-drop` confirms that a column disappearing really is a
+  // deletion and not a rename forge failed to recognise.
+  const allowDrop = process.argv.includes('--allow-drop');
+  const pairs = custom
+    ? []
+    : generateMigration(schema as Record<string, unknown>, snapshot, { allowDrop });
 
   // A refused change stops the whole run. Writing the file without it
   // would produce a migration that applies cleanly and leaves the schema

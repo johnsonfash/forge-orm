@@ -47,6 +47,27 @@ export class Field<T, K extends FieldKind = FieldKind> {
     return new Field<T, K>({ ...this.def, updatedAt: true });
   }
 
+  /**
+   * This column used to be called something else.
+   *
+   * A generator comparing two schema states sees only that one name is
+   * gone and another has appeared. It cannot tell a rename from a drop
+   * and an add — and it guesses wrong in the direction that loses data,
+   * silently, on a column somebody meant to keep.
+   *
+   *     name: f.string().renamedFrom('full_name'),
+   *
+   * With this, the migration is `ALTER TABLE … RENAME COLUMN`, the rows
+   * survive, and the intent is recorded in the schema, in the diff, and
+   * in review — where a prompt answered once at 2am is recorded nowhere.
+   *
+   * Keep it until the migration has shipped everywhere it needs to, then
+   * delete it. It affects generation only; nothing reads it at runtime.
+   */
+  renamedFrom(previous: string): Field<T, K> {
+    return new Field<T, K>({ ...this.def, renamedFrom: previous });
+  }
+
   // Opt the field into auto-FTS-index emission via forge:push. Querying works
   // on any column regardless; `.searchable()` just guarantees the backing index
   // exists.

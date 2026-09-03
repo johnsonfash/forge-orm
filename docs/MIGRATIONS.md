@@ -1347,3 +1347,119 @@ shape we do not understand than to emit an `ALTER` for it.
 
 Mongo is skipped entirely: introspection reports no column types, so
 there is nothing to compare.
+
+---
+
+# Renames (2.11.0)
+
+Comparing two schema states shows only that one column name is gone and
+another has appeared. A **rename** and a **drop plus an add** look
+identical from there — and they do opposite things to the data. One keeps
+every row; the other deletes a column's worth of it.
+
+Guessing "drop and add" loses data on a column somebody meant to keep.
+Guessing "rename" is worse: it keeps a column somebody meant to delete,
+and quietly moves its data under a new name.
+
+forge does not guess. It takes the answer from the schema.
+
+## `renamedFrom`
+
+```ts
+export const Org = model('orgs', {
+  id: f.id(),
+  name: f.string().renamedFrom('full_name'),
+});
+```
+
+```sql
+-- up
+ALTER TABLE "orgs" RENAME COLUMN "full_name" TO "name";
+
+-- down
+ALTER TABLE "orgs" RENAME COLUMN "name" TO "full_name";
+```
+
+Every row survives, and the intent is in the schema, in the diff, and in
+the pull request.
+
+Delete the annotation once the migration has shipped everywhere it needs
+to. It affects generation only — nothing reads it at runtime.
+
+## Without it, forge asks
+
+```
+✖ orgs.full_name dropped, name added
+  orgs.full_name is gone and a new column of the same type has appeared
+  (name). forge cannot tell a rename from a drop and an add, and the two
+  do opposite things to the data in that column.
+  → If it is a rename, say so in the schema:
+    `name: f.…().renamedFrom('full_name')` — the migration becomes a
+    RENAME COLUMN and every row survives. If full_name really is being
+    deleted, re-run with --allow-drop to confirm you mean to lose it.
+```
+
+Exit 2, nothing written.
+
+**Only same-typed pairs are suspected.** A dropped `text` column beside a
+new `integer` one is not a rename candidate — flagging that would make
+every genuine drop noisy, and a check people learn to skip past protects
+nothing.
+
+A drop with nothing added is never a rename question. It is just a drop.
+
+## `--allow-drop`
+
+```bash
+npx forge generate --allow-drop --name remove-legacy-columns
+```
+
+How you say *"it really is a drop, I mean to lose it"*. Deliberately a
+flag and not a prompt: it appears in the shell history and in whatever
+ran the command.
+
+## Why an annotation rather than a prompt
+
+drizzle-kit asks the same question interactively — *"is `full_name` a
+rename of `name`, or a new column?"* That is the right question in the
+wrong medium:
+
+- a prompt answered once at 2am is **recorded nowhere**
+- it **cannot run in CI**, so the check is absent exactly where an
+  automated pipeline would apply the migration
+- the answer is **invisible in review** — a reader sees the SQL, not the
+  reasoning
+- and it must be answered **again** by the next person who regenerates
+
+An annotation is in the schema. It is part of the diff, part of the pull
+request, and part of the answer to *"why did this column change name?"*
+a year later.
+
+## Renaming **and** changing a type
+
+Both statements are emitted, in order:
+
+```sql
+-- up
+ALTER TABLE `orgs` RENAME COLUMN `full_name` TO `name`;
+ALTER TABLE `orgs` MODIFY COLUMN `name` TEXT NOT NULL;
+
+-- down
+-- narrowing name back to varchar(255) can fail on rows added since;
+-- review before rolling back.
+ALTER TABLE `orgs` MODIFY COLUMN `name` varchar(255);
+ALTER TABLE `orgs` RENAME COLUMN `name` TO `full_name`;
+```
+
+This is a known drizzle-kit bug ([#5499][r1], [#3826][r2]): renaming and
+changing a column in one step emits **only the rename**, and the type
+change is silently lost. Here the rename runs first and the ordinary
+`ALTER` follows it — so either both appear, or the run is refused because
+the type change itself is unsafe.
+
+Ordering is not cosmetic. A rename after the `ADD` would find the new
+column already there; one after the `DROP` would have nothing left to
+rename. Renames run before every other column pass.
+
+[r1]: https://github.com/drizzle-team/drizzle-orm/issues/5499
+[r2]: https://github.com/drizzle-team/drizzle-orm/issues/3826
