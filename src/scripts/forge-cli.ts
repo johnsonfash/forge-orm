@@ -53,11 +53,47 @@ Full docs: https://github.com/johnsonfash/forge-orm#readme
 `);
 }
 
+/** What each subcommand does, for `forge <cmd> --help`. */
+const SUBCOMMAND_HELP: Record<string, string> = {
+  push: `forge push — idempotently sync the schema to the live database.
+
+  Creates and rebuilds INDEXES to match the schema. It does not create,
+  drop or alter tables/collections, and it never touches rows.
+  Reads DATABASE_URL.`,
+  diff: `forge diff — report drift between the live database and the schema.
+
+  Read-only. Nothing is written.
+    --json            machine-readable
+    --check           exit 3 when drift is found (for CI)
+    --ignore=<list>   skip tables (exact names or /regex/); FORGE_DIFF_IGNORE too
+    apply             generate + run a reconciliation migration (WRITES)`,
+  rollback: `forge rollback — roll back the most recently applied migration.`,
+  doctor: `forge doctor — pre-flight adapter checks and schema linting.
+
+  Read-only.`,
+};
+
 async function main() {
   const args = process.argv.slice(2);
-  if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
+  const wantsHelp = args.some((a) => a === '--help' || a === '-h');
+
+  if (args.length === 0 || (wantsHelp && args.length === 1)) {
     help();
     process.exit(args.length === 0 ? 1 : 0);
+  }
+
+  // `forge push --help` used to RUN THE PUSH: only args[0] was checked, so
+  // the flag fell through to the subcommand, which ignored it. Asking a
+  // schema tool what a command does should never be the way you find out.
+  if (wantsHelp) {
+    const sub = args.find((a) => !a.startsWith('-'));
+    const text = sub ? SUBCOMMAND_HELP[sub] : undefined;
+    if (text) {
+      console.log(`\n${text}\n`);
+      process.exit(0);
+    }
+    help();
+    process.exit(sub ? 1 : 0);
   }
 
   const cmd = args[0];
@@ -81,6 +117,9 @@ async function main() {
       await import('./rollback');
       return;
     case 'doctor':
+      // doctor only self-runs when executed directly; the CLI imports it,
+      // so ask for the run explicitly.
+      process.env.FORGE_DOCTOR_RUN = '1';
       await import('./doctor');
       return;
     default:

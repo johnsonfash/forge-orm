@@ -162,6 +162,10 @@ export function expectedFromSchema(schema: Record<string, any>): {
       // comparison below; only the column-set signature skips them.
       if (!idx.expression) {
         indexSigs.add(indexSig(idx.unique === true, Object.keys(idx.keys)));
+        // …and under Mongo's own name for the primary key, so the signature
+        // matches whichever spelling the schema used.
+        const asMongo = Object.keys(idx.keys).map((k) => (k === 'id' ? '_id' : k));
+        indexSigs.add(indexSig(idx.unique === true, asMongo));
       }
       indexDecls.push({
         name: idx.name,
@@ -192,6 +196,18 @@ export function expectedFromSchema(schema: Record<string, any>): {
   }
 
   return { tables, views };
+}
+
+/** `id` in a schema index key is Mongo's `_id`. Only on Mongo — every SQL
+ *  dialect has a column genuinely called whatever the schema says. */
+function mongoKeys(
+  keys: Record<string, unknown>,
+  dialect: AdapterKind,
+): Record<string, unknown> {
+  if (dialect !== 'mongo' || !('id' in keys)) return keys;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(keys)) out[k === 'id' ? '_id' : k] = v;
+  return out;
 }
 
 // Coarse categories so type comparison survives dialect quirks. Returns
@@ -359,7 +375,10 @@ export function diffIntrospection(
       // 'hashed'). Only checked when the introspect adapter populated
       // keySpec (Mongo).
       if (ix.keySpec) {
-        const a = JSON.stringify(canonOrdered(decl.keys));
+        // The schema calls the primary key `id`; Mongo stores it as `_id`,
+        // and the push adapter now translates it. Compare like for like or
+        // every such index reports as permanent drift.
+        const a = JSON.stringify(canonOrdered(mongoKeys(decl.keys, dialect)));
         const b = JSON.stringify(canonOrdered(ix.keySpec));
         if (a !== b) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${decl.name}' keys: schema=${a} db=${b}` });
       }
@@ -382,7 +401,11 @@ export function diffIntrospection(
     if (expected.views.some((v) => v.name === name)) continue;  // matview-backing table
     if (name === '_forge_migrations' || /_fts/i.test(name)) continue;
     if (ignore.length > 0 && matchesIgnore(name, ignore)) { ignored.push(name); continue; }
-    items.push({ kind: 'table', direction: 'extra', table: name, detail: `table '${name}' in DB but not in schema` });
+    // Say what push will DO with it. "in DB but not in schema" reads like a
+    // deletion plan; push only reconciles indexes and never drops a table,
+    // and at least one team wrote a "do not run forge push" warning into
+    // their own docs on the strength of this line.
+    items.push({ kind: 'table', direction: 'extra', table: name, detail: `table '${name}' is not managed by forge — push will leave it alone` });
   }
 
   // Views.

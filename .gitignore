@@ -22,3 +22,6 @@ temp_interactive_push.bat
 
 # local publish credential — never commit
 npm-token.txt
+
+# npm auth written at publish time — never commit
+.npmrc

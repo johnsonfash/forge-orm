@@ -82,7 +82,13 @@ const make = <T, K extends FieldKind>(kind: K): Field<T, K> =>
 // Primary-key strategies. `bigserial` is the only one that flips the JS-side
 // row type from string → number; the others stay string-shaped so consumers
 // can still pass UUIDs around as opaque tokens.
-export type IdTypeName = 'auto' | 'uuid' | 'bigserial';
+// `string` is an APPLICATION-supplied key: forge generates nothing and
+// stores the value exactly as given. It exists for natural keys — a row
+// whose identity IS its content, e.g. `"<orgId>:<series>"` for a counter
+// that must be updated atomically by a single upsert. Without it such a
+// collection cannot be declared at all, so it stays invisible to push,
+// diff and doctor.
+export type IdTypeName = 'auto' | 'uuid' | 'bigserial' | 'string';
 export type IdJsType<T extends IdTypeName> = T extends 'bigserial' ? number : string;
 export interface IdFactory {
   (): Field<string, 'id'>;
@@ -106,8 +112,11 @@ export const f = {
       optional: false,
       unique: true,
       updatedAt: false,
-      // bigserial is DB-assigned — no app-side default.
-      ...(idType === 'bigserial' ? {} : { default: { kind: 'autoId' as const } }),
+      // bigserial is DB-assigned and `string` is caller-assigned — neither
+      // gets an app-side generator.
+      ...(idType === 'bigserial' || idType === 'string'
+        ? {}
+        : { default: { kind: 'autoId' as const } }),
       idType,
     });
   }) as IdFactory,
@@ -288,6 +297,30 @@ export interface ModelOptions {
   indexes?: IndexDef[];
   // Composite uniques: @@unique([user_email, business_id]) → [['user_email','business_id']]
   uniques?: string[][];
+ /**
+  * The field EVERY read of this model is filtered by — a tenant key, an
+  * account id, whatever the application scopes on.
+  *
+  * Purely declarative: forge does not add the filter, because it cannot
+  * know where the value comes from. Applications inject it themselves,
+  * typically with a proxy around the client. What forge can do is CHECK
+  * it, and `doctor` warns when nothing indexes the scope field.
+  *
+  * That check exists because the failure is silent and expensive. In one
+  * multi-tenant schema, 66 collections holding 27,367 rows had no index
+  * on their tenant key, so every read scanned the whole collection to
+  * find one tenant's rows. It hid because those tables look small in
+  * development — they have one row per customer, so they grow with the
+  * customer list rather than with usage, and the scan gets slower for
+  * everyone at once. Measured after indexing: 6,486 documents examined
+  * became 40.
+  *
+  *   model('appointments', fields, {
+  *     scopeBy: 'orgId',
+  *     indexes: [{ keys: { orgId: 1, createdAt: -1 } }],
+  *   })
+  */
+  scopeBy?: string;
 }
 
 // `.relate()` is a separate chained call (not inline model() options) on
@@ -327,6 +360,7 @@ export const model = <F extends Record<string, Field<any, any>>>(
     relations: options.relations || (() => ({})),
     indexes: options.indexes || [],
     uniques: options.uniques || [],
+    ...(options.scopeBy ? { scopeBy: options.scopeBy } : {}),
   };
   def.relate = function (rels: () => Record<string, RelationDef>) {
     this.relations = rels;
