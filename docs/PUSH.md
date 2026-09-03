@@ -827,3 +827,37 @@ Pin CI on exit code `=== 0` for "clean apply needed for the deploy to proceed". 
 * [VECTOR.md](./VECTOR.md) — vector fields, pgvector / sqlite-vec / VSS, and the brute-force fallback.
 * [FTS.md](./FTS.md) — `.searchable()` per dialect: FTS5 shadow tables, tsvector indexes, FULLTEXT, Mongo text.
 * [BROWSER.md](./BROWSER.md#dbmigrate--runtime-ddl-apply--drift-detection) — `db.$migrate()`, the runtime equivalent of push for the browser / Tauri / mobile path.
+
+## An equivalent index under a different name (2.8.0)
+
+When the database already holds an index with the same keys and options
+under an older name — usually one that predates the schema declaration —
+push cannot create the schema's name on top of it. Mongo refuses with
+`IndexOptionsConflict`.
+
+Until 2.8.0 that produced a warning on **every** push, forever, for an
+index where nothing was actually wrong:
+
+```
+⚠ idx_PosSale_orgId_number_uq could not be created:
+  Index already exists with a different name: uq_pos_invoices_org_number
+```
+
+Nothing could be done about it short of dropping an index on live data,
+and a warning you cannot act on trains people to ignore warnings. It is
+now a quiet one-line note that says what it means:
+
+```
+≡ idx_PosSale_orgId_number_uq — same index already present as
+  'uq_pos_invoices_org_number'. Keys and options match; only the name
+  differs. Run with FORGE_RENAME_INDEXES=1 to adopt the schema name.
+```
+
+Adopting is opt-in because it is a drop-and-recreate on a live index:
+
+```bash
+FORGE_RENAME_INDEXES=1 npx forge push
+```
+
+On a large collection that rebuild is not free, and on a unique index
+there is a window where the constraint is absent. Choose the moment.

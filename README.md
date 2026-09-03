@@ -439,7 +439,7 @@ Full release history is in [CHANGELOG.md](./CHANGELOG.md). Recent highlights:
 - **1.5 — `col()` for field-to-field comparison.** Compare one column against
   another inside a `where` (`{ currentUsage: { lt: col('globalLimit') } }`),
   portable across every dialect.
-- **1.4 — primary-key strategies on `f.id()`** (`auto` / `uuid` / `bigserial`).
+- **1.4 — primary-key strategies on `f.id()`** (`auto` / `uuid` / `bigserial` / `string`).
 
 ---
 
@@ -772,6 +772,7 @@ id: f.id()                            // default — app-generated string id (st
 id: f.id({ type: 'auto' })            // same as the default; explicit form
 id: f.id({ type: 'uuid' })            // DB-typed UUID column (PG `uuid`, MySQL `CHAR(36)`)
 id: f.id({ type: 'bigserial' })       // auto-incrementing integer PK — number in TS
+id: f.id({ type: 'string' })          // YOU supply it — nothing is generated
 ```
 
 What each one emits per dialect:
@@ -781,6 +782,23 @@ What each one emits per dialect:
 | `auto` (default) | `text`                     | `VARCHAR(64)`                      | `TEXT`                                  | `TEXT` / `NVARCHAR(64)` | `ObjectId`       | `string` |
 | `uuid`       | `uuid`                         | `CHAR(36)`                         | `TEXT`                                  | (same as `auto`) | (same as `auto`) | `string` |
 | `bigserial`  | `BIGSERIAL`                    | `BIGINT NOT NULL AUTO_INCREMENT`   | `INTEGER PRIMARY KEY AUTOINCREMENT`     | `BIGINT … IDENTITY` (MSSQL) | **throws at push** | `number` |
+| `string`     | `text`                         | `VARCHAR(255)`                     | `TEXT`                                  | (same as `auto`) | stored verbatim  | `string` |
+
+`string` (2.8.0) is the one you assign yourself. Use it for a **natural
+key** — a row whose identity is its content, so one upsert is atomic on
+one document:
+
+```ts
+// "<orgId>:<series>" — one row per counter, incremented in a single write.
+export const NumberSequence = model('number_sequences', {
+  id: f.id({ type: 'string' }),
+  seq: f.int().default(0),
+});
+```
+
+On Mongo the value is stored verbatim and never coerced to an ObjectId —
+a 24-hex natural key would otherwise be rewritten and every lookup would
+miss. See [PRIMARY-KEYS.md](./docs/PRIMARY-KEYS.md).
 
 `bigserial` is the SQL-only opt-in. Forge runs `forge push` on Mongo with a
 clear error if you use it (`'bigserial' has no Mongo equivalent`), so a
@@ -2361,6 +2379,19 @@ npx forge --help
 
 `DATABASE_URL` is read from your `.env` or environment.
 
+### Asking a command what it does
+
+Every subcommand takes `--help`, anywhere in the arguments:
+
+```bash
+npx forge push --help    # says plainly: indexes only, never tables or rows
+npx forge diff --help    # flags, and which of them write
+```
+
+Before 2.8.0 only the first argument was checked, so `forge push --help`
+**ran the push**. Asking a schema tool what a command does should not be
+the way you find out.
+
 ### Pointing the CLI at your schema
 
 forge resolves the consumer's schema through a layered cascade — explicit
@@ -2431,6 +2462,54 @@ npx forge diff
 Patterns wrapped in `/.../flags` are treated as regex; everything else is an
 exact-match string. Ignored tables are summarised at the end of the report
 (`ignored 2 tables: logs, sessions`) so silent filtering can't hide real drift.
+
+### `scopeBy` — declare your tenant key, get an index lint
+
+Multi-tenant apps filter every read by a tenant key, usually through a
+proxy that injects it. Forge cannot add that filter — it does not know
+where the value comes from — but it can check that something **indexes**
+it:
+
+```ts
+export const Appointment = model('appointments', {
+  id: f.id(),
+  orgId: f.objectId(),
+  createdAt: f.dateTime().default('now'),
+}, {
+  scopeBy: 'orgId',
+  indexes: [{ keys: { orgId: 1, createdAt: -1 }, name: 'idx_appt_org' }],
+});
+```
+
+`forge doctor` warns when nothing does. The check earns its keep because
+the failure is invisible in development: a scoped table holds one row per
+tenant, so it looks tiny early and grows with the customer list rather
+than with usage — every tenant gets slower at once, and nothing in the
+app changed.
+
+Measured on a real 24-tenant schema: 66 collections holding 27,367 rows
+had no index on their tenant key. One hot query went from **6,486
+documents examined to 40**.
+
+An index whose first key is a more selective foreign key satisfies the
+rule too — a `threadId` already implies its tenant. See
+[MULTI-TENANT.md](./docs/MULTI-TENANT.md).
+
+### `id` in an index key means `_id` on Mongo
+
+The schema calls the primary key `id`; Mongo stores it as `_id`. Reads
+and writes have always translated. **Index keys did too, from 2.8.0** —
+before that they were passed through verbatim, so this:
+
+```ts
+indexes: [{ keys: { threadId: 1, createdAt: -1, id: -1 } }]
+```
+
+created a real index on a field literally called `id`, which no document
+has. Nothing reported it: push said `created`, doctor said nothing, and
+it showed in `getIndexes()`. Only `explain()` revealed the sort was still
+done in memory. If you have such an index, the first push on 2.8.0
+rebuilds it. See [INDEXES.md](./docs/INDEXES.md).
 
 ### `forge doctor` — live capability probe
 

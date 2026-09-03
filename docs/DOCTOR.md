@@ -785,3 +785,52 @@ Pair this with the React Query `db-health` query in [the runtime example](#runti
 * **README's [Doctor](../README.md#doctor) note** — one-paragraph entry point. This file is the deep reference.
 
 Back to the [README index](../README.md#contents).
+
+## Lint changes in 2.8.0
+
+### A portable index is no longer called "ignored at push"
+
+An index may legitimately carry **both dialects** — a Mongo
+`partialFilterExpression` and a SQL `where` string — so one schema serves
+every adapter:
+
+```ts
+{
+  keys: { orgId: 1, idempotencyKey: 1 },
+  unique: true,
+  partialFilterExpression: { idempotencyKey: { $type: 'string' } },  // Mongo
+  where: '"idempotencyKey" IS NOT NULL',                             // SQL
+}
+```
+
+Doctor used to see the SQL half and report the whole index as *ignored at
+push* — including UNIQUE ones. It was not true. The Mongo push reads
+`partialFilterExpression` and ignores `where`, exactly as intended, and
+creates the index correctly every time. Verified by dropping such an
+index and re-running push: it came back with `unique: true` and its
+filter intact.
+
+That warning was worse than noise. Acting on it meant deleting a working
+duplicate guard.
+
+Doctor now warns only when Mongo genuinely gets nothing — a string
+`where` with **no** `partialFilterExpression` beside it, which really
+does produce an index without the filter:
+
+```
+⚠ index 'idx_t_a' has a string 'where' and no partialFilterExpression —
+  Mongo cannot use a SQL predicate, so the index will be created WITHOUT
+  the filter. Add partialFilterExpression for the Mongo equivalent.
+```
+
+### A new check: `scopeBy` without an index
+
+See [MULTI-TENANT.md](./MULTI-TENANT.md#scopeby--declare-the-tenant-key-get-a-lint-280).
+A model that declares `scopeBy` is read with that field in the filter on
+every query; doctor warns when no index starts with it.
+
+### doctor no longer runs on import
+
+The module self-executes only when invoked directly. Importing it — from
+a test, or another tool that wants to reuse the lint rules — used to run
+a full environment check and open a database connection.
