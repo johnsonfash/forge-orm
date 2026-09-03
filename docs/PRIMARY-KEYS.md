@@ -49,13 +49,14 @@ Related deep-dives:
 The actual API from `src/schema/core.ts`:
 
 ```ts
-export type IdTypeName = 'auto' | 'uuid' | 'bigserial';
+export type IdTypeName = 'auto' | 'uuid' | 'bigserial' | 'string';
 export type IdJsType<T extends IdTypeName> = T extends 'bigserial' ? number : string;
 
 f.id()                         // { type: 'auto' } — JS string
 f.id({ type: 'auto' })         // explicit
 f.id({ type: 'uuid' })         // typed UUID column, JS string
 f.id({ type: 'bigserial' })    // DB-assigned integer, JS number
+f.id({ type: 'string' })       // YOU assign it. Nothing is generated.
 ```
 
 Three kinds. That's it. Anything else — ULID, CUID, Snowflake, NanoID,
@@ -69,6 +70,38 @@ need different DDL or different wrapper behaviour:
 1. **`auto`** — string PK with a wrapper-supplied UUID at create time on SQL, ObjectId on Mongo.
 2. **`uuid`** — typed UUID column (`uuid` on PG, `CHAR(36)` on MySQL, `UNIQUEIDENTIFIER` on MSSQL) with a DB-side default where the dialect has one.
 3. **`bigserial`** — DB-assigned integer; the JS row type flips from `string` to `number`.
+4. **`string`** — *you* supply the key. Forge generates nothing and stores
+   the value exactly as given.
+
+### `string` — natural keys (2.8.0)
+
+Use it when the row's identity **is** its content, so that a single
+upsert is atomic on one document:
+
+```ts
+export const NumberSequence = model('number_sequences', {
+  // "<orgId>:<series>" — one document per counter.
+  id: f.id({ type: 'string' }),
+  seq: f.int().default(0),
+});
+
+// Atomic: one findOneAndUpdate, no read-then-write race.
+await db.numberSequence.upsert({
+  where: { id: `${orgId}:invoice` },
+  create: { id: `${orgId}:invoice`, seq: 1 },
+  update: { seq: { increment: 1 } },
+});
+```
+
+Before 2.8.0 this collection could not be *declared at all* — the three
+generated types were the only options — so push, diff and doctor could
+not see it, and `diff` reported it as an unmanaged table forever.
+
+On Mongo the value is stored verbatim and is **never** coerced to an
+ObjectId. That matters more than it sounds: a 24-hex natural key would
+otherwise be silently rewritten and every lookup would miss. On MySQL the
+column widens to `VARCHAR(255)`, since an application key runs past the
+64 that suffices for a generated one.
 4. (`objectId`-style FKs) — `f.objectId()` is the FK shape, not a PK; covered in [Foreign-key impact](#foreign-key-impact).
 
 Every other strategy is a string column with an app-side generator —

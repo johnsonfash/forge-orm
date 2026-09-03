@@ -885,3 +885,36 @@ application layer there.
 * [FTS.md](./FTS.md) — `searchable()` shadow tables and the search query API.
 * [JSON-PATH.md](./JSON-PATH.md) — typed JSON paths and the dialect operator matrix.
 * [MIGRATIONS.md](./MIGRATIONS.md) — `forge push`, `forge diff`, and the drift loop.
+
+## `id` in an index key means `_id` on Mongo (2.8.0)
+
+The schema calls the primary key `id`. Mongo stores it as `_id`. Reads
+and writes have always translated between the two, so `where: { id }`
+works — **index keys did not**, until 2.8.0.
+
+```ts
+indexes: [{ keys: { threadId: 1, createdAt: -1, id: -1 } }]
+```
+
+Before 2.8.0 that created a real index on a field literally called `id`,
+which no document has. Nothing reported it: push said `created`, doctor
+said nothing, and it appeared in `getIndexes()`. Only `explain()` gave it
+away — the sort the index existed for was still done in memory:
+
+```
+index on { a, id }   →  stage = SORT    (in memory)
+index on { a, _id }  →  stage = FETCH   (index-served)
+```
+
+`diff` then reported it as permanent drift, comparing the declared `id`
+against the stored `_id`.
+
+Both spellings work now and mean the same thing. Prefer `id`, to match
+the field: writing `_id` in an index while the field is `id` is the
+inconsistency that made this hard to spot in the first place.
+
+**If you have schemas that wrote `id` in an index key**, they created a
+useless index under a real name. The first `forge push` on 2.8.0 rebuilds
+it — the keys have changed, so it is dropped and recreated. Expect one
+rebuild per affected index, and check `explain()` afterwards to confirm
+the sort is now index-served.

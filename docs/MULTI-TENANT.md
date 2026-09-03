@@ -273,6 +273,69 @@ The combination of `scopedDb` + ALS + lint is what keeps shape 1 honest at scale
 
 ---
 
+## `scopeBy` — declare the tenant key, get a lint (2.8.0)
+
+Forge cannot inject your tenant filter. It does not know where the value
+comes from — a request context, an AsyncLocalStorage, a proxy you wrote.
+What it **can** do is check that something indexes it.
+
+```ts
+export const Appointment = model('appointments', {
+  id: f.id(),
+  orgId: f.objectId(),
+  startsAt: f.dateTime(),
+  createdAt: f.dateTime().default('now'),
+}, {
+  scopeBy: 'orgId',
+  indexes: [{ keys: { orgId: 1, createdAt: -1 }, name: 'idx_appt_org_created' }],
+});
+```
+
+`forge doctor` warns when nothing does:
+
+```
+⚠ [Appointment] every read is filtered by 'orgId' (scopeBy) but no index
+  starts with it — each read scans the whole collection.
+```
+
+### Why this check exists
+
+**The failure is invisible in development.** A scoped table holds one row
+per tenant, so it looks tiny while the schema is young — and it grows
+with the customer list rather than with usage. The scan gets slower for
+every tenant at once, and nothing in the application changed.
+
+Measured on a real multi-tenant schema that had 24 organisations: **66
+collections holding 27,367 rows had no index on their tenant key.** Every
+read of any of them scanned the whole collection to find one tenant's
+rows. After indexing, against the same queries forced back onto `_id`:
+
+| collection | docs examined before | after |
+|---|---|---|
+| `members` (read on every permission check) | 236 | **9** |
+| `appointments` | 6,486 | **40** |
+| `outbox_events` (drained on every reconnect) | 4,842 | **50** |
+| `customer_ledger` | 2,773 | **50** |
+
+### What satisfies the rule
+
+An index whose **first key** is the scope field — or a **more selective
+foreign key**. A `threadId` already implies its tenant, and indexing the
+tenant instead would be the worse index:
+
+```ts
+// passes: threadId is at least as selective as orgId
+indexes: [{ keys: { threadId: 1, createdAt: -1, _id: -1 } }]
+```
+
+What does **not** satisfy it is the scope field buried in second place.
+An index is read from the left, so `{ startsAt: 1, orgId: 1 }` does
+nothing for a filter on `orgId` alone — which is exactly the query your
+proxy produces.
+
+`scopeBy` is declarative only. It changes no runtime behaviour, adds no
+filter, and costs nothing at query time.
+
 ## Row-level security (Postgres)
 
 RLS pushes the tenant filter from application code into the database. Every query Postgres sees gets an implicit `AND tenant_id = current_setting('forge.tenant_id')` added by the planner. A query that forgets the filter returns zero rows, not "every tenant's data".

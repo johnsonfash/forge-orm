@@ -60,6 +60,20 @@ The `forge.schema` field is the second step of the schema-resolution cascade (af
 
 The `forge` binary with no arguments prints help text and exits 1. With `--help` / `-h` it prints the same text and exits 0.
 
+**`--help` is honoured anywhere in the arguments, and each subcommand has
+its own usage** (2.8.0):
+
+```bash
+npx forge push --help     # what push does — and does not do
+npx forge diff --help     # flags, and which of them write
+```
+
+Before 2.8.0 only the FIRST argument was checked, so `forge push --help`
+dispatched to `push`, the flag was dropped, and **the push ran**. Asking
+a schema tool what a command does should never be the way you find out.
+`push --help` now states plainly that it reconciles indexes only — it
+does not create, alter or drop tables, and never touches rows.
+
 ```sh
 npx forge              # help, exit 1
 npx forge --help       # help, exit 0

@@ -4,6 +4,14 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.8.1 — the 2.8.0 changes, written down
+
+**Patch.** No code change. 2.8.0 shipped six fixes and two additions and
+documented them only in this file, which is the wrong place to look them
+up from. They are now in the docs that cover each subject — see the
+Documentation note under 2.8.0 — along with a new
+[VS-DRIZZLE.md](./docs/VS-DRIZZLE.md).
+
 ## 2.8.0 — an index key called `id` was a real index on nothing
 
 **Minor.** Six fixes and one addition, all found by indexing a
@@ -113,6 +121,25 @@ from 6,486 documents examined to 40.
 An index whose first key is a more selective foreign key satisfies the
 rule too: a thread id already implies its tenant, and indexing the tenant
 instead would be the worse index.
+
+### Documentation
+
+Every change above is written up where it belongs, not only here:
+`PRIMARY-KEYS.md` (the new id type), `MULTI-TENANT.md` (`scopeBy`, with
+the measurements), `INDEXES.md` (`id` vs `_id`, and what to expect on the
+first push), `CLI.md` (per-subcommand help), `PUSH.md`
+(`FORGE_RENAME_INDEXES`), `DOCTOR.md` (both lint changes), and the README.
+
+New: **[VS-DRIZZLE.md](./docs/VS-DRIZZLE.md)** — where forge actually
+stands against drizzle-kit on migrations, what is genuinely missing, a
+six-stage plan, and the rules that keep closing those gaps from turning
+forge into a worse copy of something else. It starts by correcting a
+common claim: `push` reconciles indexes only, but `diff apply` already
+writes reviewable up/down SQL files with a `_forge_migrations` ledger and
+a rollback. The real gap is that forge generates by introspecting a
+**live database** where drizzle diffs the **last snapshot** — which is
+why forge cannot generate a migration in CI, on a plane, or
+deterministically.
 
 ### Also
 
