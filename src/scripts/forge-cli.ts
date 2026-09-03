@@ -68,6 +68,8 @@ const SUBCOMMAND_HELP: Record<string, string> = {
     --check             exit 3 if the schema has changes with no
                         migration (for CI)
     --custom            empty up/down, for a data migration
+    --allow-drop        confirm a disappearing column is a deletion, not
+                        a rename forge failed to recognise
 
   Use \`forge diff apply\` instead when ADOPTING an existing database:
   that one introspects what is really there.`,

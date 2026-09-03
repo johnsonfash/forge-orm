@@ -2,6 +2,7 @@ import type { DbIntrospection } from '../adapters/types';
 import type { Dialect } from '../adapters/postgres/dialect';
 import { dialectFor } from './dialects';
 import { diffColumn } from './alter-column';
+import { planRenames } from './rename-column';
 import { buildSchemaDDL as buildPgDDL } from '../adapters/postgres/ddl';
 import { buildSchemaDDL as buildMysqlDDL } from '../adapters/mysql/ddl';
 import { buildSchemaDDL as buildSqliteDDL } from '../adapters/sqlite/ddl';
@@ -52,6 +53,7 @@ function buildDDLFor(
 export function generateMigration(
   schema: Record<string, any>,
   actual: DbIntrospection,
+  opts: { allowDrop?: boolean } = {},
 ): MigrationPair[] {
   const d = dialectFor(actual.kind);
   const kind = actual.kind;
@@ -88,7 +90,32 @@ export function generateMigration(
       continue;
     }
 
-    const actCols = new Set(act.columns.map((c) => c.name));
+    // Renames FIRST — before add, drop or alter.
+    //
+    // A rename that ran after the ADD would find the new column already
+    // there; one that ran after the DROP would have nothing to rename.
+    // Order is not cosmetic here.
+    const rn = planRenames(d, m.collection, m.fields as Record<string, FieldDef>, act.columns, opts);
+    for (const r of rn.renames) {
+      pairs.push({ up: r.up, down: r.down, note: r.note });
+    }
+    for (const u of rn.unsafe) {
+      pairs.push({
+        up: `-- ${u.note} — refused, see below`,
+        down: '-- (nothing to reverse)',
+        note: u.note,
+        unsafe: { reason: u.reason, guidance: u.guidance },
+      });
+    }
+
+    // A renamed column is present under its NEW name from here on, so the
+    // add / drop / alter passes below see the post-rename world. Without
+    // this the same column is renamed and then added again.
+    const renamedTo = new Map(rn.renames.map((r) => [r.to, r.from]));
+    const actCols = new Set(
+      act.columns.map((c) => c.name).filter((n) => !rn.consumed.has(n)),
+    );
+    for (const r of rn.renames) actCols.add(r.to);
     // Missing columns → ADD COLUMN.
     for (const [name, fdef] of Object.entries(m.fields)) {
       const f = fdef as FieldDef;
@@ -110,7 +137,12 @@ export function generateMigration(
     for (const [name, fdef] of Object.entries(m.fields)) {
       const f = fdef as FieldDef;
       if (f.kind === 'id' || f.dbGenerated) continue;
-      const col = actByName.get(name);
+      // A renamed column is still under its old name in `act` — look it
+      // up there, so a rename PLUS a type change emits both statements.
+      // Drizzle emits only the rename in that case
+      // (drizzle-team/drizzle-orm#5499); here the ALTER follows it, or
+      // the run is refused.
+      const col = actByName.get(name) ?? actByName.get(renamedTo.get(name) ?? '');
       if (!col) continue;                    // handled by ADD above
       const change = diffColumn(d, m.collection, name, f, col);
       if (!change) continue;
@@ -126,6 +158,7 @@ export function generateMigration(
     const schemaCols = new Set(Object.keys(m.fields));
     for (const c of act.columns) {
       if (schemaCols.has(c.name)) continue;
+      if (rn.consumed.has(c.name)) continue;   // renamed, not dropped
       pairs.push({
         up: `ALTER TABLE ${q} DROP COLUMN ${d.quoteIdent(c.name)}`,
         down: `ALTER TABLE ${q} ADD COLUMN ${d.quoteIdent(c.name)} ${c.type}`,

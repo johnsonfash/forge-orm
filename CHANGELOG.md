@@ -4,6 +4,63 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.11.0 — a rename is not a drop and an add
+
+**Minor.** Stage 3, and the last silent-data-loss case in the generator.
+
+Comparing two schema states shows only that one column name is gone and
+another has appeared. A RENAME and a DROP-plus-ADD look identical from
+there, and they do opposite things to the data: one keeps every row, the
+other deletes a column's worth of it.
+
+Guessing "drop and add" loses data on a column somebody meant to keep.
+Guessing "rename" is worse — it keeps a column somebody meant to delete
+and quietly moves its data under a new name. So forge takes the answer
+from the schema:
+
+```ts
+name: f.string().renamedFrom('full_name'),
+```
+
+```sql
+-- up
+ALTER TABLE "orgs" RENAME COLUMN "full_name" TO "name";
+-- down
+ALTER TABLE "orgs" RENAME COLUMN "name" TO "full_name";
+```
+
+### Without it, forge asks
+
+A same-typed drop and add on one table is refused, naming both columns
+and printing the line to add. `--allow-drop` confirms a column really is
+going.
+
+Only SAME-TYPED pairs are suspected — a dropped `text` beside a new
+`integer` is not a candidate, because a check that fires on every genuine
+drop is one people learn to skip past, and then it protects nothing.
+
+### Why an annotation and not a prompt
+
+drizzle-kit asks the same question interactively. Right question, wrong
+medium: a prompt answered once at 2am is recorded nowhere, cannot run in
+CI — exactly where a pipeline would apply the migration — is invisible in
+review, and has to be answered again by the next person who regenerates.
+An annotation is in the schema, the diff and the pull request.
+
+### Rename AND type change
+
+Both statements are emitted, in order, with a correctly reversed `down`.
+That combination is a known drizzle-kit bug
+([#5499](https://github.com/drizzle-team/drizzle-orm/issues/5499),
+[#3826](https://github.com/drizzle-team/drizzle-orm/issues/3826)) where
+only the rename is emitted and the type change is silently lost.
+
+Renames run before every other column pass, which is not cosmetic: a
+rename after the ADD finds the new column already there, and one after
+the DROP has nothing left to rename.
+
+567 tests (was 553).
+
 ## 2.10.0 — a column change is emitted, or refused with the fix
 
 **Minor.** Stage 2 of the migration plan. A column whose **type** or

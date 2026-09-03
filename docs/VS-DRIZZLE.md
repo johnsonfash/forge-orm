@@ -301,7 +301,7 @@ generated *source* — nothing imports them.
 | Rollback | ✅ | ⚠️ manual reverse |
 | Generate offline / in CI | ✅ **2.9.0** | ✅ |
 | Deterministic, reviewable diff | ✅ **2.9.0** | ✅ |
-| Rename detection | ❌ | ⚠️ prompt, buggy with type changes |
+| Rename detection | ✅ **2.11.0**, annotation | ⚠️ prompt, buggy with type changes |
 | `ALTER COLUMN` type / nullability | ✅ **2.10.0** | ✅ |
 | Custom / data migrations | ✅ **2.9.0** | ✅ |
 | Mongo | ✅ | ❌ |
@@ -322,11 +322,10 @@ What is still open, in order:
   anything at all on SQLite are refused with the two-step migration
   printed. Note this is *stricter* than drizzle, which emits the ALTER
   and lets the database reject it on live data.
-- **Stage 3 — rename detection.** Now *possible*, because there is a
-  previous schema state to compare intent against. Prefer an explicit
-  `renamedFrom` annotation over a prompt: a prompt answered once at 2am
-  is not a record, and the annotation is in the schema, in the diff, and
-  in review.
+- ~~**Stage 3 — rename detection.**~~ Shipped in 2.11.0 as
+  `renamedFrom`, with a refusal on any unannotated same-typed drop+add
+  and `--allow-drop` to confirm a real deletion. Renaming AND changing a
+  type emits both statements — the case drizzle-kit loses.
 - **Stage 5 — `forge migrate status`**, including the case neither tool
   reports today: a migration applied to the database from a branch that
   was never merged.
