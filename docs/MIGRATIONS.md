@@ -1106,3 +1106,143 @@ if (report.pending.length > 0) {
 The two paths share the differ (`diff-core.ts`) and the introspect adapters — drift detection is the same logic in both places. What changes is how the result is applied: the CLI generates SQL files and runs them via the driver pool; the runtime generates SQL strings and runs them inside the Worker's prepared-statement API.
 
 For browsers, that's the whole story — see [BROWSER.md](./BROWSER.md#dbmigrate--runtime-ddl-apply--drift-detection) for the chunked rollout details, the `pending` report shape, and the Safari ITP eviction handling that affects how often `$migrate()` ends up running on a fresh DB.
+
+---
+
+# Snapshots — generating without a database (2.9.0)
+
+```bash
+npx forge generate --name add-org-slug
+```
+
+No `DATABASE_URL` connection. Nothing is introspected. The command diffs
+your schema against the **last committed snapshot** and writes two files:
+
+```
+migrations/
+  meta/
+    _journal.json            ordering, and what each file was called
+    0001_snapshot.json       the schema's shape after 0001
+    0002_snapshot.json
+  0001_initial.sql
+  0002_add-org-slug.sql
+```
+
+## Why this exists
+
+`forge diff apply` generates by introspecting the live database. That is
+the right tool for **adopting** a database somebody else created, and the
+wrong one for everyday work:
+
+- **CI cannot check anything.** There is no database in the pipeline, so
+  nothing can verify that a schema change arrived with its migration.
+- **Two branches generate against two worlds.** Alice adds a column
+  against her local database on Monday; Bob adds a different one against
+  his on Tuesday. Each file is correct relative to a state that stops
+  existing at the merge.
+- **The same schema does not reliably produce the same SQL**, so a
+  reviewer cannot regenerate the migration to check it matches the schema
+  change in the same pull request.
+
+A snapshot is simply **what `introspect()` would return if this schema
+were applied**. Once that is a file, the differ does not care that it did
+not come from a socket.
+
+## The commands
+
+| | reads | writes | needs a DB |
+|---|---|---|---|
+| `forge generate` | last snapshot | `.sql` + snapshot | **no** |
+| `forge diff apply` | the live database | `.sql`, and applies it | yes |
+| `forge push` | the live database | indexes only | yes |
+| `forge rollback` | `_forge_migrations` | reverses the last file | yes |
+
+```bash
+npx forge generate --name add-orgs        # the usual case
+npx forge generate --dialect postgres     # no DATABASE_URL at all
+npx forge generate --check                # CI: exit 3 if a migration is missing
+npx forge generate --custom --name backfill-slugs   # empty up/down to fill in
+```
+
+`--dialect` is only needed when `DATABASE_URL` is absent. When it is set,
+the command reads its **scheme** to know the dialect and connects to
+nothing.
+
+## The CI gate
+
+```yaml
+- run: npx forge generate --check
+```
+
+Exit 3 when the schema contains changes that no migration covers, and it
+names them:
+
+```
+[forge:generate] 1 change(s) are in the schema but not in any migration.
+  - add orgs.region
+```
+
+This is the check that a database-backed generator cannot perform, and it
+is the main reason to adopt snapshots.
+
+## Custom and data migrations
+
+```bash
+npx forge generate --custom --name backfill-org-slugs
+```
+
+Writes an empty up/down and takes its place in the ordered history. Use
+it for a backfill, or for the first half of a two-step change — clean the
+NULLs, *then* add `NOT NULL`.
+
+The snapshot it writes is **unchanged from the previous one**, on purpose:
+forge cannot know what hand-written SQL does, and guessing would corrupt
+every later diff.
+
+## Reviewing the pair
+
+Commit the `.sql` and its snapshot together. The `.sql` says what will
+run; the snapshot says what the schema will then be. A reviewer who sees
+one without the other is looking at half of the change.
+
+Snapshots are sorted — tables, columns, indexes, keys — so reordering two
+models in your schema file produces no diff at all, and the diff you do
+see is the change you made.
+
+## What a snapshot is not
+
+**It is a projection, not a recording.** It describes what the schema
+says, never what a database contains. It cannot see a column somebody
+added by hand at 3am.
+
+For that, `forge diff` against the live database is still the tool, and
+still the honest answer to *"is production actually what we think it
+is?"* — the two are complementary, and neither replaces the other.
+
+## Adopting an existing database
+
+Snapshots start from empty, so a first `generate` against a database that
+already has tables would produce a create-everything migration you must
+not run.
+
+```bash
+npx forge diff apply    # reconcile against what is really there, once
+npx forge generate      # from here on
+```
+
+## One dialect per folder
+
+A snapshot describes one dialect — column types and index shapes differ.
+Pointing `generate` at a folder created for another one is refused rather
+than diffed:
+
+```
+[forge] this migrations folder was generated for 'mysql', but DATABASE_URL
+points at 'postgres'. Use a separate folder per dialect.
+```
+
+## Mongo
+
+`forge generate` refuses on Mongo, and should. There is no DDL to
+migrate: indexes are reconciled by `forge push`, which is idempotent and
+needs no history.

@@ -299,19 +299,38 @@ generated *source* — nothing imports them.
 | Migration files with up/down | ✅ | ✅ |
 | Applied-migration ledger | ✅ | ✅ |
 | Rollback | ✅ | ⚠️ manual reverse |
-| Generate offline / in CI | ❌ **needs a live DB** | ✅ |
-| Deterministic, reviewable diff | ❌ | ✅ |
+| Generate offline / in CI | ✅ **2.9.0** | ✅ |
+| Deterministic, reviewable diff | ✅ **2.9.0** | ✅ |
 | Rename detection | ❌ | ⚠️ prompt, buggy with type changes |
 | `ALTER COLUMN` type / nullability | ❌ | ✅ |
-| Custom / data migrations | ❌ | ✅ |
+| Custom / data migrations | ✅ **2.9.0** | ✅ |
 | Mongo | ✅ | ❌ |
 | Six dialects, one schema | ✅ | SQL only |
 | Schema linting (`doctor`) | ✅ | ❌ |
 | No codegen step | ✅ | ❌ |
 | Battle-tested | ❌ | ✅ |
 
-**Stage 1 closes four of the five red rows.** It is the only one that
-matters this quarter.
+**Stage 1 shipped in 2.9.0** — `forge generate`, snapshots, a journal,
+`--check` for CI, and `--custom` for data migrations. Three of the red
+rows above are now green, and a create-table migration contains the
+`CREATE TABLE` rather than a comment deferring to push.
+
+What is still open, in order:
+
+- **Stage 2 — `ALTER COLUMN`.** Type and nullability changes are still
+  omitted from a generated migration rather than emitted or refused, and
+  silently omitting them is the worst of the three options.
+- **Stage 3 — rename detection.** Now *possible*, because there is a
+  previous schema state to compare intent against. Prefer an explicit
+  `renamedFrom` annotation over a prompt: a prompt answered once at 2am
+  is not a record, and the annotation is in the schema, in the diff, and
+  in review.
+- **Stage 5 — `forge migrate status`**, including the case neither tool
+  reports today: a migration applied to the database from a branch that
+  was never merged.
+- **Stage 6 — `$explain`**, the honest answer to SQL transparency.
+
+Battle-testing stays red and there is no clever answer to it — only R7.
 
 [5499]: https://github.com/drizzle-team/drizzle-orm/issues/5499
 [3826]: https://github.com/drizzle-team/drizzle-orm/issues/3826
