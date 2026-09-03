@@ -91,6 +91,7 @@ function lintSchemaIfPresent(adapter: AdapterKind | null): void {
   const findings: LintFinding[] = [];
   for (const [modelName, model] of Object.entries(schema as Record<string, unknown>)) {
     const m = model as Partial<ModelDef<Record<string, never>>>;
+    collectScopeFindings(modelName, m, findings);
     if (!m?.indexes?.length) continue;
     for (const idx of m.indexes as IndexDef[]) {
       collectIndexFindings(modelName, idx, adapter, findings);
@@ -109,6 +110,77 @@ function lintSchemaIfPresent(adapter: AdapterKind | null): void {
     console.log(`    ${sigil} [${f.model}] ${f.message}`);
   }
   console.log('');
+}
+
+/**
+ * A model that declares `scopeBy` is read with that field in the filter on
+ * EVERY query. If nothing indexes it, every one of those reads is a full
+ * scan of the collection.
+ *
+ * The check is worth its weight because the failure is invisible in
+ * development: a scoped table holds one row per tenant, so it looks tiny
+ * while the schema is young and grows with the customer list rather than
+ * with usage. In one schema this cost 66 collections and 27,367 rows —
+ * 6,486 documents examined for a query that should have touched 40.
+ *
+ * An index whose FIRST key is the scope field satisfies it. So does one
+ * whose first key is a more selective foreign key: a thread id already
+ * implies its tenant, and indexing the tenant instead would be worse.
+ */
+/**
+ * Lint one model, for tests. The CLI walks a whole schema and prints;
+ * this is the same rules with the walking and the printing taken out, so
+ * a test can assert on the findings rather than on stdout.
+ */
+export function __lintForTests(
+  modelName: string,
+  m: ModelDef<any>,
+  adapter: AdapterKind,
+): LintFinding[] {
+  const out: LintFinding[] = [];
+  collectScopeFindings(modelName, m as Partial<ModelDef<Record<string, never>>>, out);
+  for (const idx of (m.indexes ?? []) as IndexDef[]) {
+    collectIndexFindings(modelName, idx, adapter, out);
+  }
+  return out;
+}
+
+function collectScopeFindings(
+  modelName: string,
+  m: Partial<ModelDef<Record<string, never>>>,
+  out: LintFinding[],
+): void {
+  const scope = (m as { scopeBy?: string }).scopeBy;
+  if (!scope) return;
+
+  if (!m.fields || !(scope in m.fields)) {
+    out.push({
+      model: modelName,
+      level: 'warn',
+      message: `scopeBy: '${scope}' names a field this model does not have.`,
+    });
+    return;
+  }
+
+  const firstKeys: string[] = [];
+  for (const idx of (m.indexes ?? []) as IndexDef[]) {
+    const first = Object.keys(idx.keys ?? {})[0];
+    if (first) firstKeys.push(first);
+  }
+  for (const cu of m.uniques ?? []) if (cu[0]) firstKeys.push(cu[0]);
+
+  const covered = firstKeys.some((k) => k === scope || /Id$/.test(k));
+  if (!covered) {
+    out.push({
+      model: modelName,
+      level: 'warn',
+      message:
+        `every read is filtered by '${scope}' (scopeBy) but no index starts ` +
+        `with it — each read scans the whole collection. Add ` +
+        `{ keys: { ${scope}: 1 } }, or { ${scope}: 1, createdAt: -1 } if the ` +
+        `surface lists newest-first.`,
+    });
+  }
 }
 
 function collectIndexFindings(
@@ -130,15 +202,31 @@ function collectIndexFindings(
   }
 
   // SQL-only fields landing on Mongo.
-  const usesSqlOnly =
-    idx.method && idx.method !== 'btree' ||
+  //
+  // A string `where` is NOT on its own a reason to warn. A portable index
+  // deliberately carries both dialects — `partialFilterExpression` for
+  // Mongo and a `where` string for SQL — and the Mongo push reads the
+  // former and ignores the latter, exactly as intended.
+  //
+  // Warning on it said "ignored at push" about indexes that push creates
+  // correctly, including UNIQUE ones. Verified by dropping such an index
+  // and re-running push: it came back with unique and its
+  // partialFilterExpression intact. Anyone acting on the old warning
+  // would have removed a working duplicate guard.
+  const sqlOnlyShape =
+    (idx.method && idx.method !== 'btree') ||
     idx.include?.length ||
     idx.expression ||
     idx.visible === false ||
-    idx.parser ||
-    (typeof idx.where === 'string');
-  if (usesSqlOnly && adapter === 'mongo') {
-    w(`index '${name}' uses SQL-only fields (method / include / expression / where-as-string / visible / parser) on a mongo adapter — ignored at push.`);
+    idx.parser;
+  // A string `where` only matters when nothing gives Mongo the same rule.
+  const whereIsSqlOnly =
+    typeof idx.where === 'string' && !idx.partialFilterExpression;
+  if (adapter === 'mongo' && sqlOnlyShape) {
+    w(`index '${name}' uses SQL-only fields (method / include / expression / visible / parser) on a mongo adapter — those fields are ignored at push.`);
+  }
+  if (adapter === 'mongo' && whereIsSqlOnly) {
+    w(`index '${name}' has a string 'where' and no partialFilterExpression — Mongo cannot use a SQL predicate, so the index will be created WITHOUT the filter. Add partialFilterExpression for the Mongo equivalent.`);
   }
 
   // Method mismatched with adapter.
@@ -274,7 +362,18 @@ function reportExt(have: Set<string>, name: string, label: string, installCmd: s
   }
 }
 
-main().catch((err) => {
-  console.error('doctor crashed:', err);
-  process.exit(1);
-});
+// Only when RUN, not when imported.
+//
+// The CLI loads this module for its side effect, which is fine — but it
+// also means `import { … } from './doctor'` used to execute a full
+// doctor run, connect included. Anything that wants to reuse the lint
+// rules (a test, another tool) had to launch the whole command to get at
+// them.
+const isDirectRun =
+  typeof require !== 'undefined' && require.main === module;
+if (isDirectRun || process.env.FORGE_DOCTOR_RUN === '1') {
+  main().catch((err) => {
+    console.error('doctor crashed:', err);
+    process.exit(1);
+  });
+}

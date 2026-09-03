@@ -65,6 +65,11 @@ export function coerceFieldValue(field: FieldDef | undefined, value: any): any {
 
   switch (field.kind) {
     case 'id':
+      // An app-supplied key is stored verbatim. Coercing it would turn
+      // `"<orgId>:<series>"` into something else, or silently rewrite a
+      // 24-hex natural key into an ObjectId and break every lookup.
+      if (field.idType === 'string') return value;
+      return idStringToObjectId(value);
     case 'objectId':
       return idStringToObjectId(value);
     case 'dateTime':

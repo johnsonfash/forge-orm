@@ -198,6 +198,35 @@ async function ensureIndex(
         await collection.createIndex(spec.keys, opts);
         return 'rebuilt';
       } catch (rebuildErr: any) {
+        // Mongo error 85 (IndexOptionsConflict) with a name in the message
+        // means an EQUIVALENT index already exists under an older name —
+        // usually one that predates the schema declaration. Nothing is
+        // wrong: the keys and options match, only the label differs.
+        //
+        // Warning on every push forever, with no way to act on it short of
+        // dropping an index on live data, trains people to ignore warnings.
+        // Say it once, quietly, and say what it means.
+        const other = /already exists with a different name:\s*(\S+)/.exec(
+          rebuildErr?.message || '',
+        )?.[1];
+        if (other) {
+          console.log(
+            `   ≡ ${spec.name} — same index already present as '${other}'. ` +
+            `Keys and options match; only the name differs. ` +
+            `Run with FORGE_RENAME_INDEXES=1 to adopt the schema name.`,
+          );
+          if (process.env.FORGE_RENAME_INDEXES === '1') {
+            try {
+              await collection.dropIndex(other);
+              await collection.createIndex(spec.keys, opts);
+              return 'rebuilt';
+            } catch (renameErr: any) {
+              console.warn(`   ⚠ ${spec.name} could not adopt '${other}': ${renameErr?.message || renameErr}`);
+              return 'warned';
+            }
+          }
+          return 'skipped';
+        }
         console.warn(`   ⚠ ${spec.name} could not be created: ${rebuildErr?.message || rebuildErr}`);
         return 'warned';
       }
@@ -212,6 +241,32 @@ function indexNameFor(modelName: string, keys: Record<string, any>, unique?: boo
     .map((s) => s.replace(/[^a-zA-Z0-9]/g, '_'))
     .join('_');
   return `idx_${modelName}_${k}${unique ? '_uq' : ''}`;
+}
+
+/**
+ * `id` is the schema's name for the primary key; `_id` is Mongo's.
+ *
+ * `coerce.ts` already translates it on every read and write, so a query
+ * written as `where: { id }` works. Index keys did NOT go through that
+ * translation — they were handed to `createIndex` verbatim — so an index
+ * declared as `{ threadId: 1, id: -1 }` created a real index on a field
+ * literally called `id`, which no document has.
+ *
+ * Nothing reported it: push said "created", doctor said nothing, and the
+ * index showed up in `getIndexes()`. Only `explain()` gave it away — the
+ * sort it existed for was still done in memory (stage SORT rather than
+ * FETCH). `diff` then called it permanent drift, comparing the declared
+ * `id` against the stored `_id`.
+ *
+ * The same rule was already half-applied here: single-field uniques skip
+ * `kind === 'id'` because "_id is automatic". It just was not applied to
+ * compound keys.
+ */
+export function normaliseIndexKeys<T extends Record<string, unknown>>(keys: T): T {
+  if (!('id' in keys)) return keys;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(keys)) out[k === 'id' ? '_id' : k] = v;
+  return out as T;
 }
 
 export function collectIndexSpecs(modelName: string, model: ModelDef<any>): IndexSpec[] {
@@ -232,8 +287,9 @@ export function collectIndexSpecs(modelName: string, model: ModelDef<any>): Inde
 
   // Composite uniques.
   for (const cu of model.uniques || []) {
-    const keys: Record<string, 1> = {};
-    for (const f of cu) keys[f] = 1;
+    const raw: Record<string, 1> = {};
+    for (const f of cu) raw[f] = 1;
+    const keys = normaliseIndexKeys(raw);
     specs.push({
       keys,
       unique: true,
@@ -267,9 +323,11 @@ export function collectIndexSpecs(modelName: string, model: ModelDef<any>): Inde
       );
       continue;
     }
-    const keys = idx.method === 'spatial'
-      ? Object.fromEntries(Object.keys(idx.keys).map((k) => [k, '2dsphere']))
-      : idx.keys;
+    const keys = normaliseIndexKeys(
+      idx.method === 'spatial'
+        ? Object.fromEntries(Object.keys(idx.keys).map((k) => [k, '2dsphere']))
+        : idx.keys,
+    );
     specs.push({
       keys: keys as Record<string, 1 | -1 | 'text' | '2dsphere' | '2d' | 'hashed'>,
       unique: idx.unique,
@@ -286,8 +344,9 @@ export function collectIndexSpecs(modelName: string, model: ModelDef<any>): Inde
   // so combine every marked field into a single text index.
   const textCols =entries.filter(([, f]) => f.searchable).map(([n]) => n);
   if (textCols.length > 0) {
-    const keys: Record<string, any> = {};
-    for (const c of textCols) keys[c] = 'text';
+    const raw: Record<string, any> = {};
+    for (const c of textCols) raw[c] = 'text';
+    const keys = normaliseIndexKeys(raw);
     specs.push({
       keys,
       name: `forge_${model.collection}_fts`,
@@ -321,7 +380,7 @@ export async function pushAllIndexes(consumerSchema?: any): Promise<void> {
         throw new Error(
           `[forge:push:mongo] model '${key}' (collection '${m.collection}') uses ` +
           `f.id({ type: 'bigserial' }) on field '${fname}', which has no Mongo ` +
-          `equivalent. Use 'auto' or 'uuid' for Mongo-compatible schemas.`,
+          `equivalent. Use 'auto', 'uuid', or 'string' for an app-supplied key.`,
         );
       }
     }

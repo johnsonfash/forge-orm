@@ -31,6 +31,10 @@ export const MysqlDialect: Dialect = {
         // auto → string column, app-side gen handles the value.
         if (field.idType === 'bigserial') return 'BIGINT';
         if (field.idType === 'uuid')      return 'CHAR(36)';
+        // An app-supplied key is arbitrary text — a natural key like
+        // `"<orgId>:<series>"` runs past 64 easily. Generated ids stay at
+        // 64, which is ample for an ObjectId hex or a ULID.
+        if (field.idType === 'string')    return 'VARCHAR(255)';
         return 'VARCHAR(64)';
       case 'objectId':   return 'VARCHAR(64)';
       case 'string':     return 'VARCHAR(255)';   // can be UNIQUE / indexed without a key-length prefix

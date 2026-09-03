@@ -4,6 +4,122 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.8.0 — an index key called `id` was a real index on nothing
+
+**Minor.** Six fixes and one addition, all found by indexing a
+multi-tenant Mongo schema and then asking why nothing got faster.
+
+### An index key written as `id` silently did nothing
+
+The schema calls the primary key `id`; Mongo stores it as `_id`. Reads
+and writes have always translated between the two — `coerce.ts` maps
+`id` → `_id` on every query. **Index keys did not.** They were handed to
+`createIndex` verbatim, so this:
+
+```ts
+indexes: [{ keys: { threadId: 1, createdAt: -1, id: -1 } }]
+```
+
+created a real Mongo index on a field literally called `id`, which no
+document has. The index was useless and nothing said so: push reported
+`created`, doctor reported nothing, and it appeared in `getIndexes()`.
+Only `explain()` gave it away — the sort the index existed for was still
+performed in memory (`SORT` rather than an index-served fetch). `diff`
+then reported permanent drift, comparing the declared `id` against the
+stored `_id`.
+
+The rule was already half-applied: single-field uniques skip
+`kind === 'id'` because "`_id` is automatic". It just never reached
+compound keys.
+
+Index keys are now translated on the Mongo adapter, in declared indexes,
+composite uniques and text indexes alike, and `diff` compares like for
+like. Existing schemas that wrote `_id` keep working unchanged; schemas
+that wrote `id` get the index they meant, and push rebuilds it once.
+
+### `doctor` called working indexes "ignored at push"
+
+A *portable* index carries both dialects on purpose — a Mongo
+`partialFilterExpression` and a SQL `where` string. Doctor saw the SQL
+half and declared the whole index ignored, including UNIQUE ones. It was
+not true: dropping such an index and re-running push recreated it with
+`unique: true` and its filter intact. Acting on that warning meant
+deleting a working duplicate guard.
+
+Doctor now warns only when Mongo genuinely gets nothing — a string
+`where` with no `partialFilterExpression` beside it, which really does
+produce an index without the filter.
+
+### `forge push --help` ran the push
+
+Only `argv[2]` was checked for `--help`, so the flag fell through to the
+subcommand, which ignored it. Asking a schema tool what a command does
+should never be how you find out. `--help` is now honoured anywhere in
+the arguments, and each subcommand has its own usage — including an
+explicit note that `push` touches indexes only, never tables or rows.
+
+### An equivalent index under an older name warned forever
+
+`⚠ could not be created: Index already exists with a different name` on
+every push, for an index whose keys and options already match. Nothing
+was wrong and nothing could be done about it short of dropping an index
+on live data. It is now a quiet one-line note, with
+`FORGE_RENAME_INDEXES=1` to adopt the schema's name deliberately.
+
+### `diff` described unmanaged tables like a deletion plan
+
+`table 'x' in DB but not in schema` reads as though push will drop it.
+Push only reconciles indexes and has never dropped a table — but at
+least one team wrote a "do not run `forge push`" warning into their own
+docs on the strength of that line. It now says what push will actually
+do: *is not managed by forge — push will leave it alone*.
+
+### `f.id({ type: 'string' })` — an application-supplied key
+
+New. `auto`, `uuid` and `bigserial` all generate the value; there was no
+way to declare a key the application supplies. That left natural keys
+undeclarable — a counter whose `_id` is `"<orgId>:<series>"`, so that a
+single `findOneAndUpdate` with `$inc` and `upsert` is atomic on one
+document. Such a collection could not be described at all, so push, diff
+and doctor could not see it.
+
+`string` generates nothing and stores the value exactly as given; on
+Mongo it is never coerced to an ObjectId, which would have rewritten a
+24-hex natural key into something else and broken every lookup. MySQL
+widens to `VARCHAR(255)` for it, since a natural key runs past 64 easily.
+
+### `scopeBy` — and a lint for the class of bug that started this
+
+New. Multi-tenant applications filter every read by a tenant key, usually
+by wrapping the client in a proxy that injects it. Forge cannot add that
+filter — it does not know where the value comes from — but it can check
+that something indexes it:
+
+```ts
+model('appointments', fields, {
+  scopeBy: 'orgId',
+  indexes: [{ keys: { orgId: 1, createdAt: -1 } }],
+})
+```
+
+`doctor` warns when nothing does. The check earns its place because the
+failure is invisible in development: a scoped table holds one row per
+tenant, so it looks tiny while the schema is young and grows with the
+customer list rather than with usage — the scan gets slower for everyone
+at once. In the schema that prompted this, 66 collections holding 27,367
+rows had no index on their tenant key. After indexing, one hot query went
+from 6,486 documents examined to 40.
+
+An index whose first key is a more selective foreign key satisfies the
+rule too: a thread id already implies its tenant, and indexing the tenant
+instead would be the worse index.
+
+### Also
+
+`doctor` no longer runs on import — it self-executes only when invoked
+directly, so its lint rules can be reused without launching a full
+environment check and a database connection.
+
 ## 2.7.1 — you can ask the db what it has
 
 **Patch.** 2.7.0 made reading an unregistered model throw, which is right —

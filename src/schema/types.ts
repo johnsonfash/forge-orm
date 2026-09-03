@@ -112,7 +112,7 @@ export interface FieldDef {
   //   'bigserial' — DB-side auto-incrementing integer (PG BIGSERIAL, MySQL BIGINT
   //                 AUTO_INCREMENT, SQLite INTEGER PRIMARY KEY AUTOINCREMENT).
   //                 Throws on Mongo at push. JS: number.
-  idType?: 'auto' | 'uuid' | 'bigserial';
+  idType?: 'auto' | 'uuid' | 'bigserial' | 'string';
 }
 
 /**
@@ -293,6 +293,10 @@ export interface ModelDef<F extends Record<string, FieldDef>> {
   relations: () => Record<string, RelationDef>;
   indexes: IndexDef[];
   uniques: string[][]; // composite uniques (@@unique([a, b])), merged into indexes at registry-load time
+
+ /** The field every read of this model is filtered by — see ModelOptions.
+  *  Declarative only; `doctor` warns when nothing indexes it. */
+  scopeBy?: string;
 
   // When set, this model is a read-only view. The wrapper blocks
   // create/update/delete/upsert; DDL emits CREATE VIEW (or createCollection with
