@@ -1,6 +1,7 @@
 import type { DbIntrospection } from '../adapters/types';
 import type { Dialect } from '../adapters/postgres/dialect';
 import { dialectFor } from './dialects';
+import { diffColumn } from './alter-column';
 import { buildSchemaDDL as buildPgDDL } from '../adapters/postgres/ddl';
 import { buildSchemaDDL as buildMysqlDDL } from '../adapters/mysql/ddl';
 import { buildSchemaDDL as buildSqliteDDL } from '../adapters/sqlite/ddl';
@@ -13,7 +14,15 @@ import type { FieldDef, ModelDef, RelationDef } from '../schema/types';
 //
 // Mongo is index-managed via forge push, not SQL migrations — SQL-only here.
 
-export interface MigrationPair { up: string; down: string; note: string; }
+export interface MigrationPair {
+  up: string;
+  down: string;
+  note: string;
+ /** Present when the change must NOT be generated — a narrowing, a type
+  *  conversion, or NULL → NOT NULL. `forge generate` refuses the whole
+  *  run rather than write a file that quietly omits it. */
+  unsafe?: { reason: string; guidance: string };
+}
 
 function colDef(d: Dialect, name: string, f: FieldDef): string {
   const type = d.columnType(f);
@@ -92,6 +101,27 @@ export function generateMigration(
         note: `add ${m.collection}.${name}`,
       });
     }
+    // Columns in both → has the TYPE or NULLABILITY changed?
+    //
+    // This was the gap: such a change was silently absent from the
+    // migration. The schema said varchar(255), the database kept
+    // varchar(64), the file applied cleanly, and nothing said a word.
+    const actByName = new Map(act.columns.map((c) => [c.name, c]));
+    for (const [name, fdef] of Object.entries(m.fields)) {
+      const f = fdef as FieldDef;
+      if (f.kind === 'id' || f.dbGenerated) continue;
+      const col = actByName.get(name);
+      if (!col) continue;                    // handled by ADD above
+      const change = diffColumn(d, m.collection, name, f, col);
+      if (!change) continue;
+      pairs.push({
+        up: change.up ?? `-- ${change.note} — refused, see below`,
+        down: change.down ?? '-- (nothing to reverse)',
+        note: change.note,
+        ...(change.unsafe ? { unsafe: change.unsafe } : {}),
+      });
+    }
+
     // Extra columns the schema dropped → DROP COLUMN (down can't restore type).
     const schemaCols = new Set(Object.keys(m.fields));
     for (const c of act.columns) {

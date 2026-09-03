@@ -302,7 +302,7 @@ generated *source* — nothing imports them.
 | Generate offline / in CI | ✅ **2.9.0** | ✅ |
 | Deterministic, reviewable diff | ✅ **2.9.0** | ✅ |
 | Rename detection | ❌ | ⚠️ prompt, buggy with type changes |
-| `ALTER COLUMN` type / nullability | ❌ | ✅ |
+| `ALTER COLUMN` type / nullability | ✅ **2.10.0** | ✅ |
 | Custom / data migrations | ✅ **2.9.0** | ✅ |
 | Mongo | ✅ | ❌ |
 | Six dialects, one schema | ✅ | SQL only |
@@ -317,9 +317,11 @@ rows above are now green, and a create-table migration contains the
 
 What is still open, in order:
 
-- **Stage 2 — `ALTER COLUMN`.** Type and nullability changes are still
-  omitted from a generated migration rather than emitted or refused, and
-  silently omitting them is the worst of the three options.
+- ~~**Stage 2 — `ALTER COLUMN`.**~~ Shipped in 2.10.0. Widening is
+  emitted; a narrowing, a change of category, `NULL` → `NOT NULL`, and
+  anything at all on SQLite are refused with the two-step migration
+  printed. Note this is *stricter* than drizzle, which emits the ALTER
+  and lets the database reject it on live data.
 - **Stage 3 — rename detection.** Now *possible*, because there is a
   previous schema state to compare intent against. Prefer an explicit
   `renamedFrom` annotation over a prompt: a prompt answered once at 2am

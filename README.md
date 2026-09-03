@@ -2415,6 +2415,33 @@ a database contains. `forge diff` against the live database remains the
 answer to *"is production actually what we think it is?"* See
 [MIGRATIONS.md](./docs/MIGRATIONS.md).
 
+### Column changes — widened, or refused with the fix
+
+A column whose type or nullability changed used to be **silently absent**
+from a generated migration. Now it is one of two things:
+
+```sql
+-- widening: emitted, because every row still fits
+ALTER TABLE "orgs" ALTER COLUMN "hits" TYPE bigint;
+```
+
+```
+-- narrowing, a change of category, or NULL → NOT NULL: refused
+✖ orgs.name: text → int
+  not a widening — existing rows may not fit, or may not convert at all.
+  → write it with `forge generate --custom`: add the new column,
+    backfill, verify, drop the old one and rename.
+```
+
+Exit 2, nothing written — including the safe changes in the same diff. A
+migration that applies cleanly while leaving the schema and the database
+disagreeing is the failure this removes, not a smaller version of it.
+
+`NULL` → `NOT NULL` is always refused, and says why the obvious fix does
+not work: a `DEFAULT` applies to new rows, not to the NULLs already
+there. SQLite is refused for any of it — it has no `ALTER COLUMN`, and
+forge will not generate the twelve-step rebuild blind.
+
 ### Asking a command what it does
 
 Every subcommand takes `--help`, anywhere in the arguments:

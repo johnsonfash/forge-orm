@@ -1246,3 +1246,104 @@ points at 'postgres'. Use a separate folder per dialect.
 `forge generate` refuses on Mongo, and should. There is no DDL to
 migrate: indexes are reconciled by `forge push`, which is idempotent and
 needs no history.
+
+---
+
+# Column changes (2.10.0)
+
+A column whose **type** or **nullability** changed used to be silently
+absent from a generated migration. The schema said `varchar(255)`, the
+database kept `varchar(64)`, the file applied cleanly, and nothing said a
+word.
+
+Silently omitting a change is the worst of the three options. forge now
+picks one of the other two.
+
+## Widening is emitted
+
+Where every existing row still fits, the statement cannot fail on data:
+
+| from | to | |
+|---|---|---|
+| `varchar(64)` | `varchar(255)` | longer |
+| `varchar(255)` | `text` | unbounded |
+| `int` | `bigint` | the one safe cross-category change |
+| `numeric(10,2)` | `numeric(12,2)` | more precision |
+| `NOT NULL` | `NULL` | dropping a constraint always succeeds |
+
+```sql
+-- up
+ALTER TABLE `orgs` MODIFY COLUMN `hits` BIGINT NOT NULL;
+
+-- down
+-- narrowing hits back to int can fail on rows added since;
+-- review before rolling back.
+ALTER TABLE `orgs` MODIFY COLUMN `hits` int;
+```
+
+The `down` carries that warning because the reverse of a widening is a
+**narrowing**, and it can fail on rows written since the migration ran.
+A file that says "rollback" without saying so is lying to whoever runs
+it at 3am.
+
+## Everything else is refused
+
+```
+[forge:generate] refusing to generate 1 change(s).
+  Each needs a decision forge cannot make for you.
+
+  ✖ orgs.name: text → int
+    orgs.name changes from text to int, which is not a widening —
+    existing rows may not fit, or may not convert at all.
+    → forge will not guess at this. Write it with `forge generate
+      --custom`: add the new column, backfill it with whatever conversion
+      is correct for YOUR data, verify, then drop the old one and rename.
+      Doing it in one ALTER locks the table and fails on the first row
+      that will not cast.
+```
+
+Exit code **2**. No file is written, no journal entry is made — including
+for the safe changes in the same diff, because a migration that applies
+cleanly while leaving the schema and the database disagreeing is the
+failure this exists to remove, not a smaller version of it.
+
+**The refusal is the feature.** A tool that emits `ALTER COLUMN … TYPE
+int` against a column holding text is more dangerous than one that emits
+nothing, because the migration *looks reviewed*.
+
+## `NULL` → `NOT NULL`
+
+Refused, always, and the message says why the obvious fix does not work:
+
+> A `DEFAULT` does not help — a default applies to new rows, not to the
+> ones already there.
+
+The two-step migration:
+
+```bash
+npx forge generate --custom --name backfill-org-note
+# UPDATE orgs SET note = '' WHERE note IS NULL;
+```
+
+Ship it. Confirm `SELECT count(*) FROM orgs WHERE note IS NULL` is 0.
+Then make the column required in the schema and generate again — the
+refusal turns into the `ALTER` once the data is clean.
+
+## SQLite
+
+Refused for any type or nullability change, because SQLite has no `ALTER
+COLUMN`. The real answer is its documented twelve-step rebuild: create
+`x_new`, `INSERT … SELECT`, drop, rename, recreate indexes and triggers.
+
+forge will not generate that blind. Copying the column is the easy part;
+the indexes, triggers and views pointing at the old table are the part a
+generator cannot see, and getting that wrong drops them silently.
+
+## What is not compared
+
+A type forge cannot categorise — `tsvector`, a domain type, an extension
+type — is left alone rather than rewritten. Better to say nothing about a
+shape we do not understand than to emit an `ALTER` for it.
+
+Mongo is skipped entirely: introspection reports no column types, so
+there is nothing to compare.
