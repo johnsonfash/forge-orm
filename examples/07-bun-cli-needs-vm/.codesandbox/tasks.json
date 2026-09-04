@@ -1,0 +1,19 @@
+{
+  "setupTasks": [
+    {
+      "name": "Install Bun",
+      "command": "curl -fsSL https://bun.sh/install | bash && source ~/.bashrc"
+    },
+    {
+      "name": "Install dependencies",
+      "command": "bun install"
+    }
+  ],
+  "tasks": {
+    "dev": {
+      "name": "Run Bun + SQLite demo",
+      "command": "bun run dev",
+      "runAtStart": true
+    }
+  }
+}

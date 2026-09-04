@@ -1,0 +1,20 @@
+{
+  "name": "forge-orm-example-hono-pglite-api",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.2.13",
+    "@hono/node-server": "^1.13.5",
+    "forge-orm": "^2.15.0",
+    "hono": "^4.6.12"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "~5.6.3"
+  }
+}

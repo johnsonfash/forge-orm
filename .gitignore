@@ -25,3 +25,28 @@ npm-token.txt
 
 # npm auth written at publish time — never commit
 .npmrc
+
+# Example scratch — each example is installed and run in CI, never committed
+# with its lockfile or the databases it writes.
+examples/*/node_modules/
+examples/*/package-lock.json
+examples/*/dist/
+examples/*/.next/
+examples/**/*.db
+examples/*/data/
+examples/*/tx/
+examples/*/audit/
+examples/*/bom/
+examples/*/tenant/
+examples/*/fts/
+examples/*/drift/
+examples/*/geodata/
+examples/*/vecdata/
+examples/*/.pgdata/
+
+# VitePress build output + its synced copies of the markdown sources
+docs-site/src/guide.md
+docs-site/src/changelog.md
+docs-site/src/reference/
+docs-site/.vitepress/dist/
+docs-site/.vitepress/cache/
