@@ -30,6 +30,18 @@ export async function listApplied(db: ForgeDb): Promise<string[]> {
   return rows.map((r) => r.name);
 }
 
+/** Applied migrations WITH the time they ran. `status` needs the dates;
+ *  everything else only needs the names. */
+export async function listAppliedWithDates(
+  db: ForgeDb,
+): Promise<{ name: string; appliedAt: string | null }[]> {
+  const rows = await rawQuery<{ name: string; applied_at: string | null }>(
+    db,
+    `SELECT name, applied_at FROM _forge_migrations ORDER BY name ASC`,
+  );
+  return rows.map((r) => ({ name: r.name, appliedAt: r.applied_at ?? null }));
+}
+
 export async function recordMigration(db: ForgeDb, name: string): Promise<void> {
   const at = new Date().toISOString();
   // Escape single quotes in the (forge-generated, so safe) values defensively.

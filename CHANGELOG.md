@@ -4,6 +4,79 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.12.0 — `forge migrate status`
+
+**Minor.** Stage 5. Every other command compares **intent** — the schema
+against a snapshot, or against what a database reports. This one compares
+**reality**: the `.sql` files in `migrations/` against the rows in
+`_forge_migrations`.
+
+```bash
+npx forge migrate status
+npx forge migrate status --check    # CI: exit 4 if anything needs attention
+```
+
+```
+  ✓ 0002_add-org-slug.sql       2026-08-19T16:40:55Z
+  ! 0003_alice-adds-note.sql    OUT OF ORDER — sorts before
+                                0004_bob-adds-tier.sql, which is already applied
+  · 0005_add-index.sql          pending
+  ? 0006_from-a-branch.sql      NOT IN THIS CHECKOUT   applied 2026-09-02
+```
+
+### The two states nobody reports
+
+Applied and pending every migration tool shows. The other two are where
+production goes wrong, and no tool — drizzle-kit included — reports
+either.
+
+**NOT IN THIS CHECKOUT.** The database has applied a migration that is
+not in your folder: somebody ran a branch against it. This matters more
+than it looks — the schema in front of you is not the schema that
+database has, so every migration you generate from here is built on a
+state you cannot see. The next `forge generate` produces a file that is
+correct against your snapshot and wrong against that database.
+
+**OUT OF ORDER.** Alice generates `0007` on Monday, Bob generates `0008`
+on Tuesday, Bob's ships first. When Alice's merges, a migrator walking
+forward from the highest applied entry skips `0007` in silence — it is
+never applied at all, and nothing says so. drizzle-kit has this exact
+failure with journal timestamps. forge would too; the difference is that
+forge tells you, and says to regenerate on top of the current state
+rather than leaving you to find out in staging.
+
+### Exit codes
+
+`--check` exits 4, distinct from `generate --check`'s 2 and 3, so a
+pipeline can tell which gate refused it.
+
+| exit | command | meaning |
+|---|---|---|
+| 2 | `generate --check` | the schema has unsafe changes |
+| 3 | `generate --check` | a schema change has no migration |
+| 4 | `migrate status --check` | the database and the folder disagree |
+
+### Notes
+
+- This is the one command that genuinely needs `DATABASE_URL`. A database
+  is the only thing that knows what it has actually run.
+- `buildStatus()` takes the ledger as an argument rather than reading it,
+  so the state machine is tested without a database — the four states and
+  both dangerous ones are covered by unit tests, not by an integration
+  suite somebody skips locally.
+- Point the CI gate at staging. An empty per-PR database has nothing to
+  disagree about, and the check only earns its place against one with
+  history.
+- New: `listAppliedWithDates()` in `migrate-runtime.ts`, so the report can
+  show when each migration ran.
+- An applied migration missing from this checkout does **not** mark the
+  others out of order. It would otherwise set the high-water mark and
+  flag every ordinary pending file, under guidance that does not address
+  the real cause. `OUT OF ORDER` means *behind a migration this checkout
+  also has*; the ordering risk from an unknown one is reported under the
+  unknown one. Found by running the command against a real database, not
+  by unit test — and now covered by both.
+
 ## 2.11.0 — a rename is not a drop and an add
 
 **Minor.** Stage 3, and the last silent-data-loss case in the generator.

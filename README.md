@@ -158,9 +158,15 @@ npx degit johnsonfash/forge-orm-examples/01-sqlite-browser-todo my-app
 * [Views and materialised views](#views-and-materialised-views)
 * [Watching queries](#watching-queries)
 * [Creating tables and migrations](#creating-tables-and-migrations)
+  * [`forge generate` — a migration without a database](#forge-generate--a-migration-without-a-database)
+  * [Column changes — widened, or refused with the fix](#column-changes--widened-or-refused-with-the-fix)
+  * [`renamedFrom` — a rename is not a drop and an add](#renamedfrom--a-rename-is-not-a-drop-and-an-add)
+  * [`forge migrate status` — what the database has really applied](#forge-migrate-status--what-the-database-has-really-applied)
+  * [Asking a command what it does](#asking-a-command-what-it-does)
   * [Pointing the CLI at your schema](#pointing-the-cli-at-your-schema)
   * [Ignoring drift on `forge diff`](#ignoring-drift-on-forge-diff)
   * [`forge doctor` — live capability probe](#forge-doctor--live-capability-probe)
+  * [`scopeBy` — declare your tenant key, get an index lint](#scopeby--declare-your-tenant-key-get-an-index-lint)
   * [Extensions and `forge push --enable-extensions`](#extensions-and-forge-push---enable-extensions)
 * [Dropping to raw queries with `.compile`](#dropping-to-raw-queries-with-compile)
 * [Type safety](#type-safety)
@@ -219,7 +225,7 @@ The README is the surface reference. For more depth — extra examples, edge cas
 | Geo — SRIDs, dialect matrix, PostGIS, distance models, 3D, MultiPolygon, GeoJSON, spatial joins, H3, realtime tracking | **[docs/GEO.md](docs/GEO.md)** |
 | Vector / embeddings / RAG — dialect picker, pipeline, hybrid BM25, versioning, HNSW/IVFFlat, quantization, multi-modal, eval | **[docs/VECTOR.md](docs/VECTOR.md)** |
 | JSON path queries — per-dialect emit, indexing, migration, operator matrix, null markers, audit/webhook patterns, common bugs | **[docs/JSON-PATH.md](docs/JSON-PATH.md)** |
-| Migrations — push-style model, every CLI flag, drift rules, per-dialect emit, three CI snippets, blue/green, monorepo, runtime split | **[docs/MIGRATIONS.md](docs/MIGRATIONS.md)** |
+| Migrations — push-style model, snapshots and `forge generate`, `ALTER COLUMN` safety, `renamedFrom`, `forge migrate status`, drift rules, per-dialect emit, CI snippets, blue/green, monorepo, runtime split | **[docs/MIGRATIONS.md](docs/MIGRATIONS.md)** |
 | Drivers — bring-your-own-driver pattern, every shipped wrapper, six worked wrappers (Neon, Turso, D1, Atlas Data API, Bun, decorator) | **[docs/DRIVERS.md](docs/DRIVERS.md)** |
 
 **CLI and operations**
@@ -227,6 +233,7 @@ The README is the surface reference. For more depth — extra examples, edge cas
 | Topic | File |
 |---|---|
 | CLI reference — every `forge` subcommand and flag, exit codes, env config, CI snippets, programmatic equivalents | **[docs/CLI.md](docs/CLI.md)** |
+| vs drizzle-kit — an honest feature-by-feature comparison, what drizzle does better, and the staged plan to close each gap | **[docs/VS-DRIZZLE.md](docs/VS-DRIZZLE.md)** |
 | `forge push` — push semantics, `--enable-extensions`, `--fallback`, idempotency, dry-run, per-dialect DDL ordering | **[docs/PUSH.md](docs/PUSH.md)** |
 | `forge diff` — drift detection rules, DriftItem taxonomy, drift apply, per-dialect quirks, CI gating, the 2.5.1 auto-apply pass | **[docs/DIFF.md](docs/DIFF.md)** |
 | `forge doctor` — live capability probe, per-dialect checks, fix recipes, browserDoctor, K8s readinessProbe | **[docs/DOCTOR.md](docs/DOCTOR.md)** |
@@ -2373,6 +2380,7 @@ npx forge diff --check                      # exit non-zero if there is drift (u
 npx forge diff --ignore=logs,/^_atlas_/i    # skip noisy meta-collections (see below)
 npx forge diff apply                        # generate and run a migration that reconciles the difference
 npx forge rollback                          # undo the most recent applied migration
+npx forge migrate status                    # what has run, what has not, what should not have
 npx forge doctor                            # adapter pre-flight + live capability probe (see below)
 npx forge --help
 ```
@@ -2468,6 +2476,41 @@ and the pull request.
 Renaming **and** changing a type emits both statements, in order. That
 one is a known drizzle-kit bug where the type change is silently lost.
 See [MIGRATIONS.md](./docs/MIGRATIONS.md).
+
+### `forge migrate status` — what the database has really applied
+
+```bash
+npx forge migrate status
+npx forge migrate status --check    # CI: exit 4 if anything needs attention
+```
+
+Every other command compares **intent** — the schema against a snapshot,
+or against what a database reports. This one compares **reality**: the
+files in `migrations/` against the rows in `_forge_migrations`.
+
+```
+  ✓ 0002_add-org-slug.sql       2026-08-19T16:40:55Z
+  ! 0003_alice-adds-note.sql    OUT OF ORDER — sorts before
+                                0004_bob-adds-tier.sql, which is already applied
+  · 0005_add-index.sql          pending
+  ? 0006_from-a-branch.sql      NOT IN THIS CHECKOUT   applied 2026-09-02
+```
+
+Applied and pending every tool shows. The other two are where production
+goes wrong and no tool reports either:
+
+- **NOT IN THIS CHECKOUT** — somebody ran a branch against this database.
+  The schema in front of you is not the schema it has, so every migration
+  you generate from here is built on a state you cannot see.
+- **OUT OF ORDER** — Alice generates `0007`, Bob generates `0008`, Bob's
+  ships first. When Alice's merges, a migrator walking forward from the
+  highest applied entry **skips it in silence** and it is never applied at
+  all. drizzle-kit has this exact failure with journal timestamps.
+
+This is the one command that genuinely needs `DATABASE_URL` — a database
+is the only thing that knows what it has run. Point the CI gate at
+staging, not at a throwaway database: an empty one has nothing to
+disagree about. See [MIGRATIONS.md](./docs/MIGRATIONS.md).
 
 ### Asking a command what it does
 
@@ -2638,7 +2681,7 @@ statements before the table DDL, based on what your schema declares:
 extension installs from app code doesn't fail at first push. Without the
 flag, the push works as long as the extensions are already installed.
 
-See more — **[docs/MIGRATIONS.md](docs/MIGRATIONS.md)** for the push-style model, drift rules, per-dialect emit table, three CI snippets, blue/green pattern, monorepo workflow. **[docs/CLI.md](docs/CLI.md)** for every `forge` subcommand and flag. **[docs/PUSH.md](docs/PUSH.md)** (push semantics + `--enable-extensions` + `--fallback`), **[docs/DIFF.md](docs/DIFF.md)** (drift taxonomy + the 2.5.1 auto-apply pass), **[docs/DOCTOR.md](docs/DOCTOR.md)** (live capability probe), **[docs/ROLLBACK.md](docs/ROLLBACK.md)** (snapshot vs forward-only vs blue/green), **[docs/SEED.md](docs/SEED.md)** (idempotent upserts + bootstrap/dev/demo split), **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** (env-per-stage + zero-downtime + RDS Proxy), **[docs/VERSIONING.md](docs/VERSIONING.md)** (expand/contract for breaking changes), **[docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md)** (per-dialect backup + PITR + restore drills).
+See more — **[docs/MIGRATIONS.md](docs/MIGRATIONS.md)** for the push-style model, drift rules, per-dialect emit table, three CI snippets, blue/green pattern, monorepo workflow. **[docs/CLI.md](docs/CLI.md)** for every `forge` subcommand and flag. **[docs/VS-DRIZZLE.md](docs/VS-DRIZZLE.md)** for the drizzle-kit comparison and what is still open. **[docs/PUSH.md](docs/PUSH.md)** (push semantics + `--enable-extensions` + `--fallback`), **[docs/DIFF.md](docs/DIFF.md)** (drift taxonomy + the 2.5.1 auto-apply pass), **[docs/DOCTOR.md](docs/DOCTOR.md)** (live capability probe), **[docs/ROLLBACK.md](docs/ROLLBACK.md)** (snapshot vs forward-only vs blue/green), **[docs/SEED.md](docs/SEED.md)** (idempotent upserts + bootstrap/dev/demo split), **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** (env-per-stage + zero-downtime + RDS Proxy), **[docs/VERSIONING.md](docs/VERSIONING.md)** (expand/contract for breaking changes), **[docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md)** (per-dialect backup + PITR + restore drills).
 
 ---
 

@@ -215,17 +215,25 @@ Nothing more is needed. The value is that the file lives in the same
 ordered history as the generated ones, so a backfill cannot get lost
 between two schema changes.
 
-### Stage 5 — `forge migrate status` and a CI gate
+### Stage 5 — `forge migrate status` and a CI gate — **shipped 2.12.0**
 
 ```bash
-npx forge migrate status   # applied, pending, and any file the DB has
-                           # but this checkout does not
-npx forge diff --check     # already exists — exit 3 on drift
+npx forge migrate status         # applied, pending, out of order, and any
+                                 # file the DB has but this checkout does not
+npx forge migrate status --check # exit 4 when they disagree
+npx forge diff --check           # already existed — exit 3 on drift
 ```
 
-The third case is the one that bites: a migration applied to the database
-from a branch that was never merged. Neither drizzle nor forge reports it
-today.
+Two of the four states are reported by no tool at all:
+
+- **a migration applied from a branch that was never merged.** The schema
+  in front of you is not the schema that database has, so everything you
+  generate from here is built on a state you cannot see.
+- **a pending migration numbered behind one already applied.** Alice
+  generates `0007`, Bob generates `0008`, Bob's ships first — and when
+  Alice's merges, a migrator walking forward from the highest applied
+  entry skips it in silence. drizzle-kit has this exact failure with
+  journal timestamps.
 
 ### Stage 6 — a SQL preview for queries
 
@@ -326,9 +334,11 @@ What is still open, in order:
   `renamedFrom`, with a refusal on any unannotated same-typed drop+add
   and `--allow-drop` to confirm a real deletion. Renaming AND changing a
   type emits both statements — the case drizzle-kit loses.
-- **Stage 5 — `forge migrate status`**, including the case neither tool
-  reports today: a migration applied to the database from a branch that
-  was never merged.
+- ~~**Stage 5 — `forge migrate status`.**~~ Shipped in 2.12.0. Four
+  states, and the two nobody reports: a migration applied to the database
+  from a branch that was never merged, and a pending migration numbered
+  behind one already applied — which a migrator walking forward skips in
+  silence. `--check` exits 4 for CI.
 - **Stage 6 — `$explain`**, the honest answer to SQL transparency.
 
 Battle-testing stays red and there is no clever answer to it — only R7.

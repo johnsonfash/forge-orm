@@ -2,7 +2,7 @@
 
 Full reference for the `forge` command — every subcommand, every flag, every exit code, plus the runtime API equivalents.
 
-The CLI is a thin dispatcher over five subcommand entry points (`push`, `diff`, `diff apply`, `rollback`, `doctor`). Each one reads `DATABASE_URL` from `.env` or the environment, resolves the schema through a fixed cascade, and shells out to the dialect-specific introspect/emit code. There are no global flags besides `--help`. Every subcommand owns its own flag set, documented below.
+The CLI is a thin dispatcher over seven subcommand entry points (`push`, `diff`, `diff apply`, `generate`, `migrate status`, `rollback`, `doctor`). Each one reads `DATABASE_URL` from `.env` or the environment, resolves the schema through a fixed cascade, and shells out to the dialect-specific introspect/emit code. There are no global flags besides `--help`. Every subcommand owns its own flag set, documented below.
 
 The migration-model background — *why* push is additive-only, *why* there are no migration files by default — lives in **[MIGRATIONS.md](./MIGRATIONS.md)**. This file is the flag-by-flag reference for the binary itself.
 
@@ -16,7 +16,7 @@ npm i -D forge-orm
 npx forge --help
 ```
 
-The package registers a single bin entry in `node_modules/.bin/forge` pointing at `dist/scripts/forge-cli.js`. Calling `npx forge <subcommand>` resolves to that entry. The dispatcher lives at `src/scripts/forge-cli.ts`; each subcommand is its own file in the same directory (`push.ts`, `diff.ts`, `diff-apply.ts`, `rollback.ts`, `doctor.ts`).
+The package registers a single bin entry in `node_modules/.bin/forge` pointing at `dist/scripts/forge-cli.js`. Calling `npx forge <subcommand>` resolves to that entry. The dispatcher lives at `src/scripts/forge-cli.ts`; each subcommand is its own file in the same directory (`push.ts`, `diff.ts`, `diff-apply.ts`, `generate.ts`, `status.ts`, `rollback.ts`, `doctor.ts`).
 
 You can also install globally if you prefer a bare `forge` on PATH:
 
@@ -55,6 +55,8 @@ The `forge.schema` field is the second step of the schema-resolution cascade (af
 | `forge push` | Idempotently sync the schema to the live DB. Additive-only — never drops columns, tables, or non-Mongo indexes. | Yes |
 | `forge diff` | Read-only drift report between schema and live DB. `--check` for CI gate, `--json` for tooling. | No |
 | `forge diff apply` | Generate a reconciliation migration file (`up`/`down`) for the current drift, apply it forward, record in `_forge_migrations`. | Yes |
+| `forge generate` | Write a migration by diffing the schema against the last committed snapshot. **No database.** | Files only |
+| `forge migrate status` | Compare `migrations/` against the `_forge_migrations` ledger. Reports applied, pending, out-of-order, and applied-but-absent. | No |
 | `forge rollback` | Run the `down` block of the most-recently-applied migration. | Yes |
 | `forge doctor` | Driver inventory + URL shape check + schema lint + live capability probe. Pre-flight before anything else. | No |
 
@@ -281,6 +283,96 @@ npx forge diff apply
 git add migrations/20260624T143052_drift.sql
 git commit -m "Add users.email_verified_at"
 ```
+
+---
+
+## `forge generate` (2.9.0)
+
+```sh
+npx forge generate --name add-org-slug      # the usual case
+npx forge generate --dialect postgres       # when DATABASE_URL is not set at all
+npx forge generate --check                  # CI gate — exit 3 if a migration is missing
+npx forge generate --custom --name backfill # empty up/down to fill in by hand
+npx forge generate --allow-drop             # confirm a column really is being deleted
+```
+
+Diffs the schema against the **last committed snapshot** in
+`migrations/meta/` and writes a numbered `.sql` plus a new snapshot.
+**Nothing connects.** This is the everyday generator; `forge diff apply`
+is for adopting a database somebody else created.
+
+| Flag | Effect |
+|---|---|
+| `--name <slug>` | Names the file. Defaults to a timestamp-derived slug. |
+| `--dialect <name>` | `postgres` \| `mysql` \| `sqlite` \| `mssql`. Only needed when `DATABASE_URL` is absent — when it is set, the scheme is read and nothing is dialled. |
+| `--check` | Writes nothing. Exit 3 if the schema contains changes no migration covers, naming them. |
+| `--custom` | Writes an empty `up`/`down` pair plus a snapshot, for a backfill or any data migration. |
+| `--allow-drop` | Confirms that a same-typed drop+add really is a drop, not an unannotated rename. |
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | A migration was written, or `--check` found nothing missing. |
+| 1 | Usage or schema-resolution error. |
+| 2 | The diff contains an **unsafe** change (a narrowing `ALTER`, `NULL` → `NOT NULL`, an unannotated rename). Nothing is written — including the safe changes in the same diff. |
+| 3 | `--check` only: a schema change has no migration. |
+
+Exit 2 writes nothing at all, deliberately. A migration that applies
+cleanly while leaving the schema and the database disagreeing is the
+failure this removes, not a smaller version of it.
+
+`forge generate` refuses on Mongo. There is no DDL to generate.
+
+---
+
+## `forge migrate status` (2.12.0)
+
+```sh
+npx forge migrate status                    # the report
+npx forge migrate status --check            # CI gate — exit 4 if anything disagrees
+```
+
+The only command that compares the migration **folder** against the
+migration **ledger**. `generate` and `diff --check` compare intent; this
+compares what a database has actually run.
+
+```
+  ✓ 0002_add-org-slug.sql       2026-08-19T16:40:55Z
+  ! 0003_alice-adds-note.sql    OUT OF ORDER — sorts before
+                                0004_bob-adds-tier.sql, which is already applied
+  · 0005_add-index.sql          pending
+  ? 0006_from-a-branch.sql      NOT IN THIS CHECKOUT   applied 2026-09-02
+```
+
+| State | Meaning |
+|---|---|
+| `✓ applied` | In the ledger and in this checkout. |
+| `· pending` | A file here that has not run. |
+| `! OUT OF ORDER` | Pending, but sorting **behind** one already applied — a migrator walking forward skips it in silence. |
+| `? NOT IN THIS CHECKOUT` | The database applied something this checkout does not have. Somebody ran a branch against it. |
+
+The last two are reported by no other migration tool, drizzle-kit
+included. Both are cheap to detect and expensive to discover any other
+way — usually as *"why is this column missing in staging"* a fortnight
+later. Full explanation and the fix for each in
+**[MIGRATIONS.md](./MIGRATIONS.md#forge-migrate-status-2120)**.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Clean, or `--check` not passed. |
+| 1 | `DATABASE_URL` missing, or a connection/usage error. |
+| 4 | `--check` only: something is out of order, unknown, or unapplied. |
+
+4 is distinct from `generate --check`'s 2 and 3 so a pipeline can tell
+which gate refused it.
+
+**This is the one command that genuinely needs `DATABASE_URL`** — a
+database is the only thing that knows what it has run. `forge generate`
+is the offline one. Point the CI gate at staging, not at a per-PR
+throwaway: an empty database has nothing to disagree about.
 
 ---
 
