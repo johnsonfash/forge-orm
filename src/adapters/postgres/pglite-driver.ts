@@ -90,11 +90,48 @@ export async function pgliteDriverFromUrl(url: string): Promise<PostgresDriver> 
     );
   }
   const dir = pgliteDataDir(url);
+  const extensions = await loadPgliteExtensions();
   // `create` waits for the WASM boot; the constructor alone does not, and
   // the first query would race it.
   const pg = typeof PGlite.create === 'function'
-    ? await PGlite.create(dir)
+    ? await PGlite.create(dir, Object.keys(extensions).length ? { extensions } : undefined)
     : new PGlite(dir);
   if (typeof pg.waitReady?.then === 'function') await pg.waitReady;
+
+  // Registering the extension is only half of it — Postgres still needs the
+  // CREATE. Done here rather than from $migrate so `f.vector()` works on a
+  // pglite: URL whichever way the tables were made. It is a no-op on a
+  // database that already has it, and PGlite is single-user and embedded,
+  // so none of the reasons `--enable-extensions` is opt-in on a real server
+  // (superuser rights, a shared database) apply.
+  if (extensions.vector) {
+    try {
+      await pg.query('CREATE EXTENSION IF NOT EXISTS vector');
+    } catch {
+      // An older PGlite that exports the module but cannot install it —
+      // let the failure surface where it means something, on the CREATE
+      // TABLE that actually needs the type.
+    }
+  }
   return pgliteDriver(pg);
+}
+
+/**
+ * PGlite's bundled extensions, where this build has them.
+ *
+ * pgvector ships inside the package as `@electric-sql/pglite/vector` on
+ * 0.2.x. It is not there on every version — 0.5.x drops it from the bundle
+ * — so this resolves what it can and returns what it found, rather than
+ * making `f.vector()` a hard requirement on a particular PGlite release.
+ */
+async function loadPgliteExtensions(): Promise<Record<string, unknown>> {
+  const found: Record<string, unknown> = {};
+  for (const spec of ['@electric-sql/pglite/vector', '@electric-sql/pglite/contrib/vector']) {
+    try {
+      const mod: any = await import(/* @vite-ignore */ spec);
+      const ext = mod.vector ?? mod.default?.vector ?? mod.default;
+      if (ext) { found.vector = ext; break; }
+    } catch { /* not in this build — carry on */ }
+  }
+  return found;
 }

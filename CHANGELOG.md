@@ -4,6 +4,56 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.16.0 — three bugs the examples found
+
+**Minor.** Every one of these came from running an example rather than
+reading it, and every one has the same shape: a path that handled
+`geoPoint` and `vector` in one place and forgot them in another, so the
+feature worked right up until you used it the second way.
+
+### `orderBy: { loc: { nearTo } }` ignored `fallback: true`
+
+`f.geoPoint({ fallback: true })` stores JSON and post-filters in the app
+— that is the documented point of it, and `where.near` honoured it,
+emitting a bounding-box prefilter. `orderBy` did not: it asked Postgres
+for `ST_GeogFromText` against a `jsonb` column and got
+
+```
+function st_geogfromtext(unknown) does not exist
+```
+
+The executor was already computing `_distanceMeters` by haversine and
+sorting on it, so the correct SQL for a fallback column is none at all.
+It now emits neither the distance column nor an `ORDER BY` over an alias
+that was never selected — which was the same bug's other half.
+
+Fixed in the shared SQL compiler, so sqlite, mysql and duckdb fallback
+columns are fixed with it.
+
+### `upsert` sent raw values for `vector` and `geoPoint`
+
+`create()` wrapped them through the dialect's value emitter. So did the
+`SET` clause. Upsert's `VALUES` list used a bare placeholder, so an
+upsert carrying a vector sent the JS array and Postgres answered
+`Vector contents must start with "["`. A native `geoPoint` had it too —
+it reached the driver as an object instead of `ST_GeogFromText(…)`.
+
+### `pglite:` could not register extensions
+
+The URL form builds the PGlite instance internally, so there was no way
+to pass one — and a schema with `f.vector()` failed at CREATE TABLE with
+`type "vector" does not exist`. forge now loads pgvector from the PGlite
+package when that build ships it (`@electric-sql/pglite/vector` on
+0.2.x), registers it, and issues `CREATE EXTENSION IF NOT EXISTS vector`.
+Absent from the build, nothing is registered and the failure surfaces
+where it means something.
+
+PGlite is embedded and single-user, so none of the reasons
+`--enable-extensions` is opt-in on a real server — superuser rights, a
+shared database — apply here.
+
+677 tests passing.
+
 ## 2.15.0 — `$migrate()` works on postgres
 
 **Minor.** The other half of making `pglite:` actually usable.

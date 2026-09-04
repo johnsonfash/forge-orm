@@ -42,8 +42,18 @@ for (const text of corpus) {
 
 const query = "leavened dough"
 const matches = await db.doc.findMany({
-  where: { embed: { nearTo: { vector: fakeEmbed(query), topK: 3 } } },
+  // `near` filters, `nearTo` orders — two different operators. There is no
+  // `topK`: rank with orderBy and cut with take, which is the same thing
+  // and works the same way on every dialect.
+  orderBy: { embed: { nearTo: { vector: fakeEmbed(query) } } },
+  take: 3,
 })
 
 console.log(`Top 3 for "${query}":`)
 for (const m of matches) console.log(`  · ${m.text}`)
+
+// Close the database before the process ends. On PGlite this is not
+// optional: its WASM Postgres reports proc_exit(99) when the instance
+// is torn down with the process, so a script that did all its work
+// correctly still exits non-zero.
+await db.$disconnect()

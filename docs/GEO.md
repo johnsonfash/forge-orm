@@ -113,6 +113,13 @@ Notes:
 
 ## Fallback mode in detail
 
+`orderBy: { loc: { nearTo: point } }` works on a fallback column as well
+as `where.near` does. Neither emits spatial SQL: the WHERE becomes a
+bounding-box prefilter, no distance column is selected, and no `ORDER BY`
+is emitted — the executor computes `_distanceMeters` by haversine and
+sorts on it after the rows come back. Before 2.16.0 the ordering path
+asked for `ST_GeogFromText` against the JSON column and failed.
+
 Set `f.geoPoint({ fallback: true })` when the dialect's spatial
 extension isn't available. Three common reasons:
 

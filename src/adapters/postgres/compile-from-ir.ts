@@ -374,13 +374,18 @@ function compileOrder(d: Dialect, table: string, orderBy: OrderByEntry[] | undef
   if (!orderBy?.length) return '';
   const parts = orderBy.map((e) => {
     if (e.nearTo) {
-      // Reference the synthetic alias emitted in SELECT.
       const fld = model?.fields?.[e.field];
+      // A fallback geoPoint has no distance column in the SELECT — sorting
+      // happens in app, after the haversine pass. Referencing the alias
+      // here would be an ORDER BY over a column that does not exist.
+      if (fld?.kind === 'geoPoint' && fld.geo?.fallback) return null;
+      // Reference the synthetic alias emitted in SELECT.
       const alias = fld?.kind === 'vector' ? '_distance' : '_distanceMeters';
       return d.orderClause(d.quoteIdent(alias), e.direction);
     }
     return d.orderClause(`${table}.${d.quoteIdent(e.field)}`, e.direction, e.nulls);
-  });
+  }).filter((p): p is string => p !== null);
+  if (!parts.length) return '';
   return `ORDER BY ${parts.join(', ')}`;
 }
 
@@ -442,7 +447,7 @@ export function compileSelect(
         fld, nt.vector, params,
       );
       cols = `${cols}, ${distExpr} AS _distance`;
-    } else if (fld.kind === 'geoPoint') {
+    } else if (fld.kind === 'geoPoint' && !fld.geo?.fallback) {
       if (!dialect.geoDistanceExpr) {
         throw new Error(`[forge] dialect '${dialect.name}' does not implement geoDistanceExpr`);
       }
@@ -451,6 +456,13 @@ export function compileSelect(
         fld, nearToEntry.nearTo as { lng: number; lat: number }, params,
       );
       cols = `${cols}, ${distExpr} AS _distanceMeters`;
+    } else if (fld.kind === 'geoPoint') {
+      // fallback: true — the column is JSON, not a geography, so there is no
+      // ST_Distance to call. `where.near` already knew this and emitted a
+      // bbox prefilter; ORDER BY did not, and asked Postgres for
+      // ST_GeogFromText against a jsonb column. The executor computes
+      // _distanceMeters by haversine and sorts on it afterwards, so the
+      // right SQL here is none at all.
     } else {
       throw new Error(`[forge] orderBy.${nearToEntry.field}.nearTo requires a geoPoint or vector field.`);
     }
@@ -634,7 +646,19 @@ export function compileUpdate(
   if (node.upsertCreate) {
     const cols = Object.keys(node.upsertCreate);
     const colList = cols.map((c) => dialect.quoteIdent(c)).join(', ');
-    const valList = cols.map((c) => dialect.placeholder(params, node.upsertCreate![c])).join(', ');
+    // Through valueExpr, not a bare placeholder: geoPoint and vector need
+    // the dialect's wrapping (ST_GeogFromText(...), `[…]::vector`). INSERT
+    // and the SET clause both did this; upsert's VALUES did not, so an
+    // upsert carrying either type sent the raw JS value and Postgres
+    // rejected it — "Vector contents must start with [".
+    const valList = cols
+      .map((c) => {
+        const fld = m.fields[c];
+        return fld && dialect.valueExpr
+          ? dialect.valueExpr(fld, params, node.upsertCreate![c])
+          : dialect.placeholder(params, node.upsertCreate![c]);
+      })
+      .join(', ');
     const upsertSet = buildSet();
     const setParts = upsertSet.length ? upsertSet : [noopSet()];
     const conflictCols = whereLeafColumns(node.where).map((c) => dialect.quoteIdent(c));
