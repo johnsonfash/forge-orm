@@ -292,6 +292,36 @@ You can run `db.$migrate()` on any sqlite driver — including
 
 ---
 
+## PGlite — built in, since 2.14.0
+
+PGlite has a URL of its own, so nothing below is needed to use it:
+
+```ts
+const db = await createDb({ url: 'pglite:./data', schema })   // on disk
+const db = await createDb({ url: 'pglite:', schema })          // ephemeral
+```
+
+forge imports `@electric-sql/pglite` lazily — it is never a hard
+dependency — and builds the driver itself. PGlite speaks Postgres, so
+everything downstream is the postgres adapter unchanged.
+
+Before 2.14.0 there was no `pglite:` prefix, and that URL failed with
+*"Could not infer adapter from URL"*. The hand-rolled wrapper below was
+the only way, which is why it is still documented: build your own
+instance when you need constructor options (extensions, a custom
+filesystem, a shared worker), then pass it in.
+
+```ts
+import { createDb, pgliteDriver } from 'forge-orm';
+import { PGlite } from '@electric-sql/pglite';
+import { vector } from '@electric-sql/pglite/vector';
+
+const pg = await PGlite.create('./data', { extensions: { vector } });
+const db = await createDb({ driver: pgliteDriver(pg), schema });
+```
+
+---
+
 ## Wrapping a new postgres driver
 
 Walk-through: `pglite` (in-browser PG). It exposes async

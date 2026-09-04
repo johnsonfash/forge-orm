@@ -32,7 +32,7 @@ const users = await db.user.findMany({ where: { name: { contains: 'Ali' } }, tak
 
 The same code works whether `DATABASE_URL` is a Postgres, MySQL, SQLite,
 DuckDB, SQL Server, or Mongo connection string. forge picks the right
-driver from the URL prefix (`postgres:`, `mysql:`, `sqlite:`, `duckdb:`,
+driver from the URL prefix (`postgres:`, `pglite:`, `mysql:`, `sqlite:`, `duckdb:`,
 `mssql:`, `mongodb:`).
 
 Beyond the basics, forge ships first-class typed support for the things
@@ -462,6 +462,7 @@ at all.
 | Database          | Connection string starts with     | Install                       |
 | ----------------- | ---------------------------------- | ----------------------------- |
 | PostgreSQL        | `postgres://` or `postgresql://`   | `npm install pg`              |
+| PGlite (embedded PG) | `pglite:` (e.g. `pglite:./data`)  | `npm install @electric-sql/pglite` |
 | MySQL or MariaDB  | `mysql://`                         | `npm install mysql2`          |
 | SQLite            | `sqlite:` or `file:`               | `npm install better-sqlite3`  |
 | MongoDB           | `mongodb://` or `mongodb+srv://`   | `npm install mongodb`         |

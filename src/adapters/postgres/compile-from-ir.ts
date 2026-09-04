@@ -10,7 +10,7 @@ import type {
   WhereTree,
 } from '../../ir/types';
 import type { SQLArtifact } from '../../compile';
-import type { ModelDef } from '../../schema/types';
+import type { FieldDef, ModelDef } from '../../schema/types';
 import { schema } from '../../schema';
 import { PostgresDialect, type Dialect } from './dialect';
 import { multiPolygonBbox } from '../shared/wkt';
@@ -535,6 +535,24 @@ export function compileInsert(
   return { kind: 'sql', dialect: dialect.name, sql, params };
 }
 
+/**
+ * True when an update node carries nothing to write.
+ *
+ * Exported because MySQL rewrites the assignment list and has to know the
+ * difference between a real assignment and the no-op emitted for an empty
+ * payload — see `compileUpdate` there.
+ */
+export function hasNoUpdatePayload(node: UpdateNode): boolean {
+  return (
+    !node.set ||
+    Object.keys(node.set).length === 0
+  ) &&
+    !node.increment &&
+    !node.multiply &&
+    !node.push &&
+    !node.unset?.length;
+}
+
 export function compileUpdate(
   node: UpdateNode,
   modelOverride?: ModelDef<any>,
@@ -585,6 +603,31 @@ export function compileUpdate(
     return parts;
   };
 
+  // A SET list can legitimately come out empty.
+  //
+  //   db.user.upsert({ where, create, update: {} })   ← "insert if missing,
+  //                                                      otherwise leave it"
+  //   db.user.update({ where, data: {} })
+  //
+  // Both emitted `SET` with nothing after it, which every dialect rejects —
+  // and because `RETURNING *` follows, the parser blames the next token and
+  // reports `near "RETURNING": syntax error`, pointing at the one part of
+  // the statement that was fine.
+  //
+  // A column assigned to its own current value is valid SQL, changes no
+  // row, and keeps RETURNING yielding the row — which upsert's contract
+  // requires: it must hand back the record whether it inserted or not.
+  // `DO NOTHING` would parse, but returns NO row on conflict, so upsert
+  // would resolve to undefined exactly when the row already existed.
+  const noopSet = (): string => {
+    const idCol =
+      Object.keys(m.fields).find((k) => (m.fields[k] as FieldDef).kind === 'id') ??
+      Object.keys(m.fields)[0];
+    if (!idCol) throw new Error(`[forge] model '${m.collection}' has no columns to update`);
+    const q = dialect.quoteIdent(idCol);
+    return `${q} = ${table}.${q}`;
+  };
+
   // Upsert: emit INSERT … ON CONFLICT (...) DO UPDATE SET …
   // VALUES params are pushed first so reading the SQL top-down also reads
   // the params in $1, $2, $3 order.
@@ -592,7 +635,8 @@ export function compileUpdate(
     const cols = Object.keys(node.upsertCreate);
     const colList = cols.map((c) => dialect.quoteIdent(c)).join(', ');
     const valList = cols.map((c) => dialect.placeholder(params, node.upsertCreate![c])).join(', ');
-    const setParts = buildSet();
+    const upsertSet = buildSet();
+    const setParts = upsertSet.length ? upsertSet : [noopSet()];
     const conflictCols = whereLeafColumns(node.where).map((c) => dialect.quoteIdent(c));
     const conflictClause = conflictCols.length
       ? dialect.upsertConflictClause(conflictCols, setParts.join(', '))
@@ -601,7 +645,8 @@ export function compileUpdate(
     return { kind: 'sql', dialect: dialect.name, sql, params };
   }
 
-  const setParts = buildSet();
+  const built = buildSet();
+  const setParts = built.length ? built : [noopSet()];
 
   const where = compileWhere(ctx, node.where);
   const whereClause = where ? `WHERE ${where}` : '';

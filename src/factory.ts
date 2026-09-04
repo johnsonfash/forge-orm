@@ -252,6 +252,16 @@ async function pickAndConnect(opts: CreateDbOptions): Promise<{ adapter: Adapter
       );
     }
   }
+  // `pglite:` resolves to the postgres adapter, but there is no server to
+  // dial — the database is a WASM module in this process. Build its driver
+  // here so the URL works on its own, the way every other scheme does.
+  if (/^pglite:/i.test(url)) {
+    const { pgliteDriverFromUrl } = await import('./adapters/postgres/pglite-driver');
+    const driver = await pgliteDriverFromUrl(url);
+    const adapter = instantiateAdapter('postgres', driver);
+    await adapter.connect(url);
+    return { adapter, url };
+  }
   const adapter = instantiateAdapter(kind);
   await adapter.connect(url);
   return { adapter, url };
