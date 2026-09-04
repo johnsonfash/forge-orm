@@ -771,6 +771,8 @@ Every CLI subcommand has a runtime equivalent. Useful inside the app process —
 | `forge diff apply` | (no direct API) — use `db.$diff()` + `compile.<op>()` + `$executeRaw` | composable in code |
 | `forge rollback` | (no direct API) — read `_forge_migrations` via `$queryRaw`, run down SQL via `$executeRaw` | composable in code |
 | `forge doctor` | `db.$doctor()` | sqlite-wasm gets the rich `BrowserDoctorReport`; other adapters get the per-adapter `DoctorReport` |
+| `forge migrate status` | (no direct API) — read `_forge_migrations` via `$queryRaw` and compare against `migrations/` | composable in code |
+| (no CLI) | `db.$explain(fn, { analyze? })` | every adapter with a compile API — see [EXPLAIN.md](./EXPLAIN.md) |
 
 ### `db.$migrate()` — runtime DDL apply (browser / sqlite-wasm)
 

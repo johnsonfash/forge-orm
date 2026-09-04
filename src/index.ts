@@ -107,6 +107,10 @@ export { buildPostgresCompileApi } from './adapters/postgres/compile';
 export { forgeSql, isSqlFragment, compileSqlFragment } from './raw-sql';
 export type { SqlFragment, CompiledRawSql } from './raw-sql';
 
+// ─── $explain — see a query without running it ──────────────────────────────
+export { formatExplain, inlineParams, splitSql, fragmentFromSql } from './explain';
+export type { ExplainReport, ExplainedQuery, SplitSql } from './explain';
+
 // Observability event types. Subscribe via db.$on('query'|'error', cb).
 export type { QueryEvent, ErrorEvent, EventListener } from './events';
 export { ForgeEmitter } from './events';

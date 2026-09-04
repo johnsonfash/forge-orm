@@ -235,7 +235,7 @@ Two of the four states are reported by no tool at all:
   entry skips it in silence. drizzle-kit has this exact failure with
   journal timestamps.
 
-### Stage 6 — a SQL preview for queries
+### Stage 6 — a SQL preview for queries — **shipped 2.13.0**
 
 Not a migration feature, but the honest answer to "SQL transparency":
 
@@ -339,7 +339,13 @@ What is still open, in order:
   from a branch that was never merged, and a pending migration numbered
   behind one already applied — which a migrator walking forward skips in
   silence. `--check` exits 4 for CI.
-- **Stage 6 — `$explain`**, the honest answer to SQL transparency.
+- ~~**Stage 6 — `$explain`.**~~ Shipped in 2.13.0. `db.$explain(fn)`
+  returns the SQL and parameters for a call site without running it, and
+  `{ analyze: true }` adds the database's own plan. It never emits
+  `EXPLAIN ANALYZE`, which would execute the statement — so explaining a
+  `deleteMany` deletes nothing.
+
+Every stage in the plan is now shipped. What remains is R7 and time.
 
 Battle-testing stays red and there is no clever answer to it — only R7.
 

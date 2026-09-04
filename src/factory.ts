@@ -8,6 +8,15 @@ import { ModelFields, ModelRelations, TypedModel } from './schema/core';
 import type { ModelDef } from './schema/types';
 import type { Adapter, AdapterKind } from './adapters/types';
 import type { SqlFragment } from './raw-sql';
+import type { CompiledArtifact } from './compile';
+import {
+  explainPrefix,
+  formatExplain,
+  fragmentFromSql,
+  inlineParams,
+  type ExplainReport,
+  type ExplainedQuery,
+} from './explain';
 import { detectAdapterKind } from './adapters/detect';
 import { ForgeMissingDriverError } from './adapters/missing-driver';
 import { MongoAdapter } from './adapters/mongo/adapter';
@@ -130,6 +139,19 @@ export type ForgeDb<S extends SchemaShape = SchemaMap> = Collections<S> & {
     (event: 'query', cb: (e: import('./events').QueryEvent) => void): void;
     (event: 'error', cb: (e: import('./events').ErrorEvent) => void): void;
   };
+  // See a query WITHOUT running it — SQL + parameters, and with
+  // `{ analyze: true }` the database's own plan.
+  //
+  //   await db.$explain((q) => q.user.findMany({ where: { age: { gt: 30 } } }))
+  //
+  // The callback may take the capturing db (preferred — it cannot execute
+  // anything, so an async callback is safe), or take nothing and close
+  // over the real db, which works only while the query is issued
+  // synchronously. Never emits EXPLAIN ANALYZE: that runs the statement.
+  $explain(
+    fn: (q: ForgeDb<S>) => unknown,
+    opts?: { analyze?: boolean },
+  ): Promise<import('./explain').ExplainReport>;
   // Names of every model this db exposes, sorted. Reading an unregistered
   // model THROWS (see unknownModel), which is deliberate — a typo should be
   // loud. But that left no way to ask whether a model exists, so callers
@@ -150,7 +172,8 @@ const PROXY_PASSTHROUGH = new Set<PropertyKey>([
 // than claiming keys whose access would throw.
 const DB_HELPER_KEYS = new Set<string>([
   'adapter', '$models', '$transaction', '$runCommandRaw', '$queryRaw',
-  '$executeRaw', '$disconnect', '$migrate', '$doctor', '$diff', '$on', '$off',
+  '$executeRaw', '$disconnect', '$migrate', '$doctor', '$diff', '$explain',
+  '$on', '$off',
 ]);
 const TX_HELPER_KEYS = new Set<string>([
   'adapter', '$models', '$transaction', '$runCommandRaw', '$queryRaw',
@@ -316,6 +339,7 @@ function makeDb(
       if (key === '$migrate') return $migrate;
       if (key === '$doctor') return $doctor;
       if (key === '$diff') return $diff;
+      if (key === '$explain') return $explain;
       if (key === '$on') return (event: any, cb: any) => adapter.emitter.on(event, cb);
       if (key === '$off') return (event: any, cb: any) => adapter.emitter.off(event, cb);
       if (key === '$models') return modelNames(models);
@@ -327,6 +351,10 @@ function makeDb(
         // wrapper would silently fall back to the Mongo singleton.
         cache[key as keyof SchemaMap] = new CollectionWrapper(model, undefined, adapter, runtime.strict);
       }
+      // Inside a synchronous $explain() window, hand back the capturing
+      // shim instead of the live wrapper, so `db.user.findMany(...)` in
+      // the callback compiles rather than executes.
+      if (capture) return captureWrapper(key, cache[key as keyof SchemaMap]!, capture);
       return cache[key as keyof SchemaMap];
     },
     // Without this, `'User' in db` was FALSE for a registered model — the
@@ -340,6 +368,225 @@ function makeDb(
       return DB_HELPER_KEYS.has(key) || modelExists(models, key);
     },
   });
+
+  // ── $explain ────────────────────────────────────────────────────────
+  //
+  // Set only for the synchronous window of a zero-arg $explain callback.
+  // Single-threaded JS means nothing else can run in that window, so this
+  // cannot leak into a concurrent query — but it also means the window
+  // closes at the first `await`, which is why the callback that takes `q`
+  // is the one to reach for.
+  let capture: ExplainedQuery[] | null = null;
+
+  // Wrapper ops whose SQL is identical to another op's. `…OrThrow` differs
+  // only in what it does with an empty result, which is after the query.
+  const OP_ALIAS: Record<string, string> = {
+    findFirstOrThrow: 'findFirst',
+    findUniqueOrThrow: 'findUnique',
+  };
+  // Ops with no compile equivalent. Naming them individually beats a
+  // generic "not supported" — the caller learns which of the two it is.
+  const NO_COMPILE: Record<string, string> = {
+    groupBy: 'groupBy builds its shape across several statements',
+    aggregate: 'aggregate is executed by the adapter, not compiled',
+    findManyStream: 'findManyStream is a cursor, not a single statement',
+    refresh: 'refresh is DDL, not a query',
+    scheduleRefresh: 'scheduleRefresh is a timer, not a query',
+  };
+
+  function captureWrapper(
+    modelKey: string,
+    wrapper: CollectionWrapper<any>,
+    sink: ExplainedQuery[],
+  ): any {
+    return new Proxy({}, {
+      get: (_t, prop) => {
+        if (typeof prop === 'symbol') return undefined;
+        const op = String(prop);
+        if (NO_COMPILE[op]) {
+          return () => {
+            throw new Error(
+              `[forge] $explain() cannot compile ${modelKey}.${op}() — ` +
+              `${NO_COMPILE[op]}.\n` +
+              `  → explain the read it is built on, or run it and read the ` +
+              `SQL from db.$on('query', …).`,
+            );
+          };
+        }
+        const compileOp = OP_ALIAS[op] ?? op;
+        const api = wrapper.compile as unknown as Record<string, (a: any) => CompiledArtifact>;
+        if (typeof api[compileOp] !== 'function') {
+          return () => {
+            throw new Error(
+              `[forge] $explain(): '${op}' is not a query on ${modelKey}. ` +
+              `Explainable ops: ${Object.keys(api).sort().join(', ')}.`,
+            );
+          };
+        }
+        return (args?: any) => {
+          const artifact = api[compileOp]!(args ?? {});
+          sink.push({
+            model: modelKey,
+            table: (wrapper as any).model?.collection ?? modelKey,
+            op,
+            artifact,
+            readable:
+              artifact.kind === 'sql'
+                ? inlineParams(artifact.sql, artifact.params, artifact.dialect)
+                : undefined,
+          });
+          // A resolved empty result, never a rejection: the callback's
+          // return value is discarded, and a rejected promise nobody
+          // awaits is an unhandled-rejection warning for doing nothing
+          // wrong.
+          return Promise.resolve([]);
+        };
+      },
+      has: () => true,
+    });
+  }
+
+  // A db whose models can only compile. Handed to callbacks that take an
+  // argument — it holds no session and reaches no driver, so there is no
+  // window during which anything could execute.
+  function makeCaptureDb(sink: ExplainedQuery[]): any {
+    return new Proxy({}, {
+      get: (_t, prop) => {
+        if (typeof prop === 'symbol' || PROXY_PASSTHROUGH.has(prop)) return undefined;
+        const key = String(prop);
+        if (key === 'adapter') return adapter;
+        if (key === '$models') return modelNames(models);
+        if (key.startsWith('$')) {
+          throw new Error(
+            `[forge] ${key}() is not available inside $explain() — the ` +
+            `capturing db compiles queries and never reaches the driver.`,
+          );
+        }
+        const model = models[key] as ModelDef<any> | undefined;
+        if (!model) throw unknownModel(key, models);
+        if (!cache[key as keyof SchemaMap]) {
+          cache[key as keyof SchemaMap] = new CollectionWrapper(model, undefined, adapter, runtime.strict);
+        }
+        return captureWrapper(key, cache[key as keyof SchemaMap]!, sink);
+      },
+      has: (_t, prop) => {
+        if (typeof prop === 'symbol' || PROXY_PASSTHROUGH.has(prop)) return false;
+        return modelExists(models, String(prop));
+      },
+    });
+  }
+
+  async function $explain(
+    fn: (q: any) => unknown,
+    opts?: { analyze?: boolean },
+  ): Promise<ExplainReport> {
+    if (typeof fn !== 'function') {
+      throw new Error(
+        `[forge] $explain() takes a callback: db.$explain((q) => q.user.findMany({ … })).`,
+      );
+    }
+    const sink: ExplainedQuery[] = [];
+
+    if (fn.length >= 1) {
+      // The callback asked for the capturing db. Nothing it holds can
+      // execute, so awaiting it is safe.
+      await fn(makeCaptureDb(sink));
+    } else {
+      if (capture) {
+        throw new Error('[forge] $explain() cannot be nested.');
+      }
+      capture = sink;
+      let returned: unknown;
+      try {
+        // Zero-arity by definition here — the branch is chosen on fn.length.
+        returned = (fn as () => unknown)();
+      } finally {
+        // Synchronously, before any microtask — so the window cannot
+        // stay open across an await in the caller's code.
+        capture = null;
+      }
+      if (sink.length === 0) {
+        const awaited = !!returned && typeof (returned as any).then === 'function';
+        throw new Error(
+          `[forge] $explain() captured no query.\n` +
+          (awaited
+            ? `  The callback returned a promise and issued nothing synchronously. ` +
+              `A zero-argument callback is only intercepted for as long as it runs ` +
+              `synchronously, so any query after an 'await' RAN FOR REAL.\n`
+            : `  The callback issued no query at all.\n`) +
+          `  → take the capturing db instead — it cannot execute anything:\n` +
+          `      db.$explain((q) => q.user.findMany({ … }))`,
+        );
+      }
+    }
+
+    const dialect: any = adapter.kind === 'mongo' ? 'mongo' : adapter.kind;
+    const report: ExplainReport = {
+      dialect,
+      queries: sink,
+      analyzed: false,
+      toString() { return formatExplain(this); },
+    };
+    if (!opts?.analyze) return report;
+
+    for (const q of sink) {
+      q.plan = await fetchPlan(q);
+    }
+    report.analyzed = true;
+    return report;
+  }
+
+  // The database's own plan. EXPLAIN only — never EXPLAIN ANALYZE, which
+  // would execute the statement, and on a deleteMany that means deleting
+  // the rows.
+  async function fetchPlan(q: ExplainedQuery): Promise<unknown> {
+    if (q.artifact.kind === 'sql') {
+      const { sql, params, dialect } = q.artifact;
+      const frag = fragmentFromSql(sql, params, dialect, explainPrefix(dialect));
+      const rows = await adapter.$queryRaw(frag);
+      // Postgres and MySQL each return one row wrapping the whole plan;
+      // SQLite returns a row per step. Unwrap the first shape, keep the
+      // second — a caller reading `plan` should not have to know which.
+      if (rows.length === 1) {
+        const only = rows[0] as Record<string, unknown>;
+        const keys = Object.keys(only ?? {});
+        if (keys.length === 1) {
+          const v = only[keys[0]!];
+          if (typeof v === 'string') {
+            try { return JSON.parse(v); } catch { return v; }
+          }
+          return v;
+        }
+      }
+      return rows;
+    }
+    // Mongo: the explain command wraps the operation it would have run.
+    const a = q.artifact;
+    const coll = q.table;
+    let cmd: Record<string, unknown>;
+    if (a.op === 'find' || a.op === 'findOne') {
+      const o = (a.args.options ?? {}) as Record<string, unknown>;
+      cmd = { find: coll, filter: a.args.filter ?? {} };
+      for (const k of ['sort', 'limit', 'skip', 'projection'] as const) {
+        if (o[k] !== undefined) cmd[k] = o[k];
+      }
+      if (a.op === 'findOne') cmd.limit = 1;
+    } else if (a.op === 'countDocuments') {
+      cmd = { count: coll, query: a.args.filter ?? {} };
+    } else if (a.op === 'aggregate') {
+      cmd = { aggregate: coll, pipeline: a.args.pipeline ?? [], cursor: {} };
+    } else {
+      throw new Error(
+        `[forge] $explain({ analyze: true }) covers reads on Mongo — ` +
+        `find, findOne, count and aggregate. '${a.op}' is a write, and ` +
+        `explaining one means asking the server to plan a change to your ` +
+        `data.\n` +
+        `  → drop 'analyze' to see the command itself, which is what you ` +
+        `would hand to mongosh.`,
+      );
+    }
+    return $runCommandRaw({ explain: cmd, verbosity: 'queryPlanner' } as any);
+  }
 
   // Dispatches through the adapter — works for both Mongo (replica-set
   // ClientSession) and Postgres (pg PoolClient).
