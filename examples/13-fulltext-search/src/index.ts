@@ -29,3 +29,9 @@ const hits = await db.article.findMany({
 
 console.log("Hits:")
 for (const a of hits) console.log(`  · ${a.title}`)
+
+// Close the database before the process ends. On PGlite this is not
+// optional: its WASM Postgres reports proc_exit(99) when the instance
+// is torn down with the process, so a script that did all its work
+// correctly still exits non-zero — which is what CI sees.
+await db.$disconnect()
