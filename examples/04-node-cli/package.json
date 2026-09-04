@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^11.5.0",
-    "forge-orm": "file:../.."
+    "forge-orm": "^2.15.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
