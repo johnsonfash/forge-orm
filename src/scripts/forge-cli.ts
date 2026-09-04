@@ -12,6 +12,7 @@ forge — schema sync for MongoDB, PostgreSQL, MySQL & SQLite.
 
 Usage:
   forge generate              Write a migration from the last snapshot (no DB)
+  forge migrate status        What has run, what has not, what should not have
   forge push                  Idempotently sync your schema to the live DB
   forge diff                  Show drift between the live DB and your schema
   forge diff --json           Same, machine-readable
@@ -56,6 +57,20 @@ Full docs: https://github.com/johnsonfash/forge-orm#readme
 
 /** What each subcommand does, for `forge <cmd> --help`. */
 const SUBCOMMAND_HELP: Record<string, string> = {
+  migrate: `forge migrate status — what the database has actually applied.
+
+  Four states, two of which no other tool reports:
+    applied        in the ledger and in this checkout
+    pending        a file here that has not run
+    OUT OF ORDER   pending, but numbered BEHIND one already applied — a
+                   migrator walking forward skips these silently
+    NOT IN THIS    the database applied a migration this checkout does
+    CHECKOUT       not have; somebody ran a branch against it
+
+    --check        exit 4 when anything needs attention (for CI)
+
+  Needs DATABASE_URL: it is the only command that can say what a
+  database has really applied.`,
   generate: `forge generate — write a migration WITHOUT a database.
 
   Diffs the schema against the last committed snapshot in
@@ -125,6 +140,16 @@ async function main() {
     case 'generate':
       await import('./generate');
       return;
+    case 'migrate': {
+      if (args[1] === 'status') {
+        process.argv = [process.argv[0], process.argv[1], ...args.slice(2)];
+        await import('./status');
+        return;
+      }
+      console.error(`[forge] usage: forge migrate status`);
+      process.exit(1);
+      return;
+    }
     case 'diff': {
       if (args[1] === 'apply') {
         process.argv = [process.argv[0], process.argv[1], ...args.slice(2)];

@@ -22,6 +22,7 @@ The browser-side equivalents are covered in **[BROWSER.md](./BROWSER.md#dbmigrat
 * [Per-dialect rollback fidelity](#per-dialect-rollback-fidelity)
 * [Five worked workflows](#five-worked-workflows)
 * [Runtime `$migrate()` + `$diff()` — when to use which](#runtime-migrate--diff--when-to-use-which)
+* [`forge migrate status`](#forge-migrate-status-2120)
 
 ---
 
@@ -1463,3 +1464,119 @@ rename. Renames run before every other column pass.
 
 [r1]: https://github.com/drizzle-team/drizzle-orm/issues/5499
 [r2]: https://github.com/drizzle-team/drizzle-orm/issues/3826
+
+---
+
+# `forge migrate status` (2.12.0)
+
+```bash
+npx forge migrate status
+npx forge migrate status --check     # CI: exit 4 if anything needs attention
+```
+
+Every other command in this file compares **intent** — your schema
+against a snapshot, or against what a database reports. This one compares
+**reality**: the `.sql` files in `migrations/` against the rows in
+`_forge_migrations`. It is the only command here that genuinely needs
+`DATABASE_URL`, because a database is the only thing that knows what it
+has actually run.
+
+```
+  migrations
+
+  ✓ 0001_initial.sql            2026-08-11T09:14:02Z
+  ✓ 0002_add-org-slug.sql       2026-08-19T16:40:55Z
+  ! 0003_alice-adds-note.sql    OUT OF ORDER — sorts before
+                                0004_bob-adds-tier.sql, which is already applied
+  ✓ 0004_bob-adds-tier.sql      2026-09-01T11:02:10Z
+  · 0005_add-index.sql          pending
+  ? 0006_from-a-branch.sql      NOT IN THIS CHECKOUT   applied 2026-09-02T08:30:00Z
+
+  3 applied · 1 pending · 1 out of order · 1 not in this checkout
+```
+
+## The four states
+
+| | meaning |
+|---|---|
+| `✓ applied` | in the ledger and in this checkout |
+| `· pending` | a file here that has not run |
+| `! OUT OF ORDER` | pending, but sorting **behind** one already applied |
+| `? NOT IN THIS CHECKOUT` | the database applied something this checkout does not have |
+
+The first two every migration tool shows. The other two are where
+production goes wrong, and no tool — drizzle-kit included — reports
+either.
+
+## `NOT IN THIS CHECKOUT`
+
+The database has applied a migration that is not in your `migrations/`
+folder. Somebody ran a branch against it.
+
+This matters more than it looks. The schema in front of you is **not** the
+schema that database has, so every migration you generate from here is
+built on a state you cannot see. The next `forge generate` produces a file
+that is correct against your snapshot and wrong against that database.
+
+The fix is to find the branch that produced them, or — if the database is
+disposable — reset it. Do not generate against it until it matches a
+branch that exists.
+
+## `OUT OF ORDER`
+
+Alice generates `0007` on Monday. Bob generates `0008` on Tuesday. Bob's
+merges first and ships. When Alice's is merged, a migrator that walks
+forward from the highest applied entry **skips `0007` in silence** — it is
+never applied at all, and nothing ever says so.
+
+drizzle-kit has this exact failure with journal timestamps. forge would
+too; the difference is that forge tells you.
+
+The fix is to regenerate on top of the current state: delete the file and
+its snapshot, pull, then `forge generate` again so it is numbered after
+what is already there. That also re-diffs it against the schema as it now
+is, which is the part that actually matters — `0007` was written against
+a world where `0008` had not happened.
+
+## How the two interact
+
+An applied migration that is **not in this checkout** never marks the
+others out of order. It would otherwise set the high-water mark and flag
+every ordinary pending file — with guidance that does not address the
+real cause, because the cause is the branch migration.
+
+So `OUT OF ORDER` means *behind a migration this checkout also has*, and
+the ordering risk from an unknown one is stated under the unknown one:
+
+```
+  ? 0006_from-a-branch.sql   NOT IN THIS CHECKOUT   applied 2026-09-02
+
+  It also blocks the 1 pending migration above: a migrator walking
+  forward from the newest ledger entry will step over anything
+  numbered below it. Resolve this before applying them.
+```
+
+Both are still reported, and `--check` still fails. What changes is which
+line you are asked to act on.
+
+## The CI gate
+
+```yaml
+- run: npx forge migrate status --check
+  env:
+    DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+```
+
+Exit 4 when anything is out of order, unknown, or unapplied. It is a
+distinct code from `generate --check`'s 2 and 3 so a pipeline can tell
+which gate refused it:
+
+| exit | command | meaning |
+|---|---|---|
+| 2 | `generate --check` | the schema has unsafe changes |
+| 3 | `generate --check` | a schema change has no migration |
+| 4 | `migrate status --check` | the database and the folder disagree |
+
+Point it at staging, not at the pull request's throwaway database — an
+empty database has nothing to disagree about, and this check only earns
+its place against one that has history.
