@@ -1,6 +1,6 @@
 # 04 · Node + SQLite (CLI)
 
-[![Open in StackBlitz](https://developer.stackblitz.com/img/open_in_stackblitz.svg)](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/04-node-sqlite-cli)
+[![Open in StackBlitz](https://developer.stackblitz.com/img/open_in_stackblitz.svg)](https://stackblitz.com/github/johnsonfash/forge-orm/tree/main/examples/04-node-sqlite-cli)
 
 The minimum-viable `forge-orm` program. One file, three queries, real SQLite via `better-sqlite3`. Use this as the mental model — every other example is variations on top.
 

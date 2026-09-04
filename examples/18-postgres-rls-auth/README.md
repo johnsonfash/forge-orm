@@ -14,13 +14,13 @@ Copy the connection string — looks like `postgres://user:pass@host:5432/db?ssl
 
 ## Run it
 
-- **[Run on CodeSandbox](https://codesandbox.io/p/devbox/github/johnsonfash/forge-orm-examples/main/18-postgres-rls-auth)** — paste URI into the env editor as `DATABASE_URL`, hit Run
+- **[Run on CodeSandbox](https://codesandbox.io/p/devbox/github/johnsonfash/forge-orm/main/examples/18-postgres-rls-auth)** — paste URI into the env editor as `DATABASE_URL`, hit Run
 
 Or locally with Docker:
 
 ```sh
 docker run -e POSTGRES_PASSWORD=postgres -p 5432:5432 -d postgres:16
-npx degit johnsonfash/forge-orm-examples/18-postgres-rls-auth my-demo
+npx degit johnsonfash/forge-orm/examples/18-postgres-rls-auth my-demo
 cd my-demo
 echo 'DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres' > .env
 npm install && npm run dev

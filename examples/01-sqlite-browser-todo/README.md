@@ -1,6 +1,6 @@
 # 01 · SQLite browser todo
 
-[![Open in StackBlitz](https://developer.stackblitz.com/img/open_in_stackblitz.svg)](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/01-sqlite-browser-todo)
+[![Open in StackBlitz](https://developer.stackblitz.com/img/open_in_stackblitz.svg)](https://stackblitz.com/github/johnsonfash/forge-orm/tree/main/examples/01-sqlite-browser-todo)
 
 The "hello world" of `forge-orm` in the browser. A real SQLite database lives inside a Web Worker — every CRUD operation is real SQL through `sqlite-wasm`.
 

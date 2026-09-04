@@ -55,7 +55,7 @@ CodeSandbox VM runs the app, the DB lives in a free hosted tier. Each README has
 Always fastest — zero latency, native works:
 
 ```sh
-npx degit johnsonfash/forge-orm-examples/04-node-cli my-app
+npx degit johnsonfash/forge-orm/examples/04-node-cli my-app
 cd my-app && npm install && npm run dev
 ```
 

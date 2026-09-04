@@ -6,12 +6,12 @@ Seeds 5,000 sales rows into in-process DuckDB and runs aggregations. Demonstrate
 
 DuckDB's Node bindings ship a native `.node` addon, so this needs a real OS — not StackBlitz. Click-and-run on CodeSandbox (`.codesandbox/tasks.json` auto-installs + runs):
 
-- **[Run on CodeSandbox](https://codesandbox.io/p/devbox/github/johnsonfash/forge-orm-examples/main/03-duckdb-cli-needs-vm)**
+- **[Run on CodeSandbox](https://codesandbox.io/p/devbox/github/johnsonfash/forge-orm/main/examples/03-duckdb-cli-needs-vm)**
 
 Or fastest, locally:
 
 ```sh
-npx degit johnsonfash/forge-orm-examples/03-duckdb-cli-needs-vm my-demo
+npx degit johnsonfash/forge-orm/examples/03-duckdb-cli-needs-vm my-demo
 cd my-demo && npm install && npm run dev
 ```
 

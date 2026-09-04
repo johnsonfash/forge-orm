@@ -1,6 +1,6 @@
 # 08 · Geo search (`f.geoPoint` + `nearTo`)
 
-[![Open in StackBlitz](https://developer.stackblitz.com/img/open_in_stackblitz.svg)](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/08-geo-search)
+[![Open in StackBlitz](https://developer.stackblitz.com/img/open_in_stackblitz.svg)](https://stackblitz.com/github/johnsonfash/forge-orm/tree/main/examples/08-geo-search)
 
 "Find me everything within X meters." Same code targets PostGIS, MySQL spatial, SpatiaLite, DuckDB spatial, MSSQL geography, and Mongo GeoJSON.
 

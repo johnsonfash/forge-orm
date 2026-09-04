@@ -1,6 +1,6 @@
 # 05 · Hono + PGlite REST API
 
-[![Open in StackBlitz](https://developer.stackblitz.com/img/open_in_stackblitz.svg)](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/05-hono-pglite-api)
+[![Open in StackBlitz](https://developer.stackblitz.com/img/open_in_stackblitz.svg)](https://stackblitz.com/github/johnsonfash/forge-orm/tree/main/examples/05-hono-pglite-api)
 
 Backend REST API on Hono with Postgres-via-PGlite (Postgres compiled to wasm). Zero external services — `npm install && npm run dev` and you have a working API at `http://localhost:3000`.
 

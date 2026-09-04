@@ -1,6 +1,6 @@
 # 10 · Recipe / BOM with sub-recipes
 
-[![Open in StackBlitz](https://developer.stackblitz.com/img/open_in_stackblitz.svg)](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/10-recipe-bom)
+[![Open in StackBlitz](https://developer.stackblitz.com/img/open_in_stackblitz.svg)](https://stackblitz.com/github/johnsonfash/forge-orm/tree/main/examples/10-recipe-bom)
 
 Recursive cost rollup. A parent recipe (sourdough loaf) consumes a sub-recipe (starter) which has its own raw ingredients. Same pattern serves food, cosmetics, manufacturing, auto repair, candle-making.
 

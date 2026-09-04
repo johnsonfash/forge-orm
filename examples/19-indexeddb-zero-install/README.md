@@ -1,6 +1,6 @@
 # 19 · IndexedDB (zero install)
 
-[![Open in StackBlitz](https://developer.stackblitz.com/img/open_in_stackblitz.svg)](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/19-indexeddb-zero-install)
+[![Open in StackBlitz](https://developer.stackblitz.com/img/open_in_stackblitz.svg)](https://stackblitz.com/github/johnsonfash/forge-orm/tree/main/examples/19-indexeddb-zero-install)
 
 forge-orm running on IndexedDB. No wasm, no bundler plugin, no headers. Works in every browser since 2017.
 

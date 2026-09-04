@@ -301,7 +301,7 @@ Every browser + Node runtime that has native IndexedDB:
 
 ## Sample code
 
-See `examples/19-indexeddb-zero-install` in the forge-orm-examples repo for a runnable StackBlitz demo covering CRUD, geo, vector, and FTS.
+See `examples/19-indexeddb-zero-install` in this repo for a runnable StackBlitz demo covering CRUD, geo, vector, and FTS.
 
 ---
 
