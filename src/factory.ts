@@ -113,7 +113,8 @@ export type ForgeDb<S extends SchemaShape = SchemaMap> = Collections<S> & {
   // Runtime DDL apply — the browser/wasm replacement for `forge push`. Reads
   // the active schema, emits dialect DDL, applies what's missing inside a
   // transaction. Idempotent — already-existing tables/indexes are skipped.
-  // Currently sqlite-only (Node dialects use the CLI). Since 2.5.1 also runs
+  // sqlite, indexeddb and postgres (2.15+, which covers PGlite — an
+  // in-process database has no server for the CLI to reach). Since 2.5.1 also runs
   // a drift-apply pass: missing columns that can be safely added (nullable, or
   // have a constant default) get `ALTER TABLE … ADD COLUMN` emitted; destructive
   // drift (column drops, type changes, extra tables) is surfaced under `pending`.
@@ -321,6 +322,13 @@ function makeRawCaller<R>(run: (frag: SqlFragment) => Promise<R>) {
     }
     return run(first as SqlFragment);
   };
+}
+
+// The subset of a pg Pool the runtime migrator needs. `connect` is absent
+// on injected single-session drivers (PGlite, Neon over HTTP).
+interface PgPoolLike {
+  query(sql: string, params?: unknown[]): Promise<{ rows: any[]; rowCount: number }>;
+  connect?(): Promise<unknown>;
 }
 
 function makeDb(
@@ -627,9 +635,41 @@ function makeDb(
                  : (url || 'forge');
       return runMigrate({ name, schema: models, logger: opts?.logger }) as unknown as import('./wasm/migrate').RuntimeApplyReport;
     }
+    if (adapter.kind === 'postgres') {
+      // Postgres reached here only to be told to use the CLI — which is no
+      // help at all when the database is PGlite: an in-process WASM
+      // Postgres with no server to point `forge push` at, running in
+      // StackBlitz or a browser or a serverless function where there is no
+      // shell either. That is the same situation sqlite-wasm is in, and it
+      // has had a runtime path since 2.4.
+      //
+      // No new migration logic: this is the plan/apply the CLI already
+      // uses, driven from in-process instead of from a pool.
+      const { buildSchemaDDL } = await import('./adapters/postgres/ddl');
+      const { applyMigration } = await import('./adapters/postgres/migrate');
+      const pool = (adapter as unknown as { pool: PgPoolLike }).pool;
+      // A pg.Pool hands out a client per connect(). An injected driver —
+      // PGlite, Neon over HTTP, anything single-session — has no connect()
+      // and IS the session, so the client is the pool itself.
+      const handle =
+        typeof pool.connect === 'function'
+          ? pool
+          : {
+              query: (sql: string, params?: unknown[]) => pool.query(sql, params),
+              connect: async () => ({
+                query: (sql: string, params?: unknown[]) => pool.query(sql, params),
+              }),
+            };
+      const report = await applyMigration(
+        handle as never,
+        buildSchemaDDL(models as SchemaMap),
+        opts?.logger ? { logger: opts.logger } : {},
+      );
+      return { ...report, alteredColumns: [], pending: [] };
+    }
     throw new Error(
-      `[forge] $migrate() is only supported on sqlite + indexeddb adapters today. ` +
-      `For ${adapter.kind} use the CLI: 'npx forge push'.`,
+      `[forge] $migrate() is only supported on sqlite, postgres and indexeddb ` +
+      `adapters today. For ${adapter.kind} use the CLI: 'npx forge push'.`,
     );
   }
 

@@ -766,7 +766,7 @@ Every CLI subcommand has a runtime equivalent. Useful inside the app process —
 
 | CLI | Runtime API | Where it works |
 |---|---|---|
-| `forge push` | `db.$migrate()` | sqlite-wasm browser adapter (since 2.4); other adapters throw |
+| `forge push` | `db.$migrate()` | sqlite-wasm (2.4+), indexeddb, and postgres — including PGlite (2.15+); other adapters throw |
 | `forge diff` | `db.$diff({ ignore? })` | every adapter that supports introspect (all except runtime-mongo) |
 | `forge diff apply` | (no direct API) — use `db.$diff()` + `compile.<op>()` + `$executeRaw` | composable in code |
 | `forge rollback` | (no direct API) — read `_forge_migrations` via `$queryRaw`, run down SQL via `$executeRaw` | composable in code |
@@ -807,7 +807,7 @@ Server-side, `db.$migrate()` throws — server-side migration is the CLI's job:
 ```ts
 const db = await createDb({ url: 'postgres://…', schema });
 await db.$migrate();
-// → Error: $migrate() is only supported on sqlite adapters today.
+// → Error: $migrate() is only supported on sqlite, postgres and indexeddb adapters today.
 //   For postgres use the CLI: 'npx forge push'.
 ```
 
@@ -915,7 +915,7 @@ For Postgres + MySQL + SQLite, the `generateMigration(schema, actual)` helper fr
 | `Lock wait timeout exceeded` on MySQL during push | Another `forge push` is running, or a long-running transaction is blocking | Wait for the other process, or check `SHOW PROCESSLIST` for the blocker |
 | `Connection terminated due to connection timeout` during diff | DB unreachable from CI runner (firewall, DNS, IP allowlist) | Verify the runner can reach the DB; check VPC peering / IP allowlist |
 | Drift shows `+ [index] table: idx_…` after every push | Index was created by the engine, not declared in schema (often a unique-constraint backing index, or a foreign-key auto-index) | Add the index to the schema, or `--ignore=idx_name` if it's truly engine-managed |
-| `[forge] $migrate() is only supported on sqlite adapters today.` | Called `db.$migrate()` on a Postgres / MySQL / Mongo `Db` | Use the CLI: `npx forge push`. The runtime path is browser-only. |
+| `[forge] $migrate() is only supported on sqlite, postgres and indexeddb adapters today.` | Called `db.$migrate()` on a MySQL / MSSQL / DuckDB / Mongo `Db` | Use the CLI: `npx forge push`. Postgres gained a runtime path in 2.15 for PGlite, where there is no server to point a CLI at. |
 
 ---
 

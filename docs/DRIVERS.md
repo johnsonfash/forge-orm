@@ -305,6 +305,14 @@ forge imports `@electric-sql/pglite` lazily — it is never a hard
 dependency — and builds the driver itself. PGlite speaks Postgres, so
 everything downstream is the postgres adapter unchanged.
 
+`db.$migrate()` works on it too (2.15+), so an embedded database can
+create its own schema at boot without a CLI:
+
+```ts
+const db = await createDb({ url: 'pglite:./data', schema })
+await db.$migrate()
+```
+
 Before 2.14.0 there was no `pglite:` prefix, and that URL failed with
 *"Could not infer adapter from URL"*. The hand-rolled wrapper below was
 the only way, which is why it is still documented: build your own

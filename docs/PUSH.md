@@ -448,7 +448,7 @@ For the additive 90% case, `push` alone is the right call. For the destructive 1
 
 ### Runtime `db.$migrate()`
 
-* SQLite-only — throws on any other adapter: `[forge] $migrate() is only supported on sqlite adapters today. For <kind> use the CLI: 'npx forge push'.`
+* sqlite, indexeddb and postgres (2.15+ — postgres is what makes PGlite work, since an in-process database has no server for a CLI to reach). Throws on any other adapter: `[forge] $migrate() is only supported on sqlite, postgres and indexeddb adapters today. For <kind> use the CLI: 'npx forge push'.`
 * Runs inside the Web Worker (browser) or the Tauri/Electron process. No CLI, no file I/O.
 * Reuses the SQLite DDL builder and migrator (`buildSchemaDDL` + `applyMigration`) from the same modules the CLI imports.
 * Since 2.5.1, runs a drift-apply pass after the create-or-skip loop: walks the schema vs introspection, emits `ALTER TABLE … ADD COLUMN` for safely-additive missing columns (nullable or constant default), and surfaces destructive drift (DROP COLUMN, type changes, extra tables) under `report.pending` instead of applying it.
