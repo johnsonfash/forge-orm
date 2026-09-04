@@ -4,6 +4,47 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.15.0 — `$migrate()` works on postgres
+
+**Minor.** The other half of making `pglite:` actually usable.
+
+2.14.0 gave PGlite a URL, and the examples got one step further before
+stopping at:
+
+```
+[forge] $migrate() is only supported on sqlite + indexeddb adapters
+today. For postgres use the CLI: 'npx forge push'.
+```
+
+Which is no help when the database is PGlite. There is no server to
+point `forge push` at — it is a WASM module in the same process — and
+the places PGlite is used (StackBlitz, a browser tab, a serverless
+function) have no shell to run a CLI from either. sqlite-wasm has had a
+runtime path since 2.4 for exactly this reason; postgres needed the
+same one.
+
+```ts
+const db = await createDb({ url: 'pglite:./data', schema })
+await db.$migrate()      // creates tables, constraints and indexes
+```
+
+No new migration logic: this is the same `planMigration` / `applyMigration`
+the CLI already uses, driven in-process instead of from a pool. So it
+keeps the properties that matter — it asks the database what exists
+before deciding what to run, which is what makes it safe to call at
+every boot (`ADD CONSTRAINT` has no `IF NOT EXISTS`), and it reports
+`applied` / `skipped` / `failures` in the shape the sqlite path already
+returned.
+
+A driver with no `connect()` — PGlite, Neon over HTTP, anything
+single-session — is adapted to the pool interface the migrator expects.
+It *is* the session, so the client is itself.
+
+`$migrate()` still refuses on mysql, mssql, duckdb and mongo, and now
+names the three adapters that do work.
+
+667 tests passing.
+
 ## 2.14.0 — an empty upsert, and a `pglite:` URL
 
 **Minor.** Two bugs, both found by running the examples repo rather than
