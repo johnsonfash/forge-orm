@@ -8,12 +8,12 @@
 
 ## Run it
 
-- **[Run on CodeSandbox](https://codesandbox.io/p/devbox/github/johnsonfash/forge-orm-examples/main/16-mongo-atlas-blog)** — paste your URI into the env editor as `DATABASE_URL`, hit Run
+- **[Run on CodeSandbox](https://codesandbox.io/p/devbox/github/johnsonfash/forge-orm/main/examples/16-mongo-atlas-blog)** — paste your URI into the env editor as `DATABASE_URL`, hit Run
 
 Or locally:
 
 ```sh
-npx degit johnsonfash/forge-orm-examples/16-mongo-atlas-blog my-demo
+npx degit johnsonfash/forge-orm/examples/16-mongo-atlas-blog my-demo
 cd my-demo
 echo "DATABASE_URL=mongodb+srv://USER:PASS@CLUSTER.mongodb.net/blog" > .env
 npm install && npm run dev

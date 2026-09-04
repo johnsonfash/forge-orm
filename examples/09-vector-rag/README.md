@@ -1,6 +1,6 @@
 # 09 · Vector similarity (RAG storage layer)
 
-[![Open in StackBlitz](https://developer.stackblitz.com/img/open_in_stackblitz.svg)](https://stackblitz.com/github/johnsonfash/forge-orm-examples/tree/main/09-vector-rag)
+[![Open in StackBlitz](https://developer.stackblitz.com/img/open_in_stackblitz.svg)](https://stackblitz.com/github/johnsonfash/forge-orm/tree/main/examples/09-vector-rag)
 
 The storage + retrieval half of a RAG pipeline. Same query targets `pgvector`, MySQL VECTOR, sqlite-vec, DuckDB vss (HNSW), MSSQL VECTOR, and Mongo Atlas Vector Search.
 
