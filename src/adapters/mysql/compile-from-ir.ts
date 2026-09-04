@@ -21,6 +21,7 @@ import {
   compileInsert as pgCompileInsert,
   compileSelect as pgCompileSelect,
   compileUpdate as pgCompileUpdate,
+  hasNoUpdatePayload,
 } from '../postgres/compile-from-ir';
 
 function modelDef(modelKey: string, override?: ModelDef<any>): ModelDef<any> {
@@ -88,6 +89,20 @@ export function compileUpdate(node: UpdateNode, modelOverride?: ModelDef<any>): 
 
   // Upsert: rewrite each `col = ?` after ON DUPLICATE KEY UPDATE to
   // `col = VALUES(col)`, reusing the values already supplied in VALUES(...).
+  // An empty `update: {}` compiles to a self-assignment (`id` = `users`.`id`)
+  // so the statement is valid SQL. It must NOT go through the VALUES()
+  // rewrite below: `id` = VALUES(`id`) assigns the id the INSERT proposed,
+  // so a conflict would overwrite the existing row's primary key with a
+  // freshly generated one — silently, and taking every foreign key that
+  // referenced it with it. `col` = `col` is MySQL's own no-op idiom.
+  if (node.upsertCreate && hasNoUpdatePayload(node) && sql.includes('ON DUPLICATE KEY UPDATE')) {
+    sql = sql.replace(
+      /ON DUPLICATE KEY UPDATE\s+(`[^`]+`)\s*=\s*`[^`]+`\.(`[^`]+`)\s*$/,
+      'ON DUPLICATE KEY UPDATE $1 = $2',
+    );
+    return post({ ...a, sql });
+  }
+
   if (node.upsertCreate && sql.includes('ON DUPLICATE KEY UPDATE')) {
     const m = sql.match(/ON DUPLICATE KEY UPDATE (.+?)$/);
     if (m) {

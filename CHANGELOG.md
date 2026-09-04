@@ -4,6 +4,75 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.14.0 — an empty upsert, and a `pglite:` URL
+
+**Minor.** Two bugs, both found by running the examples repo rather than
+by reading it.
+
+### `update: {}` emitted invalid SQL
+
+```ts
+db.user.upsert({ where, create, update: {} })
+```
+
+is the ordinary "insert if it isn't there, otherwise leave it alone"
+idiom — the first thing anyone writes for an idempotent seed, and the
+entire body of `examples/04-node-cli`. It compiled to:
+
+```sql
+INSERT INTO "users" (…) VALUES (…) ON CONFLICT ("email") DO UPDATE SET  RETURNING *
+```
+
+`SET` with nothing after it. Because a parser blames the token *after*
+an empty clause, every dialect reported `near "RETURNING": syntax
+error` — pointing at the one part of the statement that was fine.
+
+`update({ data: {} })` and `updateMany({ data: {} })` had it too.
+
+An empty set now emits a column assigned to its own stored value:
+valid SQL, provably no change, and `RETURNING` still yields the row —
+which upsert's contract requires, since it must hand back the record
+whether it inserted or not. `DO NOTHING` would have parsed and is the
+shorter fix, but it returns **no** row on conflict, so upsert would
+have resolved to `undefined` exactly when the record already existed: a
+silent wrong answer in place of a loud syntax error.
+
+**MySQL needed its own form, and this is the part that mattered.** MySQL
+rewrites each upsert assignment to `col = VALUES(col)` so the update
+reuses the INSERT's values — right for a real update, catastrophic for
+the no-op, because ``VALUES(`id`)`` is the id the INSERT *proposed*. On
+conflict that would have silently replaced the existing row's primary
+key with a freshly generated uuid, taking every foreign key that
+referenced it along with it. MySQL now emits its own self-assignment
+no-op instead, and real assignments still rewrite to `VALUES(col)`.
+
+Fixed on postgres, sqlite, mysql, duckdb and mssql.
+
+### `pglite:` is a real URL now
+
+```ts
+const db = await createDb({ url: 'pglite:./data', schema })   // on disk
+const db = await createDb({ url: 'pglite:', schema })          // ephemeral
+```
+
+PGlite is Postgres compiled to WASM. `DRIVERS.md` had always documented
+how to hand-wrap it and pass `createDb({ driver })`, but there was no
+URL prefix — so the form above failed with *"Could not infer adapter
+from URL"*. That included eight examples, two of which the README links
+as one-click StackBlitz demos.
+
+It resolves to the postgres adapter (same compiler, executors and
+dialect — only the driver differs), and `@electric-sql/pglite` is
+imported lazily, so it is never a hard dependency. Missing package, and
+you get the install line rather than a module-resolution stack.
+
+- New exports: `pgliteDriver` (wrap an instance you built yourself, for
+  extensions or a custom filesystem) and `pgliteDataDir`.
+- `pglite://./x` and `pglite:` both work; a bare scheme means ephemeral.
+- `postgres://` is untouched — the new prefix does not shadow it.
+
+659 tests passing.
+
 ## 2.13.0 — see the query without running it
 
 **Minor.** Stage 6, and the last item on the drizzle plan.

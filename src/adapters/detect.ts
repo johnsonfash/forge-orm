@@ -7,6 +7,10 @@ import type { AdapterKind } from './types';
 const URL_PREFIX_TO_KIND: Array<[RegExp, AdapterKind]> = [
   [/^mongodb(\+srv)?:\/\//i, 'mongo'],
   [/^postgres(ql)?:\/\//i, 'postgres'],
+  // PGlite — Postgres compiled to WASM, in-process. It speaks Postgres, so
+  // it IS the postgres adapter; only the driver differs, and createDb
+  // builds that one itself from a `pglite:` URL.
+  [/^pglite:/i, 'postgres'],
   [/^(mysql|mariadb):\/\//i, 'mysql'],
   [/^(sqlite:|file:)/i, 'sqlite'],
   // Browser sqlite-wasm — OPFS persistent, OPFS SAH-pool (multi-tab safe),
