@@ -14,7 +14,11 @@ const Recipe = model("recipes", {
 }))
 
 const RecipeLine = model("recipe_lines", {
-  id:           f.id({ type: "uuid" }),
+  // Not uuid: the seed below gives each line a readable natural key
+  // ("L-LOAF-FLOUR"), which is what makes the upsert idempotent and the
+  // output legible. Declaring uuid here made Postgres reject every one of
+  // them (22P02, invalid input syntax for type uuid).
+  id:           f.id({ type: "string" }),
   recipeId:     f.string(),
   componentSku: f.string(),
   qty:          f.float(),
@@ -63,7 +67,12 @@ const prices = new Map<string, number>([
 ])
 
 async function rollup(parentSku: string, seen = new Set<string>()): Promise<number> {
-  if (seen.has(parentSku)) return 0 // cycle guard
+  // The guard is for CYCLES, so it tracks the current path — not every sku
+  // visited anywhere. Sharing one set across sibling branches made any
+  // ingredient that also appears in a sub-recipe cost zero everywhere else:
+  // the loaf's 500g of flour priced at 0 because the starter had already
+  // used flour. It still ran, and still printed a number.
+  if (seen.has(parentSku)) return 0
   seen.add(parentSku)
   const recipe = await db.recipe.findUnique({
     where:   { parentSku },
@@ -72,10 +81,16 @@ async function rollup(parentSku: string, seen = new Set<string>()): Promise<numb
   if (!recipe) return prices.get(parentSku) ?? 0
   let cost = 0
   for (const l of recipe.lines) {
-    const unitCost = await rollup(l.componentSku, seen)
+    const unitCost = await rollup(l.componentSku, new Set(seen))
     cost += unitCost * l.qty * (1 + l.wastage)
   }
   return cost / recipe.yieldQty
 }
 
 console.log("Per-gram cost of REC-LOAF:", (await rollup("REC-LOAF")).toFixed(5))
+
+// Close the database before the process ends. On PGlite this is not
+// optional: its WASM Postgres reports proc_exit(99) when the instance
+// is torn down with the process, so a script that did all its work
+// correctly still exits non-zero.
+await db.$disconnect()

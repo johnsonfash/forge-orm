@@ -35,11 +35,11 @@ jobs:
         #   03, 07      need a VM / bun
         #   05, 06      long-running server + Next.js build
         #   16, 17, 18  need Mongo / SQL Server / a Postgres server
-        #   08          nearTo needs PostGIS; PGlite does not ship it
-        #   09          needs the pgvector extension on the PGlite instance
-        #   10          declares f.id({type:'uuid'}) then seeds 'L-LOAF-STARTER'
         example:
           - 04-node-cli
+          - 08-geo-search
+          - 09-vector-rag
+          - 10-recipe-bom
           - 11-multi-tenant
           - 12-audit-log
           - 13-fulltext-search
