@@ -1,0 +1,58 @@
+name: ci
+
+# The library's own gate. Until now only the examples and the docs site
+# had one, so 677 tests and the typecheck ran on a laptop and nowhere
+# else — and the README carried a badge for a workflow that lived in a
+# different repository entirely.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit -p tsconfig.lib.json
+
+      - name: Test
+        run: npx jest --ci
+
+      # Catches what a typecheck cannot: a broken emit, a missing entry
+      # point, a subpath in package.json that resolves to nothing.
+      - name: Build
+        run: npm run build
+
+      - name: Every declared export resolves
+        run: |
+          node -e "
+            const pkg = require('./package.json');
+            const fs = require('fs');
+            let bad = 0;
+            for (const [sub, e] of Object.entries(pkg.exports)) {
+              for (const f of Object.values(typeof e === 'string' ? { default: e } : e)) {
+                if (!fs.existsSync(f)) { console.error('missing', sub, '->', f); bad++; }
+              }
+            }
+            if (bad) process.exit(1);
+            console.log('all', Object.keys(pkg.exports).length, 'export paths resolve');
+          "

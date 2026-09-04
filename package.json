@@ -1,7 +1,7 @@
 {
   "name": "forge-orm",
-  "version": "2.16.0",
-  "description": "Prisma-shape multi-database ORM/wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB & SQL Server from one codebase — typed geo / vector / JSON path / full-text search, no codegen, no query engine. Bring your own schema.",
+  "version": "2.17.0",
+  "description": "Prisma-shape multi-database ORM/wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB & SQL Server from one codebase \u2014 typed geo / vector / JSON path / full-text search, no codegen, no query engine. Bring your own schema.",
   "license": "MIT",
   "author": "johnsonfash",
   "homepage": "https://github.com/johnsonfash/forge-orm#readme",
@@ -44,6 +44,34 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./postgres": {
+      "types": "./dist/entries/postgres.d.ts",
+      "default": "./dist/entries/postgres.js"
+    },
+    "./mysql": {
+      "types": "./dist/entries/mysql.d.ts",
+      "default": "./dist/entries/mysql.js"
+    },
+    "./sqlite": {
+      "types": "./dist/entries/sqlite.d.ts",
+      "default": "./dist/entries/sqlite.js"
+    },
+    "./pglite": {
+      "types": "./dist/entries/pglite.d.ts",
+      "default": "./dist/entries/pglite.js"
+    },
+    "./mongo": {
+      "types": "./dist/entries/mongo.d.ts",
+      "default": "./dist/entries/mongo.js"
+    },
+    "./duckdb": {
+      "types": "./dist/entries/duckdb.d.ts",
+      "default": "./dist/entries/duckdb.js"
+    },
+    "./mssql": {
+      "types": "./dist/entries/mssql.d.ts",
+      "default": "./dist/entries/mssql.js"
     },
     "./wasm": {
       "types": "./dist/wasm/index.d.ts",

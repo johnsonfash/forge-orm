@@ -479,6 +479,10 @@ export async function handler(req, res) {
 
 The promise is created during init (which Lambda lets you do before the first request handler runs), so the actual `await` is a no-op on warm requests. Pair with PgBouncer / RDS Proxy so the per-instance "connection" is to the pooler, not directly to the DB.
 
+### The driver import in a bundled function
+
+Serverless deploys are bundled, and `createDb({ url })` resolves the client library at runtime with a specifier no bundler can follow — so the driver can be missing from the deployed artefact even though the build was clean. Import from the dialect entry instead (`import { createDb } from 'forge-orm/postgres'`, since 2.17.0), which pins the client statically, or construct the client yourself and pass `driver`. Details in [DRIVERS.md → Three ways to connect](./DRIVERS.md#three-ways-to-connect), with the per-platform version in [LAMBDA.md](./LAMBDA.md#bundling-and-driver-resolution) and [WORKERS.md](./WORKERS.md#driver-resolution-and-the-bundler).
+
 ---
 
 ## Secret rotation

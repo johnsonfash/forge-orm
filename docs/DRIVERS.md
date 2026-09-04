@@ -5,6 +5,7 @@ like, what forge ships, and how to wrap a new client without forking
 the adapter.
 
 * [Why bring-your-own-driver exists](#why-bring-your-own-driver-exists)
+* [Three ways to connect](#three-ways-to-connect) — [URL](#url--the-default), [per-dialect entry](#per-dialect-entry--for-bundled-targets), [driver](#driver--when-the-client-needs-configuring)
 * [Per-kind port shape](#per-kind-port-shape) — [`SqliteDriver`](#sqlitedriver), [`PostgresDriver`](#postgresdriver), [`MysqlDriver`](#mysqldriver), [`MongoDriver`](#mongodriver), [`DuckdbDriver`](#duckdbdriver), [`MssqlDriver`](#mssqldriver)
 * [The shipped wrappers — quick map](#the-shipped-wrappers--quick-map)
 * [Wrapping a new sqlite / postgres / mongo driver](#wrapping-a-new-sqlite-driver)
@@ -49,6 +50,142 @@ surface the executor talks to and you are done.
 For the high-level intro see [Pluggable drivers](../README.md#pluggable-drivers).
 For browser-specific concerns see [BROWSER](./BROWSER.md). For mobile
 targets see [MOBILE](./MOBILE.md).
+
+---
+
+## Three ways to connect
+
+There are three routes into `createDb`, and they differ in one thing:
+who resolves the client library. Get that wrong and the symptom shows
+up at deploy time, not at your desk.
+
+| Route | Import from | Use when | What it costs |
+|---|---|---|---|
+| **URL** | `forge-orm` | Long-lived Node, run from source or `tsc` output | Nothing — until something bundles the code |
+| **Per-dialect entry** | `forge-orm/postgres`, `/mysql`, `/sqlite`, `/pglite`, `/mongo` | The code is bundled: Cloudflare Workers, Vercel Edge, a bundled Lambda | The call site is now a Postgres (or MySQL, …) call site |
+| **Driver** | `forge-orm` | The client itself needs configuring, or forge ships no default for it | You own the client's construction and lifecycle |
+
+### URL — the default
+
+```ts
+import { createDb } from 'forge-orm';
+const db = await createDb({ url: process.env.DATABASE_URL!, schema });
+```
+
+forge reads the kind off the URL prefix — the table under
+[The two-call shape](#the-two-call-shape-url-vs-driver) lists every
+rule — and loads that kind's client. The loading is `require(pkg)` where
+`pkg` comes out of `DRIVER_PACKAGE_FOR[kind]` at runtime. That is the
+right default for a long-lived Node process: one call site, and the
+database moves with an environment variable.
+
+### Per-dialect entry — for bundled targets
+
+Since 2.17.0.
+
+The package name in that `require` is computed while the process
+runs, so it is a string as far as any build tool is concerned.
+Webpack, rollup, esbuild and Vite all lose the dependency there.
+On a target where your code is bundled — Cloudflare Workers, Vercel
+Edge, a bundled Lambda — the driver is either dropped from the output
+or fails at runtime a long way from the cause. The same opacity
+defeats tree-shaking in the other direction: nothing in the bundle
+proves which of the six adapters you use, so all six ship.
+
+Each per-dialect entry imports its one driver with a static `import`.
+The bundler sees that, keeps it, and lets the other five adapters
+fall away. The call site stays as short as the URL form:
+
+```ts
+// db.ts
+import { createDb } from 'forge-orm/postgres';
+import { schema } from './schema';
+
+export const db = await createDb({
+  url: process.env.DATABASE_URL!,
+  schema,
+});
+```
+
+```ts
+// handler.ts
+import { db } from './db';
+
+const active = await db.user.findMany({ where: { active: true } });
+```
+
+Every entry re-exports the whole main index, so one import line
+covers the schema builders, the types and the driver factories as
+well:
+
+```ts
+import { createDb, f, model, rel } from 'forge-orm/postgres';
+```
+
+What each entry pulls in:
+
+| Entry | Client it imports | Constructed as |
+|---|---|---|
+| `forge-orm/postgres` | `pg` | `new pg.Pool({ connectionString: url })` |
+| `forge-orm/mysql` | `mysql2/promise` | `mysql.createPool(url)` |
+| `forge-orm/sqlite` | `better-sqlite3` | `new Database(file)` — takes `sqlite:`, `file:` or a bare path; empty means `:memory:` |
+| `forge-orm/pglite` | `@electric-sql/pglite` + `/vector` | `PGlite.create(dir, { extensions: { vector } })`, then `CREATE EXTENSION IF NOT EXISTS vector` |
+| `forge-orm/mongo` | `mongodb` | `new MongoClient(url)`, plus an optional `database` option |
+
+An entry takes the URL form's options minus the two the import has
+already settled. `url` (required), `schema` and `strict` stay;
+`forge-orm/mongo` adds `database`. There is no `type`, because the
+entry *is* the type, and no `driver` — that is the main entry's, and
+the section below says why. Omit the URL and you get a named error
+rather than a detection failure:
+
+```
+[forge] createDb from 'forge-orm/postgres' needs a url. Build the client
+yourself and use the main entry's driver option if you need to configure it.
+```
+
+`forge-orm/duckdb` and `forge-orm/mssql` exist too. They were left out
+of the first cut on the reasoning that nobody bundles them for the edge
+— which was true and beside the point: the benefit is bundler
+visibility, and a DuckDB job or a SQL Server query inside a bundled
+Lambda or an SSR build meets exactly the same computed-`require`
+problem as any other dialect.
+
+There is deliberately no entry for the *alternative* drivers, though —
+postgres.js, MariaDB, PlanetScale, libSQL, Expo, OP-SQLite, Tauri,
+sqlite-wasm. An entry point makes a package visible to a bundler when
+forge is the one choosing it. Pick a non-default client and you import
+it yourself, so the import is already static and Metro or webpack
+already sees it.
+
+**The trade-off.** A per-dialect entry hard-codes the dialect at the
+import. You lose the property the URL form gives you for free —
+pointing `DATABASE_URL` at a different database and having the app
+follow. On a deploy target whose bundle is fixed at build time that
+property was never real anyway, which is why the trade lands the
+right way round there and the wrong way round in a normal server.
+
+### Driver — when the client needs configuring
+
+An entry point takes a URL and nothing else about the client. The
+moment the client itself needs arguments — pool bounds, TLS material,
+a statement timeout, PGlite extensions, an HTTP transport such as Neon
+or PlanetScale — that is the main entry's `driver` option, and it
+always has been. It is a static import too, so it bundles as cleanly
+as an entry point does:
+
+```ts
+import { createDb, pgDriver } from 'forge-orm';
+import { Pool } from 'pg';
+
+const db = await createDb({
+  schema,
+  driver: pgDriver(new Pool({ connectionString, max: 4, ssl: { ca } })),
+});
+```
+
+The rest of this page is about that third route: what each port looks
+like and how to wrap a client forge does not ship.
 
 ---
 
@@ -478,6 +615,8 @@ by adapter kind; the executor knows which port it's calling.
 ## The two-call shape: URL vs driver
 
 `createDb` takes either a URL or a pre-built driver, sometimes both.
+(The per-dialect entries are the third shape — see [Three ways to
+connect](#three-ways-to-connect).)
 
 ```ts
 // (a) URL only — forge picks the default driver from the prefix.

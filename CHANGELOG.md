@@ -4,6 +4,74 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.17.0 — per-dialect entry points
+
+**Minor.** A third way to connect, for the case the other two handle
+badly.
+
+```ts
+import { createDb, f, model } from 'forge-orm/postgres';
+
+const db = await createDb({ url: process.env.DATABASE_URL!, schema });
+```
+
+Also `forge-orm/mysql`, `/sqlite`, `/pglite`, `/mongo`, `/duckdb` and
+`/mssql` — one per **package**, not per dialect.
+
+### Why
+
+`createDb({ url })` resolves the driver by calling `require(pkg)` with a
+package name computed at runtime. That reads well and lets one env var
+swap the database — and a bundler cannot see through it. webpack, rollup,
+esbuild and Vite all lose the dependency, so on a bundled target
+(Cloudflare Workers, Vercel Edge, a bundled Lambda) the driver is dropped
+or fails at runtime, a long way from the cause. Nothing can be
+tree-shaken either, because nothing proves which of the six adapters you
+use.
+
+The `driver` option already solved this — you import the client yourself,
+so the import is static — but it means constructing the pool by hand at
+every call site that only wanted a URL.
+
+These entries import one driver statically and build it for you. The
+bundler sees it, the other five adapters fall away, and the call site
+stays as short as the URL form. What you give up is the env-var swap:
+that call site is a Postgres call site now, which is the right way round
+for a deploy target whose bundle is fixed anyway.
+
+### Notes
+
+- Each entry re-exports everything the main one does — `f`, `model`,
+  `rel`, the types, the driver factories — so one import line is enough.
+- They take a `url`. If the client itself needs configuring (pool size,
+  SSL, PGlite extensions, Neon or PlanetScale over HTTP), that is still
+  the `driver` option, and still the only correct answer.
+- One entry per package, because a static import pins a package. PGlite is
+  the clearest case: it *is* Postgres, and forge runs it on the postgres
+  adapter — same compiler, same executors — but `pg` and
+  `@electric-sql/pglite` are different packages, and a single
+  `forge-orm/postgres` importing both would put a WASM Postgres in every
+  bundle that wanted only `pg`. SQLite says it louder still: seven
+  packages behind one dialect.
+- No entry for the alternative drivers (postgres.js, MariaDB, PlanetScale,
+  libSQL, Expo, OP-SQLite, Tauri, sqlite-wasm). Choosing one of those means
+  importing it yourself, so the import is already static and the bundler —
+  Metro included — already sees it. An entry point would save a line and
+  add a module to keep in step with someone else's releases.
+- `forge-orm/sqlite` pulls in a native Node addon, so it belongs on a
+  server. React Native and the browser have their own paths, and the
+  README now carries a table mapping every target to its import and
+  driver.
+
+### Also
+
+The library finally has CI of its own. Until now only the examples and
+the docs site were gated, so 677 tests and the typecheck ran on a laptop
+and nowhere else — and the README carried a build badge pointing at a
+workflow that lives in a different repository. `ci.yml` runs the
+typecheck, the suite, the build, and a check that every path in the
+`exports` map resolves to a file that exists.
+
 ## 2.16.0 — three bugs the examples found
 
 **Minor.** Every one of these came from running an example rather than
