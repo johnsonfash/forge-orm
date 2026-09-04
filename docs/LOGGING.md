@@ -578,7 +578,7 @@ db.$on('query', (e) => {
 ```
 
 **Raw SQL with literals.** `forge` parameterises every generated statement,
-but `db.$queryRaw\`SELECT * FROM users WHERE email = ${email}\`` substitutes
+but ``db.$queryRaw`SELECT * FROM users WHERE email = ${email}``` substitutes
 the literal at compile time. Treat `op === 'raw'` as "I cannot redact this
 without a SQL parser" and either log shape only or skip it entirely.
 

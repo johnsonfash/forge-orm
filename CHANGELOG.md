@@ -1975,7 +1975,7 @@ plain BTREE compounds, sparse uniques, TTL, and 2.1.0's partial filters, but
 left geospatial, hashed shard keys, collation, wildcard projection, SQL
 partial indexes, expression indexes, `INCLUDE` covering columns, and PG
 access methods (`gin` / `gist` / `brin` / `hash`) outside the schema —
-schemas had to fall back to `db.$executeRaw\`CREATE INDEX …\`` or a manual
+schemas had to fall back to ``db.$executeRaw`CREATE INDEX …``` or a manual
 `collection.createIndex` to express them. This release covers all of those.
 
 ### New fields

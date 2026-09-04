@@ -106,7 +106,7 @@ The rule generalises: **any value that ever passed through user input must trave
 
 forge ships no `$queryRawUnsafe` method. The unsafe shape — if it exists in a codebase — looks like one of these:
 
-1. `forgeSql.raw(\`…${variable}…\`)` — template-string argument to `raw`.
+1. ``forgeSql.raw(`…${variable}…`)`` — template-string argument to `raw`.
 2. `forgeSql.raw('…' + variable + '…')` — string concatenation into `raw`.
 3. `await db.$queryRaw(forgeSql.raw(buildQuery(req.body)))` — `raw` fed by a helper that itself concatenates.
 4. Any custom helper that wraps `forgeSql.raw` and accepts non-literal arguments.
@@ -122,9 +122,9 @@ rg -n --pcre2 \
   || echo "ok"
 ```
 
-The first alternation catches template-string arguments (`forgeSql.raw(\`...${x}...\`)`); the second catches concatenation (`forgeSql.raw('SELECT ' + col + ...)`). Both shapes are the only way to introduce SQL injection through forge.
+The first alternation catches template-string arguments (``forgeSql.raw(`...${x}...`)``); the second catches concatenation (`forgeSql.raw('SELECT ' + col + ...)`). Both shapes are the only way to introduce SQL injection through forge.
 
-The grep produces false positives if you legitimately build static SQL with a constant template — e.g. `forgeSql.raw(\`SET search_path = ${SCHEMA_NAME}\`)` where `SCHEMA_NAME` is a module-level `const`. The pragmatic move is to keep that constant pre-computed: `const SET_PATH = forgeSql.raw(\`SET search_path = "${SCHEMA_NAME}"\`)` at module init, then reference `SET_PATH` from the call site. The grep then passes and the runtime value is identical.
+The grep produces false positives if you legitimately build static SQL with a constant template — e.g. ``forgeSql.raw(`SET search_path = ${SCHEMA_NAME}`)`` where `SCHEMA_NAME` is a module-level `const`. The pragmatic move is to keep that constant pre-computed: ``const SET_PATH = forgeSql.raw(`SET search_path = "${SCHEMA_NAME}"`)`` at module init, then reference `SET_PATH` from the call site. The grep then passes and the runtime value is identical.
 
 For a GitHub Actions workflow:
 

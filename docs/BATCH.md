@@ -89,7 +89,7 @@ What forge sends to the driver, for each verb, for each adapter.
 | Adapter   | SQL / op                                                             |
 |-----------|----------------------------------------------------------------------|
 | postgres  | `INSERT INTO "t" (cols) VALUES (?,?,…),(?,?,…),… RETURNING *`        |
-| mysql     | `INSERT INTO \`t\` (cols) VALUES (?,?,…),(?,?,…),…` (no RETURNING)   |
+| mysql     | ``INSERT INTO `t` (cols) VALUES (?,?,…),(?,?,…),…`` (no RETURNING)   |
 | sqlite    | `INSERT INTO "t" (cols) VALUES (?,?,…),(?,?,…),… RETURNING *` (3.35+)|
 | duckdb    | `INSERT INTO "t" (cols) VALUES (?,?,…),(?,?,…),… RETURNING *`        |
 | mssql     | `INSERT INTO [t] (cols) VALUES (?,?,…),(?,?,…),…`                    |
@@ -110,7 +110,7 @@ swaps).
 | Adapter   | SQL / op                                                             |
 |-----------|----------------------------------------------------------------------|
 | postgres  | `UPDATE "t" SET col1 = ?, col2 = ? WHERE …` (rowcount)               |
-| mysql     | `UPDATE \`t\` SET col1 = ?, col2 = ? WHERE …` (affectedRows)         |
+| mysql     | ``UPDATE `t` SET col1 = ?, col2 = ? WHERE …`` (affectedRows)         |
 | sqlite    | `UPDATE "t" SET col1 = ?, col2 = ? WHERE …` (changes())              |
 | duckdb    | `UPDATE "t" SET col1 = ?, col2 = ? WHERE …` (rowcount)               |
 | mssql     | `UPDATE [t] SET col1 = ?, col2 = ? WHERE …` (rowcount)               |
@@ -125,7 +125,7 @@ possible inside a single `updateMany` — see
 | Adapter   | SQL / op                                                             |
 |-----------|----------------------------------------------------------------------|
 | postgres  | `DELETE FROM "t" WHERE …` (rowcount)                                 |
-| mysql     | `DELETE FROM \`t\` WHERE …` (affectedRows)                           |
+| mysql     | ``DELETE FROM `t` WHERE …`` (affectedRows)                           |
 | sqlite    | `DELETE FROM "t" WHERE …` (changes())                                |
 | duckdb    | `DELETE FROM "t" WHERE …` (rowcount)                                 |
 | mssql     | `DELETE FROM [t] WHERE …` (rowcount)                                 |
@@ -283,7 +283,7 @@ re-`SELECT` by some natural key, your options shrink to:
 The `updateMany` / `deleteMany` rows-back gap is universal — no
 adapter returns the affected rows. Workarounds: `$transaction([
 findMany, updateMany ])`, or a `RETURNING *` raw query on Postgres
-specifically (`db.$queryRaw\`UPDATE … RETURNING *\``).
+specifically (``db.$queryRaw`UPDATE … RETURNING *```).
 
 The `select` and `include` keys are not honoured on `createMany` —
 the verb returns `{ count }` even on dialects that support

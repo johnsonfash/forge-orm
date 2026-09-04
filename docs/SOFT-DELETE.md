@@ -461,7 +461,7 @@ soft-delete column as the only field in `SET …`.
 | Adapter   | `softDelete({ where: { id: 'p1' } })` compiles to                                |
 |-----------|----------------------------------------------------------------------------------|
 | postgres  | `UPDATE "posts" SET "deleted_at" = $1 WHERE "id" = $2 RETURNING *`               |
-| mysql     | `UPDATE \`posts\` SET \`deleted_at\` = ? WHERE \`id\` = ?` + `SELECT`            |
+| mysql     | ``UPDATE `posts` SET `deleted_at` = ? WHERE `id` = ?`` + `SELECT`            |
 | sqlite    | `UPDATE "posts" SET "deleted_at" = ? WHERE "id" = ? RETURNING *`                 |
 | duckdb    | `UPDATE "posts" SET "deleted_at" = ? WHERE "id" = ? RETURNING *`                 |
 | mssql     | `UPDATE [posts] SET [deleted_at] = @p1 OUTPUT INSERTED.* WHERE [id] = @p2`       |

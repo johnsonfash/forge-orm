@@ -317,7 +317,7 @@ A few wrinkles worth noting:
   in the params array.
 
 The dialect is picked at the call site by the adapter, not by the
-caller. You write the same `forgeSql.sql\`SELECT … = ${x}\`` and forge
+caller. You write the same ``forgeSql.sql`SELECT … = ${x}``` and forge
 emits the right form per driver. The two cases where you need to know
 the dialect are: (a) DDL, where the syntax differs significantly, and
 (b) dialect-specific functions like `ST_DWithin`. Both are handled
@@ -1133,7 +1133,7 @@ const inserted = await db.$executeRaw`
 DuckDB will push the predicate down into the Parquet read where it
 can — column min/max statistics in the Parquet footer let it skip
 files entirely. For S3, set `httpfs` credentials via
-`db.$executeRaw\`SET s3_region = 'us-east-1'\`` first.
+``db.$executeRaw`SET s3_region = 'us-east-1'``` first.
 
 ### (f) Mongo `$graphLookup` — org hierarchy traversal
 

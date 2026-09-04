@@ -442,7 +442,7 @@ export const db = await createDb({ schema, driver: pgDriver(pool) });
 ```
 
 Neon also ships an HTTP transport for Workers (`neon(connString)`).
-The HTTP surface is `sql\`…\`` template-tagged, not pool-shaped, so
+The HTTP surface is ``sql`…``` template-tagged, not pool-shaped, so
 it needs a thin wrapper — see the Neon HTTP example below.
 
 ---
