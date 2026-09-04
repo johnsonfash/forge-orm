@@ -294,7 +294,7 @@ Per-dialect expressions you'd pass to `.dbgenerated`:
 | Dialect | Extract expression for `payload.user_id` (string) |
 |---|---|
 | Postgres | `("payload" ->> 'user_id')` |
-| MySQL | `JSON_UNQUOTE(JSON_EXTRACT(\`payload\`, '$.user_id'))` |
+| MySQL | ``JSON_UNQUOTE(JSON_EXTRACT(`payload`, '$.user_id'))`` |
 | SQLite | `json_extract("payload", '$.user_id')` |
 | MSSQL | `JSON_VALUE([payload], '$.user_id')` |
 

@@ -55,7 +55,7 @@ What forge emits when the table is created:
 | Dialect  | Emitted FTS object                                                              |
 |----------|----------------------------------------------------------------------------------|
 | Postgres | `CREATE INDEX … ON posts USING gin(to_tsvector('simple', "title"))` (one per searchable column) |
-| MySQL    | `ALTER TABLE posts ADD FULLTEXT "ft_posts_title" (\`title\`)` (one per searchable column) |
+| MySQL    | ``ALTER TABLE posts ADD FULLTEXT "ft_posts_title" (`title`)`` (one per searchable column) |
 | SQLite   | One shared `posts_fts` virtual table — `CREATE VIRTUAL TABLE posts_fts USING fts5(title, body, content=posts, content_rowid='rowid')` + 3 triggers (`AFTER INSERT`, `AFTER UPDATE`, `AFTER DELETE`) that keep the shadow in sync |
 | DuckDB   | `PRAGMA create_fts_index('posts', 'id', 'title', 'body')` (uses the `fts` extension; one call per table covers every searchable column) |
 | Mongo    | `db.posts.createIndex({ title: 'text', body: 'text' })` — Mongo only allows one text index per collection so all searchable fields share it |

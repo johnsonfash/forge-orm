@@ -1,0 +1,75 @@
+name: docs
+
+# Builds the documentation site and publishes it to GitHub Pages.
+#
+# The site is a build artifact: README.md, CHANGELOG.md and docs/*.md stay
+# the source of truth (they are what npm and GitHub render), and
+# docs-site/sync.mjs rearranges them for the web — splitting the 2,987-line
+# README into a page per section and deriving the sidebar from its own
+# "Deep-dive companions" tables, so the navigation cannot drift from the
+# markdown it describes.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'docs/**'
+      - 'docs-site/**'
+      - 'examples/README.md'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+# Pages needs these; nothing else in the workflow writes to the repo.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two deploys race; let a run in progress finish rather than
+# cancelling it half-published.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # lastUpdated reads git history for each page's timestamp.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: docs-site/package.json
+
+      - name: Install
+        working-directory: docs-site
+        run: npm install --no-audit --no-fund
+
+      # `npm run build` runs sync.mjs first, which fails with the offending
+      # filename if a doc contains a placeholder Vue would read as a tag.
+      - name: Build
+        working-directory: docs-site
+        run: npm run build
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs-site/src/.vitepress/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

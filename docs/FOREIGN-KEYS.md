@@ -70,7 +70,7 @@ table exists, so cyclic schemas can be created in any order).
 | Dialect  | Emit shape                                                                                                              | Constraint name                  |
 |----------|-------------------------------------------------------------------------------------------------------------------------|----------------------------------|
 | Postgres | `ALTER TABLE "posts" ADD CONSTRAINT "fk_posts_author_id" FOREIGN KEY ("author_id") REFERENCES "users" ("id") ON DELETE CASCADE` | `fk_posts_author_id`             |
-| MySQL    | `ALTER TABLE \`posts\` ADD CONSTRAINT \`fk_posts_author_id\` FOREIGN KEY (\`author_id\`) REFERENCES \`users\` (\`id\`) ON DELETE CASCADE` | `fk_posts_author_id`             |
+| MySQL    | ``ALTER TABLE `posts` ADD CONSTRAINT `fk_posts_author_id` FOREIGN KEY (`author_id`) REFERENCES `users` (`id`) ON DELETE CASCADE`` | `fk_posts_author_id`             |
 | SQLite   | Inline: `FOREIGN KEY("author_id") REFERENCES "users" ("id") ON DELETE CASCADE`                                          | none (anonymous)                 |
 | DuckDB   | `ALTER TABLE "posts" ADD CONSTRAINT "fk_posts_author_id" FOREIGN KEY ("author_id") REFERENCES "users" ("id") ON DELETE CASCADE` (accepted; not enforced) | `fk_posts_author_id`             |
 | MSSQL    | `ALTER TABLE [posts] ADD CONSTRAINT [fk_posts_author_id] FOREIGN KEY ([author_id]) REFERENCES [users] ([id]) ON DELETE CASCADE` | `fk_posts_author_id`             |

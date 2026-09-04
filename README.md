@@ -1,4 +1,26 @@
+<div align="center">
+
 # forge-orm
+
+**One Prisma-shaped query API. Six databases. No codegen.**
+
+[![npm version](https://img.shields.io/npm/v/forge-orm?color=cb3837&label=npm&logo=npm)](https://www.npmjs.com/package/forge-orm)
+[![downloads](https://img.shields.io/npm/dm/forge-orm?color=cb3837&label=downloads)](https://www.npmjs.com/package/forge-orm)
+[![install size](https://packagephobia.com/badge?p=forge-orm)](https://packagephobia.com/result?p=forge-orm)
+[![stars](https://img.shields.io/github/stars/johnsonfash/forge-orm?style=flat&color=f5a623&logo=github)](https://github.com/johnsonfash/forge-orm/stargazers)
+[![typecheck](https://github.com/johnsonfash/forge-orm/actions/workflows/typecheck.yml/badge.svg)](https://github.com/johnsonfash/forge-orm/actions/workflows/typecheck.yml)
+[![examples](https://github.com/johnsonfash/forge-orm/actions/workflows/examples.yml/badge.svg)](https://github.com/johnsonfash/forge-orm/actions/workflows/examples.yml)
+[![license](https://img.shields.io/npm/l/forge-orm?color=blue)](./LICENSE)
+[![types](https://img.shields.io/npm/types/forge-orm?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+
+**[Documentation](https://johnsonfash.github.io/forge-orm/)** ·
+[Quick start](https://johnsonfash.github.io/forge-orm/guide/install-and-pick-your-driver) ·
+[Examples](https://github.com/johnsonfash/forge-orm/tree/main/examples) ·
+[Changelog](./CHANGELOG.md)
+
+</div>
+
+---
 
 A small, Prisma-shaped data layer for **MongoDB, PostgreSQL, MySQL, SQLite,
 DuckDB and SQL Server**. You write your models once in plain TypeScript and
@@ -7,13 +29,20 @@ generation step, no Rust query engine, and no framework to adopt — just
 readable TypeScript over the official drivers, organised one adapter per
 database.
 
-```
+```sh
 npm install forge-orm
 ```
 
-* **npm:** https://www.npmjs.com/package/forge-orm
-* **GitHub:** https://github.com/johnsonfash/forge-orm
-* **License:** MIT
+> **📖 The full documentation reads far better as a website:
+> [johnsonfash.github.io/forge-orm](https://johnsonfash.github.io/forge-orm/)** —
+> same content, with a sidebar, search, and one page per topic instead of
+> three thousand lines of scroll.
+
+| | | |
+|---|---|---|
+| 🐘 PostgreSQL | 🐬 MySQL / MariaDB | 🪶 SQLite |
+| 🍃 MongoDB | 🦆 DuckDB | 🟦 SQL Server |
+| 🌐 Browser (sqlite-wasm) | 💾 Browser (IndexedDB) | ⚡ PGlite (embedded PG) |
 
 ```ts
 import { createDb, f, model } from 'forge-orm';

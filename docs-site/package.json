@@ -1,0 +1,14 @@
+{
+  "name": "forge-orm-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync": "node sync.mjs",
+    "dev": "npm run sync && vitepress dev src",
+    "build": "npm run sync && vitepress build src",
+    "preview": "vitepress preview src"
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.3"
+  }
+}

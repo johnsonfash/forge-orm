@@ -1,0 +1,531 @@
+{
+  "/guide/": [
+    {
+      "text": "Guide",
+      "items": [
+        {
+          "text": "Introduction",
+          "link": "/guide/introduction"
+        },
+        {
+          "text": "Sandbox / runnable examples",
+          "link": "/guide/sandbox--runnable-examples"
+        },
+        {
+          "text": "What forge is, and what it is not",
+          "link": "/guide/what-forge-is-and-what-it-is-not"
+        },
+        {
+          "text": "Install and pick your driver",
+          "link": "/guide/install-and-pick-your-driver"
+        },
+        {
+          "text": "Connecting",
+          "link": "/guide/connecting"
+        },
+        {
+          "text": "Defining a schema",
+          "link": "/guide/defining-a-schema"
+        },
+        {
+          "text": "Reading data",
+          "link": "/guide/reading-data"
+        },
+        {
+          "text": "Writing data",
+          "link": "/guide/writing-data"
+        },
+        {
+          "text": "Grouping and aggregates",
+          "link": "/guide/grouping-and-aggregates"
+        },
+        {
+          "text": "Transactions",
+          "link": "/guide/transactions"
+        },
+        {
+          "text": "Running raw SQL",
+          "link": "/guide/running-raw-sql"
+        },
+        {
+          "text": "Errors",
+          "link": "/guide/errors"
+        },
+        {
+          "text": "Full-text search",
+          "link": "/guide/full-text-search"
+        },
+        {
+          "text": "Geo (geoPoint, near, nearTo, withinPolygon)",
+          "link": "/guide/geo-geopoint-near-nearto-withinpolygon"
+        },
+        {
+          "text": "JSON path queries",
+          "link": "/guide/json-path-queries"
+        },
+        {
+          "text": "Vector similarity search",
+          "link": "/guide/vector-similarity-search"
+        },
+        {
+          "text": "Browser (sqlite-wasm + OPFS)",
+          "link": "/guide/browser-sqlite-wasm--opfs"
+        },
+        {
+          "text": "Streaming large results",
+          "link": "/guide/streaming-large-results"
+        },
+        {
+          "text": "Soft delete",
+          "link": "/guide/soft-delete"
+        },
+        {
+          "text": "Views and materialised views",
+          "link": "/guide/views-and-materialised-views"
+        },
+        {
+          "text": "Watching queries",
+          "link": "/guide/watching-queries"
+        },
+        {
+          "text": "Creating tables and migrations",
+          "link": "/guide/creating-tables-and-migrations"
+        },
+        {
+          "text": "Seeing a query without running it — db.$explain()",
+          "link": "/guide/seeing-a-query-without-running-it--dbexplain"
+        },
+        {
+          "text": "Dropping to raw queries with .compile",
+          "link": "/guide/dropping-to-raw-queries-with-compile"
+        },
+        {
+          "text": "Type safety",
+          "link": "/guide/type-safety"
+        },
+        {
+          "text": "Performance",
+          "link": "/guide/performance"
+        },
+        {
+          "text": "Testing",
+          "link": "/guide/testing"
+        },
+        {
+          "text": "Limitations and honest notes",
+          "link": "/guide/limitations-and-honest-notes"
+        },
+        {
+          "text": "Contributing",
+          "link": "/guide/contributing"
+        }
+      ]
+    }
+  ],
+  "/reference/": [
+    {
+      "text": "Schema and data model",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "Model definition",
+          "link": "/reference/model"
+        },
+        {
+          "text": "Embeds",
+          "link": "/reference/embed"
+        },
+        {
+          "text": "Relations",
+          "link": "/reference/relations"
+        },
+        {
+          "text": "Indexes",
+          "link": "/reference/indexes"
+        },
+        {
+          "text": "Type safety",
+          "link": "/reference/types"
+        },
+        {
+          "text": "Primary keys",
+          "link": "/reference/primary-keys"
+        },
+        {
+          "text": "Foreign keys",
+          "link": "/reference/foreign-keys"
+        },
+        {
+          "text": "Enums",
+          "link": "/reference/enums"
+        },
+        {
+          "text": "CHECK constraints",
+          "link": "/reference/checks"
+        },
+        {
+          "text": "Generated columns",
+          "link": "/reference/generated-columns"
+        },
+        {
+          "text": "Views",
+          "link": "/reference/views"
+        },
+        {
+          "text": "Materialized views",
+          "link": "/reference/materialized-views"
+        },
+        {
+          "text": "Triggers",
+          "link": "/reference/triggers"
+        }
+      ]
+    },
+    {
+      "text": "Reads, writes, transactions",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "Queries",
+          "link": "/reference/queries"
+        },
+        {
+          "text": "Mutations",
+          "link": "/reference/mutations"
+        },
+        {
+          "text": "Transactions",
+          "link": "/reference/transactions"
+        },
+        {
+          "text": "Raw SQL",
+          "link": "/reference/raw-sql"
+        },
+        {
+          "text": "`$explain`",
+          "link": "/reference/explain"
+        },
+        {
+          "text": "Upsert",
+          "link": "/reference/upsert"
+        },
+        {
+          "text": "Batch ops",
+          "link": "/reference/batch"
+        },
+        {
+          "text": "Aggregations",
+          "link": "/reference/aggregations"
+        },
+        {
+          "text": "Window functions",
+          "link": "/reference/windows"
+        },
+        {
+          "text": "Pagination",
+          "link": "/reference/pagination"
+        },
+        {
+          "text": "Streaming",
+          "link": "/reference/streaming"
+        },
+        {
+          "text": "Locking",
+          "link": "/reference/locking"
+        },
+        {
+          "text": "Concurrency control",
+          "link": "/reference/concurrency"
+        }
+      ]
+    },
+    {
+      "text": "Cross-cutting surfaces",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "Full-text search",
+          "link": "/reference/fts"
+        },
+        {
+          "text": "Geo",
+          "link": "/reference/geo"
+        },
+        {
+          "text": "Vector / embeddings / RAG",
+          "link": "/reference/vector"
+        },
+        {
+          "text": "JSON path queries",
+          "link": "/reference/json-path"
+        },
+        {
+          "text": "Migrations",
+          "link": "/reference/migrations"
+        },
+        {
+          "text": "Drivers",
+          "link": "/reference/drivers"
+        }
+      ]
+    },
+    {
+      "text": "CLI and operations",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "CLI reference",
+          "link": "/reference/cli"
+        },
+        {
+          "text": "vs drizzle-kit",
+          "link": "/reference/vs-drizzle"
+        },
+        {
+          "text": "`forge push`",
+          "link": "/reference/push"
+        },
+        {
+          "text": "`forge diff`",
+          "link": "/reference/diff"
+        },
+        {
+          "text": "`forge doctor`",
+          "link": "/reference/doctor"
+        },
+        {
+          "text": "Rollback",
+          "link": "/reference/rollback"
+        },
+        {
+          "text": "Seeding",
+          "link": "/reference/seed"
+        },
+        {
+          "text": "Deployment",
+          "link": "/reference/deployment"
+        },
+        {
+          "text": "Backup and restore",
+          "link": "/reference/backup-restore"
+        },
+        {
+          "text": "Schema versioning",
+          "link": "/reference/versioning"
+        }
+      ]
+    },
+    {
+      "text": "Per-dialect deep dives",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "PostgreSQL",
+          "link": "/reference/postgres"
+        },
+        {
+          "text": "MySQL / MariaDB",
+          "link": "/reference/mysql"
+        },
+        {
+          "text": "SQLite (server)",
+          "link": "/reference/sqlite"
+        },
+        {
+          "text": "MongoDB",
+          "link": "/reference/mongo"
+        },
+        {
+          "text": "DuckDB",
+          "link": "/reference/duckdb"
+        },
+        {
+          "text": "SQL Server",
+          "link": "/reference/mssql"
+        }
+      ]
+    },
+    {
+      "text": "Observability and errors",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "Events",
+          "link": "/reference/events"
+        },
+        {
+          "text": "Logging",
+          "link": "/reference/logging"
+        },
+        {
+          "text": "Tracing",
+          "link": "/reference/tracing"
+        },
+        {
+          "text": "Metrics",
+          "link": "/reference/metrics"
+        },
+        {
+          "text": "Errors",
+          "link": "/reference/errors"
+        }
+      ]
+    },
+    {
+      "text": "Performance",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "Connection pooling",
+          "link": "/reference/pooling"
+        },
+        {
+          "text": "Benchmarks",
+          "link": "/reference/benchmarks"
+        },
+        {
+          "text": "Caching",
+          "link": "/reference/caching"
+        },
+        {
+          "text": "Preventing N+1",
+          "link": "/reference/n-plus-one"
+        }
+      ]
+    },
+    {
+      "text": "Patterns",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "Soft delete",
+          "link": "/reference/soft-delete"
+        },
+        {
+          "text": "Audit log",
+          "link": "/reference/audit-log"
+        },
+        {
+          "text": "Multi-tenant",
+          "link": "/reference/multi-tenant"
+        },
+        {
+          "text": "Sharding",
+          "link": "/reference/sharding"
+        },
+        {
+          "text": "Idempotency keys",
+          "link": "/reference/idempotency"
+        },
+        {
+          "text": "Watch / change feeds",
+          "link": "/reference/watch"
+        }
+      ]
+    },
+    {
+      "text": "Testing",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "Testing",
+          "link": "/reference/testing"
+        },
+        {
+          "text": "Integration testing",
+          "link": "/reference/integration-testing"
+        },
+        {
+          "text": "Fixtures and factories",
+          "link": "/reference/fixtures"
+        }
+      ]
+    },
+    {
+      "text": "Security",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "Security",
+          "link": "/reference/security"
+        },
+        {
+          "text": "Encryption",
+          "link": "/reference/encryption"
+        },
+        {
+          "text": "SQLCipher",
+          "link": "/reference/sqlcipher"
+        },
+        {
+          "text": "Database auth",
+          "link": "/reference/auth"
+        }
+      ]
+    },
+    {
+      "text": "Type-level reference",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "Runtime validation (zod)",
+          "link": "/reference/runtime-validation"
+        },
+        {
+          "text": "Brand types",
+          "link": "/reference/brand-types"
+        },
+        {
+          "text": "Dates and times",
+          "link": "/reference/dates"
+        },
+        {
+          "text": "Decimal and money",
+          "link": "/reference/decimal"
+        },
+        {
+          "text": "UUID / ULID / Snowflake",
+          "link": "/reference/uuid"
+        }
+      ]
+    },
+    {
+      "text": "Runtime targets",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "Backend",
+          "link": "/reference/backend"
+        },
+        {
+          "text": "Browser",
+          "link": "/reference/browser"
+        },
+        {
+          "text": "IndexedDB (zero-install browser)",
+          "link": "/reference/indexeddb"
+        },
+        {
+          "text": "Browser frameworks",
+          "link": "/reference/browser-frameworks"
+        },
+        {
+          "text": "React",
+          "link": "/reference/react"
+        },
+        {
+          "text": "Mobile",
+          "link": "/reference/mobile"
+        },
+        {
+          "text": "Cloudflare Workers / Vercel Edge",
+          "link": "/reference/workers"
+        },
+        {
+          "text": "AWS Lambda",
+          "link": "/reference/lambda"
+        }
+      ]
+    }
+  ]
+}
