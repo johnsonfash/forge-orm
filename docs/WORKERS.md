@@ -13,6 +13,7 @@ recipes, the bindings, the four worked examples.
 
 * [What an isolate is — and isn't](#what-an-isolate-is--and-isnt)
 * [Forge under Workers — what works, what doesn't](#forge-under-workers--what-works-what-doesnt)
+* [Driver resolution and the bundler](#driver-resolution-and-the-bundler)
 * [Postgres via Hyperdrive](#postgres-via-hyperdrive)
 * [Postgres via HTTP transports — Neon, Supabase, postgres.js](#postgres-via-http-transports--neon-supabase-postgresjs)
 * [Cloudflare D1 — the Workers-native SQLite](#cloudflare-d1--the-workers-native-sqlite)
@@ -98,6 +99,75 @@ between forge's `query(sql, params)` port and the actual client library.
 
 The "broken" rows are not forge limitations. They are runtime
 limitations forge can't paper over: there is no socket to dial.
+
+---
+
+## Driver resolution and the bundler
+
+Everything that ships to a Worker goes through a bundler first —
+wrangler runs esbuild, Vercel runs its own. That matters for how the
+client library gets found.
+
+The main entry finds it at runtime: `createDb({ url })` reads the kind
+off the URL prefix and calls `require(pkg)`, where `pkg` is computed
+from that kind while the process runs. A bundler cannot see through a
+computed specifier. esbuild, webpack, rollup and Vite all lose the
+dependency there, so the client is either dropped from the output or
+fails on the first query, a long way from the import that caused it.
+The same opacity stops the reverse trim: nothing in the bundle proves
+which adapter you use, so all six travel with you.
+
+Two shapes make the dependency visible, and both are static imports
+the bundler can follow.
+
+**The `driver` option** is the one every recipe on this page uses, and
+it stays correct. On Workers the client is almost never the dialect's
+default — it is an HTTP transport or a binding (`@neondatabase/serverless`,
+`@planetscale/database`, D1, the Atlas shim) — and those need
+constructing with arguments anyway. You import the package yourself,
+so the bundler sees it:
+
+```ts
+import { Pool } from '@neondatabase/serverless';
+import { createDb, pgDriver } from 'forge-orm';
+
+const db = await createDb({ schema, driver: pgDriver(new Pool({ connectionString })) });
+```
+
+**A per-dialect entry** (2.17.0) is the shorter path wherever the
+dialect's default client does run on the target. It imports that one
+client statically and takes the same URL you would have passed to the
+main entry:
+
+```ts
+import { createDb } from 'forge-orm/postgres';   // also /mysql, /sqlite, /pglite, /mongo
+import { schema } from './schema';
+
+const db = await createDb({ url: process.env.DATABASE_URL!, schema });
+```
+
+That call site is a Postgres call site — you lose the env-var database
+swap — which is a fair trade on a target whose bundle is fixed at
+build time anyway. It takes `url`, `schema` and `strict`; anything the
+*client* needs (pool bounds, TLS, PGlite extensions) is still the
+`driver` option above.
+
+Inside an isolate the entries mostly do not apply, because `pg`,
+`mysql2`, `mongodb` and `better-sqlite3` all want a socket or a native
+binding — see the table above. Where they earn their place is the
+bundled runtime one step over: a Vercel Function on the Node runtime,
+or a bundled Lambda. Same bundler problem, and there the default
+client runs. [LAMBDA.md](./LAMBDA.md#bundling-and-driver-resolution) has that
+side.
+
+`forge-orm/duckdb` and `forge-orm/mssql` exist as well, though neither
+is much use *here*: an edge isolate has no place to run a native DuckDB
+addon or a TDS socket. They earn their keep in a bundled Lambda or an
+SSR build, which has the same bundler problem without the runtime
+restrictions.
+
+Full comparison in
+[DRIVERS.md → Three ways to connect](./DRIVERS.md#three-ways-to-connect).
 
 ---
 
@@ -448,10 +518,11 @@ Cold-start budget allocation:
 
 Common bloat sources:
 
-* **Importing adapters you don't use.** Import from
-  `'forge-orm/adapters/*'` directly — bundler tree-shaking misses
-  some forge surface (doctor, event subscribers) when importing from
-  the root.
+* **Carrying adapters you don't use.** The root entry gives a
+  bundler nothing to prove which adapter you reached for, so all six
+  stay. Importing from a per-dialect entry (`'forge-orm/postgres'`)
+  names one, and the rest can be dropped — see
+  [Driver resolution and the bundler](#driver-resolution-and-the-bundler).
 * **Pulling in `pg` for Hyperdrive.** Use `@neondatabase/serverless`
   — smaller, works without `nodejs_compat` polyfills.
 * **Bringing the whole `mongodb` package.** It doesn't run on
@@ -936,6 +1007,13 @@ Notes:
 **`Error: connect ECONNREFUSED 10.0.0.1:5432`** — you're using
 stock `pg` and trying to dial TCP from a Worker. Switch to
 `@neondatabase/serverless` or use Hyperdrive.
+
+**A driver that resolves locally but not once deployed** — often
+with a build-time warning about a dependency expression. The main
+entry's `require` is computed at runtime, so the bundler never packed
+the client. Construct the client yourself and pass `driver`, or import
+from the dialect entry. See
+[Driver resolution and the bundler](#driver-resolution-and-the-bundler).
 
 **`Error: No such module "node:net"`** — you're using a library that
 imports `node:net` and `nodejs_compat` is off. Either enable the flag

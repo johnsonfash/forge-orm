@@ -12,9 +12,8 @@ title: Introduction
 
 [![npm version](https://img.shields.io/npm/v/forge-orm?color=cb3837&label=npm&logo=npm)](https://www.npmjs.com/package/forge-orm)
 [![downloads](https://img.shields.io/npm/dm/forge-orm?color=cb3837&label=downloads)](https://www.npmjs.com/package/forge-orm)
-[![install size](https://packagephobia.com/badge?p=forge-orm)](https://packagephobia.com/result?p=forge-orm)
 [![stars](https://img.shields.io/github/stars/johnsonfash/forge-orm?style=flat&color=f5a623&logo=github)](https://github.com/johnsonfash/forge-orm/stargazers)
-[![typecheck](https://github.com/johnsonfash/forge-orm/actions/workflows/typecheck.yml/badge.svg)](https://github.com/johnsonfash/forge-orm/actions/workflows/typecheck.yml)
+[![ci](https://github.com/johnsonfash/forge-orm/actions/workflows/ci.yml/badge.svg)](https://github.com/johnsonfash/forge-orm/actions/workflows/ci.yml)
 [![examples](https://github.com/johnsonfash/forge-orm/actions/workflows/examples.yml/badge.svg)](https://github.com/johnsonfash/forge-orm/actions/workflows/examples.yml)
 [![license](https://img.shields.io/npm/l/forge-orm?color=blue)](./LICENSE)
 [![types](https://img.shields.io/npm/types/forge-orm?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)

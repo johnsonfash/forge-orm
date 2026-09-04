@@ -265,7 +265,9 @@ Levers:
 * **Small bundle.** forge is tree-shakeable; import only what you use
   (`createDb, f, model, pgDriver`). Use a bundler (`esbuild`, `tsup`)
   — a bundled handler is 200-400 KB, unbundled can balloon past 5 MB
-  with transitive driver deps.
+  with transitive driver deps. Bundling changes how the client library
+  has to be reached; see [Bundling and driver
+  resolution](#bundling-and-driver-resolution) below.
 * **ESM and small drivers.** `pg` is CommonJS, ~1 MB unbundled.
   `postgres.js` is ~150 KB bundled and ESM-native.
   `@neondatabase/serverless` is ~50 KB and HTTP-native (no TCP
@@ -284,6 +286,60 @@ Ranking for cold-start budget:
 2. `postgres.js` with `prepare: false` — small, fast TLS, safe
    through RDS Proxy.
 3. `pg` — battle-tested, larger, fine on warm starts.
+
+### Bundling and driver resolution
+
+A bundled handler and the main entry's URL form do not agree about
+who finds the client library.
+
+`createDb({ url })` finds it at runtime: it reads the kind off the URL
+prefix, then calls `require(pkg)` with `pkg` computed from that kind.
+esbuild, tsup, webpack and rollup all fail to follow a computed
+specifier, so the client is dropped from the ZIP — and the failure
+surfaces on the first query in the deployed function, not in the
+build. The same opacity means nothing in the bundle proves which
+adapter you use, so all six ride along in the size budget above.
+
+An unbundled deploy (the whole `node_modules` in the ZIP or a layer)
+never hits this, which is why the URL form is fine on a plain Node
+server and not here.
+
+Since 2.17.0 each bundleable client has an entry point of its own.
+Each imports its one driver statically, so the bundler keeps that
+driver and drops the rest:
+
+```ts
+// handler.ts — module scope, so the container reuses the handle.
+import { createDb } from 'forge-orm/postgres';   // also /mysql, /sqlite, /pglite, /mongo
+import { schema } from './schema';
+
+const db = await createDb({ url: process.env.DATABASE_URL!, schema });
+
+export const handler = async (event: any) => {
+  const user = await db.user.findUnique({ where: { id: event.userId } });
+  return { statusCode: 200, body: JSON.stringify(user) };
+};
+```
+
+The trade is that this call site is a Postgres call site: the entry
+fixes the dialect at the import, so pointing `DATABASE_URL` at a
+different database no longer moves the app. On a function whose bundle
+is built per deploy, that flexibility was never real.
+
+The entry takes `url`, `schema` and `strict` — nothing about the
+client. It builds `new pg.Pool({ connectionString: url })` on `pg`'s
+own defaults, which is not the shape [Pool sizing — one connection per
+container](#pool-sizing--one-connection-per-container) argues for: a
+handler that fans out parallel queries will open more than one
+connection. When the pool bounds matter — and behind RDS Proxy or IAM
+auth they always do — build the client yourself and keep the `driver`
+option from [Handler-scope
+pool](#handler-scope-pool--module-top-createdb) above. That is a
+static import too, so it bundles exactly as well; the entry point is
+the shorter path, not a replacement.
+
+The full comparison is in [DRIVERS.md → Three ways to
+connect](./DRIVERS.md#three-ways-to-connect).
 
 ---
 

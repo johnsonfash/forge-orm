@@ -21,6 +21,11 @@ at all.
 | Browser (SQLite)  | `opfs:`, `opfs-sahpool:`, `:memory:` | `npm install @sqlite.org/sqlite-wasm` |
 | Browser (IndexedDB) | `idb:` or `indexeddb:`             | none — browser built-in                |
 
+Those are the same package names the per-dialect entry points
+(`forge-orm/postgres`, `forge-orm/mysql`, and so on) import statically, so the
+install step above does not change with how you choose to connect — see
+[Connecting](/guide/connecting#connecting) for what that choice actually decides.
+
 ```sh
 npm install forge-orm      # the library, no drivers
 npm install pg             # add the one you need
@@ -30,7 +35,8 @@ The driver loads lazily, the first time you actually run a query against that
 database. Importing forge, defining a schema, or using one database never
 needs the other databases' drivers installed. If a driver is missing when you
 connect, you get a clear message telling you what to install rather than a
-crash.
+crash. (A per-dialect entry point trades that lazy load for a static import,
+which is the whole point of it — see option 2 below.)
 
 There is no lock-in. No generated client to regenerate, no migration state you
 cannot leave, no framework module to wire in, and no driver bundled inside. It
