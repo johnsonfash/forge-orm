@@ -4,6 +4,86 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.13.0 — see the query without running it
+
+**Minor.** Stage 6, and the last item on the drizzle plan.
+
+The standing complaint about a Prisma-shaped ORM is that you cannot see
+what it sends. `.compile.<op>()` answered that for one op, but you had to
+know the op's name and rebuild the call by hand — which is the moment
+most people stop bothering. `$explain` takes the call site instead:
+
+```ts
+const r = await db.$explain((q) => q.User.findMany({ where: { age: { gt: 40 } } }));
+console.log(r.toString());
+```
+
+```
+User.findMany  →  users  [sqlite]
+
+  SELECT "users"."id", "users"."name", "users"."age" FROM "users" WHERE "users"."age" > ?
+
+  params: 40
+
+  -- with values inlined (for reading, not for running):
+  SELECT "users"."id", "users"."name", "users"."age" FROM "users" WHERE "users"."age" > 40
+```
+
+### `{ analyze: true }` — the database's own plan
+
+```
+  -- plan:
+  SCAN users          ← every row read; that column has no index
+```
+
+`forge doctor` catches an index that was declared and never created. This
+catches the one that was never declared, which nothing else can see
+because it is a property of the query rather than of the schema.
+
+### forge never emits `EXPLAIN ANALYZE`
+
+`EXPLAIN` plans a statement. `EXPLAIN ANALYZE` **runs** it — which on
+`deleteMany` deletes the rows. An API whose entire promise is "this does
+not run" must not delete data because you asked for more detail, so
+ANALYZE is not offered at all and the docs say why rather than leaving
+the distinction to be found in a postmortem. Explaining a `deleteMany`
+against 500 rows leaves 500 rows.
+
+### Two callback forms, and an honest failure
+
+`db.$explain((q) => q.User.findMany(…))` — `q` holds no session and
+reaches no driver, so nothing can execute and an `async` callback is
+safe. This is the one to reach for.
+
+`db.$explain(() => db.User.findMany(…))` also works, by intercepting for
+the duration of the synchronous call. That window shuts at the first
+`await`, so a query issued after one runs for real. forge detects the
+case — an empty capture from a callback that returned a promise — and
+throws saying the query ran, rather than handing back an empty report it
+cannot honour.
+
+### Notes
+
+- Placeholder splitting is a tokenizer, not a regex. `?` and `$1` both
+  occur inside string literals, quoted identifiers and comments, and
+  Postgres `$tag$…$tag$` dollar-quoting means `$1` can be either a
+  parameter or text. A regex gets these wrong silently, producing SQL
+  that still parses.
+- `readable` (values inlined) is for reading and for handing to a DBA.
+  Never execute it — that quoting serves legibility, not safety.
+- Refusals name the case: `groupBy` / `aggregate` / `findManyStream` have
+  no single compiled statement; `analyze` on a Mongo write would ask the
+  server to plan a change to your data; `analyze` on SQL Server needs a
+  connection-state change forge will not make behind your back on a
+  pooled connection. `findFirstOrThrow` and `findUniqueOrThrow` are not
+  refused — they differ only after the statement.
+- New exports: `formatExplain`, `inlineParams`, `splitSql`,
+  `fragmentFromSql`, and the `ExplainReport` / `ExplainedQuery` types.
+- Docs: **[docs/EXPLAIN.md](docs/EXPLAIN.md)**, a README chapter, and the
+  contents entry.
+
+621 tests passing.
+
 ## 2.12.0 — `forge migrate status`
 
 **Minor.** Stage 5. Every other command compares **intent** — the schema

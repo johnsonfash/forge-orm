@@ -1,5 +1,7 @@
 # Queries deep-dive — operators, pagination, aggregation, streams
 
+To see the SQL a particular call produces without running it, use `db.$explain((q) => q.Model.findMany({ … }))` — see **[EXPLAIN.md](./EXPLAIN.md)**.
+
 The README chapter [Reading data](../README.md#reading-data) covers the
 surface — `findMany`, `findFirst`, `findUnique`, the operator table,
 `select` vs `include`, sort, and pagination. This doc is the companion

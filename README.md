@@ -168,6 +168,7 @@ npx degit johnsonfash/forge-orm-examples/01-sqlite-browser-todo my-app
   * [`forge doctor` — live capability probe](#forge-doctor--live-capability-probe)
   * [`scopeBy` — declare your tenant key, get an index lint](#scopeby--declare-your-tenant-key-get-an-index-lint)
   * [Extensions and `forge push --enable-extensions`](#extensions-and-forge-push---enable-extensions)
+* [Seeing a query without running it — `db.$explain()`](#seeing-a-query-without-running-it--dbexplain)
 * [Dropping to raw queries with `.compile`](#dropping-to-raw-queries-with-compile)
 * [Type safety](#type-safety)
   * [Row + db helpers](#row--db-helpers)
@@ -208,6 +209,7 @@ The README is the surface reference. For more depth — extra examples, edge cas
 | Mutations — create/update/upsert/delete asymmetry, atomic ops, nested writes, idempotency, optimistic+pessimistic concurrency, 8 worked patterns | **[docs/MUTATIONS.md](docs/MUTATIONS.md)** |
 | Transactions — callback vs array, per-dialect mechanics, savepoints, isolation, deadlock retry, Mongo replica-set, outbox, 5 worked patterns | **[docs/TRANSACTIONS.md](docs/TRANSACTIONS.md)** |
 | Raw SQL — `forgeSql` composition, identifier-vs-value safety, per-dialect placeholders, `$runCommandRaw`, per-dialect worked patterns | **[docs/RAW-SQL.md](docs/RAW-SQL.md)** |
+| `$explain` — see a query without running it, both callback forms, the plan via `analyze`, why `EXPLAIN ANALYZE` is never emitted, per-dialect support | **[docs/EXPLAIN.md](docs/EXPLAIN.md)** |
 | Upsert — `ON CONFLICT` / `ON DUPLICATE KEY` / `MERGE` / `findOneAndUpdate` per dialect, partial updates, race semantics | **[docs/UPSERT.md](docs/UPSERT.md)** |
 | Batch ops — `createMany`/`updateMany`/`deleteMany`, bind-parameter limits, chunking, ordered vs unordered, RETURNING | **[docs/BATCH.md](docs/BATCH.md)** |
 | Aggregations — count/sum/avg/groupBy/having/distinct, per-dialect emit, decimal precision, dashboard patterns | **[docs/AGGREGATIONS.md](docs/AGGREGATIONS.md)** |
@@ -2684,6 +2686,51 @@ flag, the push works as long as the extensions are already installed.
 See more — **[docs/MIGRATIONS.md](docs/MIGRATIONS.md)** for the push-style model, drift rules, per-dialect emit table, three CI snippets, blue/green pattern, monorepo workflow. **[docs/CLI.md](docs/CLI.md)** for every `forge` subcommand and flag. **[docs/VS-DRIZZLE.md](docs/VS-DRIZZLE.md)** for the drizzle-kit comparison and what is still open. **[docs/PUSH.md](docs/PUSH.md)** (push semantics + `--enable-extensions` + `--fallback`), **[docs/DIFF.md](docs/DIFF.md)** (drift taxonomy + the 2.5.1 auto-apply pass), **[docs/DOCTOR.md](docs/DOCTOR.md)** (live capability probe), **[docs/ROLLBACK.md](docs/ROLLBACK.md)** (snapshot vs forward-only vs blue/green), **[docs/SEED.md](docs/SEED.md)** (idempotent upserts + bootstrap/dev/demo split), **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** (env-per-stage + zero-downtime + RDS Proxy), **[docs/VERSIONING.md](docs/VERSIONING.md)** (expand/contract for breaking changes), **[docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md)** (per-dialect backup + PITR + restore drills).
 
 ---
+
+## Seeing a query without running it — `db.$explain()`
+
+`.compile` (below) answers this for one op, but you have to know the op's
+name and rebuild the call by hand. `$explain` takes the call site itself:
+
+```ts
+const r = await db.$explain((q) => q.User.findMany({ where: { age: { gt: 40 } } }));
+console.log(r.toString());
+```
+
+```
+User.findMany  →  users  [sqlite]
+
+  SELECT "users"."id", "users"."name", "users"."age" FROM "users" WHERE "users"."age" > ?
+
+  params: 40
+
+  -- with values inlined (for reading, not for running):
+  SELECT "users"."id", "users"."name", "users"."age" FROM "users" WHERE "users"."age" > 40
+```
+
+Nothing executed. `q` holds no session and reaches no driver, so an
+`async` callback is safe. The zero-argument form — `db.$explain(() =>
+db.User.findMany())` — also works, but only while the query is issued
+synchronously; forge throws if a callback returned a promise and captured
+nothing, because that query really ran.
+
+Add `{ analyze: true }` for the database's own plan — the reason you
+reach for this:
+
+```ts
+await db.$explain((q) => q.User.findMany({ where: { name: 'u7' } }), { analyze: true });
+//   -- plan:
+//   SCAN users          ← every row read; `name` has no index
+```
+
+**forge never emits `EXPLAIN ANALYZE`.** `EXPLAIN` plans a statement;
+`EXPLAIN ANALYZE` runs it — which on `deleteMany` deletes the rows. An
+API whose whole promise is "this does not run" must not delete data
+because you asked for more detail. Explaining a `deleteMany` leaves every
+row where it was.
+
+See **[docs/EXPLAIN.md](docs/EXPLAIN.md)** for both callback forms, the
+report shape, what it refuses and why, and the per-dialect table.
 
 ## Dropping to raw queries with `.compile`
 
