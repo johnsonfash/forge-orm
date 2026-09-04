@@ -1,0 +1,9 @@
+{
+  "name": "forge-orm-example-postgres-rls-auth",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": { "dev": "tsx src/index.ts" },
+  "dependencies": { "forge-orm": "^2.15.0", "pg": "^8.13.1" },
+  "devDependencies": { "@types/node": "^22.10.0", "@types/pg": "^8.11.10", "tsx": "^4.19.2", "typescript": "~5.6.3" }
+}

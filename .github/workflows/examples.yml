@@ -1,0 +1,75 @@
+name: examples
+
+# The reason the examples moved into this repo.
+#
+# While they lived in forge-orm-examples they pinned ^2.5.6 while the
+# library reached 2.13.0, and three of them were broken — one by a bug in
+# forge itself (`update: {}` compiling to `SET` with nothing after it),
+# which nothing caught for eight releases. Here they run against the
+# working tree, so a change that breaks an example fails the build that
+# broke it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: examples-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    strategy:
+      # One example's failure should not hide the others'.
+      fail-fast: false
+      matrix:
+        # Only the examples that run unattended on a runner. The rest are
+        # excluded for a stated reason rather than quietly left out:
+        #
+        #   01, 02, 19  browser apps — no runnable entry point
+        #   03, 07      need a VM / bun
+        #   05, 06      long-running server + Next.js build
+        #   16, 17, 18  need Mongo / SQL Server / a Postgres server
+        #   08          nearTo needs PostGIS; PGlite does not ship it
+        #   09          needs the pgvector extension on the PGlite instance
+        #   10          declares f.id({type:'uuid'}) then seeds 'L-LOAF-STARTER'
+        example:
+          - 04-node-cli
+          - 11-multi-tenant
+          - 12-audit-log
+          - 13-fulltext-search
+          - 14-transactions
+          - 15-migrations-drift
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Build forge from this commit
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install the example
+        working-directory: examples/${{ matrix.example }}
+        run: npm install --no-audit --no-fund
+
+      # Point the example at the working tree instead of the published
+      # package. Without this the job would test whatever is on npm and
+      # tell us nothing about the commit under review.
+      - name: Link the local forge build
+        working-directory: examples/${{ matrix.example }}
+        run: npm install --no-audit --no-fund ../..
+
+      - name: Run it
+        working-directory: examples/${{ matrix.example }}
+        run: npm run dev

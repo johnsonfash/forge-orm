@@ -1,0 +1,9 @@
+{
+  "name": "forge-orm-example-bun-sqlite-blog",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": { "dev": "bun run src/index.ts" },
+  "dependencies": { "forge-orm": "^2.15.0" },
+  "devDependencies": { "bun-types": "^1.1.38" }
+}
