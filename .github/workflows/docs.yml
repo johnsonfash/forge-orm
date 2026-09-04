@@ -44,7 +44,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version-file: .nvmrc
+          # engines is ">=18"; 22 is what the library is developed against.
+          node-version: 22
           cache: npm
           cache-dependency-path: docs-site/package.json
 
