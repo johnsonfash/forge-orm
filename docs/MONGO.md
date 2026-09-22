@@ -953,6 +953,21 @@ coercer (`coerceFieldValue`), so `where: { author_id: 'abc123...' }`
 works the same way `where: { author_id: new ObjectId('abc123...') }`
 does. The app code does not need to know.
 
+A BSON instance in a filter is always a **value**, never a container of
+operators. That holds for `ObjectId`, `Decimal128`, `Long`, `Binary`,
+`UUID`, a raw `Buffer` and `Date`, in a bare comparison, inside `in: [...]`,
+and under `not:`:
+
+```ts
+where: { author_id: new ObjectId(id) }          // eq
+where: { author_id: { not: new ObjectId(id) } } // ne
+where: { author_id: { in: ids } }               // in
+```
+
+Before 2.20.2 these threw `unknown operator 'buffer'` — forge read
+`Object.keys()` off the instance and treated its internal fields as
+operator names. Only a plain object is parsed for operators now.
+
 ### `Date`
 
 `f.dateTime()`. App-side: a JS `Date` (or an ISO string / epoch number

@@ -188,7 +188,7 @@ export function buildWhereTree(
       const fdef: any = model.fields?.[head];
       if (fdef && CONTAINER_KINDS.has(fdef.kind)) {
         const path = parseJsonPath(key.slice(dot + 1));
-        if (value && typeof value === 'object' && !Array.isArray(value) && !isDate(value)) {
+        if (isPlainObject(value)) {
           for (const op of Object.keys(value)) {
             const subOp = PATH_SUB_OPS[op];
             if (!subOp) {
@@ -269,7 +269,7 @@ export function buildWhereTree(
         value: undefined,
         rhsField: resolveColRef(model, 'eq', value),
       });
-    } else if (value && typeof value === 'object' && !Array.isArray(value) && !isDate(value)) {
+    } else if (isPlainObject(value)) {
       const insensitive = value.mode === 'insensitive';
       // Geo near — user shape `{ location: { near: { lng, lat, withinMeters } } }`.
       // Recognise and translate before the SCALAR_OPS loop so an unknown op
@@ -400,9 +400,7 @@ function buildOperatorLeaves(
     // data, not operators.
     const fkind = (model.fields?.[field] as any)?.kind;
     if (
-      op === 'not' && operand !== null && typeof operand === 'object' &&
-      !Array.isArray(operand) && !isDate(operand) && !isColRef(operand) &&
-      (operand as any)._bsontype === undefined &&
+      op === 'not' && isPlainObject(operand) && !isColRef(operand) &&
       !(fkind && CONTAINER_KINDS.has(fkind))
     ) {
       const inner: WhereTree[] = [];
@@ -439,8 +437,21 @@ function notUndef<T>(v: T | undefined): v is T {
   return v !== undefined;
 }
 
-function isDate(v: any): boolean {
-  return v instanceof Date;
+// Only a plain object can be an operator container like `{ gte: 5 }`.
+//
+// The test used to be "object, not array, not Date", which classified every
+// class instance as operators and then read Object.keys() off it. An ObjectId
+// enumerates as `['buffer']`, so `where: { author_id: new ObjectId(id) }` —
+// the shape docs/MONGO.md promises works — threw "unknown operator 'buffer'".
+// Decimal128 (`bytes`), Long (`high`), Binary and UUID (`buffer`) and a raw
+// Buffer (`'0'`) all failed the same way.
+//
+// Date needed its own special case only because of that. A prototype check
+// covers it and every other value type at once.
+function isPlainObject(v: any): boolean {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
 }
 
 // Normalise every accepted withinPolygon input shape to a uniform

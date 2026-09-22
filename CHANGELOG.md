@@ -4,6 +4,66 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.20.2 — an ObjectId in a `where` threw
+
+**Patch.** The single most ordinary thing you can write against MongoDB did
+not work:
+
+```ts
+db.post.findFirst({ where: { author_id: new ObjectId(id) } })
+// [forge] unknown operator 'buffer' on 'posts.author_id'.
+```
+
+`docs/MONGO.md` promises this exact shape — "`where: { author_id: 'abc…' }`
+works the same way `where: { author_id: new ObjectId('abc…') }` does" — so it
+was documented behaviour that threw.
+
+### What went wrong
+
+Deciding whether a `where` value is a value or an operator container like
+`{ gte: 5 }` was done with "object, not array, not Date". Every class
+instance failed that test and was then walked for operators. `Object.keys()`
+on an ObjectId returns `['buffer']`, which is not an operator, so the build
+threw.
+
+Every BSON type was affected, not just ObjectId:
+
+| value | enumerates as | thrown operator |
+|---|---|---|
+| `ObjectId` | `['buffer']` | `'buffer'` |
+| `Decimal128` | `['bytes']` | `'bytes'` |
+| `Long` | `['high','low','unsigned']` | `'high'` |
+| `Binary` / `UUID` | `['buffer','sub_type','position']` | `'buffer'` |
+| `Buffer` | `['0','1',…]` | `'0'` |
+
+`Date` escaped only because it was special-cased by name.
+
+The fix is a prototype check — a value is an operator container only when it
+is a *plain* object:
+
+```ts
+function isPlainObject(v: any): boolean {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
+}
+```
+
+That subsumes the `isDate` special case and the `_bsontype` guard that the
+`not:` branch and `ir/build/data.ts` already carried — two of the four sites
+had a guard and two did not, which is what made this reachable. An operator
+object built with `Object.create(null)` still reads as operators.
+
+### Why it deserves a release on its own
+
+The throw is loud, but a caller that wraps the query in `try/catch` turns it
+into silence. A production service hit exactly that: a subscription lookup
+built with `new ObjectId(orgId)`, a `catch` that logged and returned "allow",
+and an entitlement check that fell through to its default tier. The guard
+never blocked a request and nothing showed why. If you catch around forge
+queries, re-check those paths after upgrading — the fix makes code that was
+quietly failing open start working.
+
 ## 2.20.1 — three bugs a real server found
 
 **Patch.** Every fix here was invisible to the unit suite, because the SQL it
