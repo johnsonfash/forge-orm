@@ -112,7 +112,7 @@ if (field.dbGenerated) {
 
 Postgres added `GENERATED ALWAYS AS … STORED` in version 12 (October 2019). Earlier versions don't have generated columns at all — you used `BEFORE INSERT` / `BEFORE UPDATE` triggers or expression indexes instead.
 
-PG **does not implement VIRTUAL** generated columns. The standard reserves the keyword; the implementation does not. For a VIRTUAL-equivalent on PG, drop the generated column entirely and put the expression in an **expression index** (`CREATE INDEX ON users ((LOWER(name)))`) or a **view**. Forge supports both: expression indexes via `IndexDef.expressions` (see [INDEXES.md](./INDEXES.md#expression-indexes)) and views via `.asView(...)` on the model.
+PG **does not implement VIRTUAL** generated columns. The standard reserves the keyword; the implementation does not. For a VIRTUAL-equivalent on PG, drop the generated column entirely and put the expression in an **expression index** (`CREATE INDEX ON users ((LOWER(name)))`) or a **view**. Forge supports both: expression indexes via `IndexDef.expressions` (see [INDEXES.md](./INDEXES.md#5-expression-indexes)) and views via `.asView(...)` on the model.
 
 ```sql
 -- forge push output for `f.decimal().dbgenerated('amount * 2')`:
@@ -265,7 +265,7 @@ The opposite case: a `last_seen_iso` column computed as `to_char(last_seen_at, '
 | MSSQL | Yes (PERSISTED) | Only if deterministic + precise |
 | Mongo | n/a | n/a |
 
-Forge's `indexes: [{ keys: { generated_col: 1 } }]` works on every dialect that supports the column. Cross-link: [INDEXES.md — Indexing generated and expression columns](./INDEXES.md#expression-indexes).
+Forge's `indexes: [{ keys: { generated_col: 1 } }]` works on every dialect that supports the column. Cross-link: [INDEXES.md — Indexing generated and expression columns](./INDEXES.md#5-expression-indexes).
 
 For the Postgres tsvector pattern specifically — generated column with `GENERATED ALWAYS AS (to_tsvector(...)) STORED` + a `method: 'gin'` index — see [INDEXES.md § (f)](./INDEXES.md#f-postgres-tsvector-with-generated-column--gin).
 

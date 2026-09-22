@@ -875,7 +875,7 @@ const Vehicle = model('vehicles', {
   id:       f.id(),
   org_id:   f.string(),
   location: f.geoPoint(),
-  active:   f.boolean(),
+  active:   f.bool(),
   ts:       f.dateTime(),
 }, {
   indexes: [
@@ -890,7 +890,7 @@ const Vehicle = model('vehicles', {
 ```
 
 The 2.2 release added partial-filter indexes
-([CHANGELOG 2.2.0](../CHANGELOG.md#220--indexdef-coverage-compile-api-softdelete-on-compile-semanticop)).
+([CHANGELOG 2.2.0](../CHANGELOG.md#220--indexdef-covers-the-index-shapes-forge-push-couldnt-model-before)).
 On PG the SQL is `CREATE INDEX … WHERE active = true`; on Mongo
 it's `partialFilterExpression`; on MySQL it emulates via a
 generated column. Spatial index size scales with active rows, not

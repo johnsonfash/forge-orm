@@ -828,11 +828,11 @@ N worker processes drain a `job` table. Every worker calls `claimJob()` in a loo
 ```ts
 const Job = model('job', {
   id:           f.id(),
-  status:       f.enum(['pending', 'claimed', 'done', 'failed']).default('pending'),
+  status:       f.enumOf(['pending', 'claimed', 'done', 'failed']).default('pending'),
   payload:      f.json(),
-  claimed_by:   f.string().nullable(),
-  claimed_at:   f.dateTime().nullable(),
-  created_at:   f.dateTime().now(),
+  claimed_by:   f.string().optional(),
+  claimed_at:   f.dateTime().optional(),
+  created_at:   f.dateTime().default('now'),
 }, {
   indexes: [
     // Partial index so the pending-scan only touches pending rows.

@@ -660,12 +660,19 @@ The `drop` step varies per dialect — Postgres: `DROP SCHEMA public CASCADE; CR
 **`TRUNCATE` via raw SQL.** Keeps the schema, wipes the data — faster than `deleteMany` on Postgres / MySQL:
 
 ```ts
+import { forgeSql } from 'forge-orm';
+
 const tables = await db.$queryRaw<{ table_name: string }[]>`
   SELECT table_name FROM information_schema.tables
   WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
 `;
+// Table names are identifiers, not values — a `${}` in the template would bind
+// them as parameters and the statement would not parse. `forgeSql.raw` is the
+// literal-SQL hatch; it escapes nothing, so only ever hand it names that came
+// from the catalogue, never from user input.
+const list = forgeSql.raw(tables.map((t) => `"${t.table_name}"`).join(', '));
 await db.$executeRaw`
-  TRUNCATE TABLE ${db.$raw(tables.map(t => `"${t.table_name}"`).join(', '))} RESTART IDENTITY CASCADE
+  TRUNCATE TABLE ${list} RESTART IDENTITY CASCADE
 `;
 ```
 

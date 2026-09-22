@@ -558,7 +558,7 @@ rows.
 const Post = model('posts', {
   id:         f.id(),
   body:       f.text(),
-  deleted_at: f.dateTime().nullable(),
+  deleted_at: f.dateTime().optional(),
 }, {
   softDelete: { field: 'deleted_at' },
   indexes: [

@@ -1,6 +1,6 @@
 # Enums
 
-`f.enum(['a', 'b'])` for type-safe choice fields — what forge emits per dialect (Postgres native ENUM type, MySQL inline ENUM, SQLite CHECK constraint, Mongo `$jsonSchema`), TypeScript type inference into literal unions, and the evolution patterns (adding values online, removing via expand/contract, when a lookup table beats an enum).
+`f.enumOf(['a', 'b'])` for type-safe choice fields — what forge emits per dialect (Postgres native ENUM type, MySQL inline ENUM, SQLite CHECK constraint, Mongo `$jsonSchema`), TypeScript type inference into literal unions, and the evolution patterns (adding values online, removing via expand/contract, when a lookup table beats an enum).
 
 The [`Enums`](./MODEL.md#enums) section in MODEL.md is the surface — the
 `enums(values)` + `f.enumOf(values)` pair, the literal-union TS type, the
@@ -418,7 +418,7 @@ indexes: [
 
 The index only contains rows where the predicate matches — perfect
 for queue-shaped tables where 95% of rows are `SHIPPED` and you only
-ever scan for `PENDING`. See [INDEXES.md](./INDEXES.md#partial-indexes)
+ever scan for `PENDING`. See [INDEXES.md](./INDEXES.md#4-partial-filter-indexes)
 for the full story.
 
 ---
@@ -657,7 +657,7 @@ export const TicketStatus = enums([
 const Ticket = model('tickets', {
   id:          f.id(),
   status:      f.enumOf(TicketStatus.values).default('OPEN'),
-  status_rank: f.int().dbGenerated(`
+  status_rank: f.int().dbgenerated(`
     CASE status
       WHEN 'OPEN'     THEN 0
       WHEN 'PENDING'  THEN 1

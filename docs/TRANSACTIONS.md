@@ -883,8 +883,8 @@ const OutboxEvent = model('outbox_events', {
   id:          f.id(),
   topic:       f.string(),
   payload:     f.json(),
-  created_at:  f.dateTime().now(),
-  delivered_at: f.dateTime().nullable(),
+  created_at:  f.dateTime().default('now'),
+  delivered_at: f.dateTime().optional(),
 });
 
 await db.$transaction(async (tx) => {
@@ -1359,8 +1359,8 @@ const Outbox = model('outbox_events', {
   id:           f.id(),
   topic:        f.string(),
   payload:      f.json(),
-  created_at:   f.dateTime().now(),
-  delivered_at: f.dateTime().nullable(),
+  created_at:   f.dateTime().default('now'),
+  delivered_at: f.dateTime().optional(),
   attempts:     f.int().default(0),
 }, {
   indexes: [

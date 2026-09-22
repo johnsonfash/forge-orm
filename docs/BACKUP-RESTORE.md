@@ -413,7 +413,7 @@ A forge-orm browser app (sqlite-wasm + OPFS via the worker driver — see [BROWS
 
 The realistic pattern for any forge-orm device-side DB: **the device is the cache, the server is the source of truth.** Sync writes to a server API; let the server's backup story (which is one of the patterns above) be the data's safety net. If the device's DB is corrupted or wiped, the app re-syncs from the server on next launch.
 
-This is documented in [MOBILE.md](./MOBILE.md#sync-strategies). The backup-side note here is just the inverse: **if you're treating the device DB as authoritative, you have no backup**. Sync is the backup.
+This is documented in [MOBILE.md](./MOBILE.md#sync-to-a-server--three-patterns). The backup-side note here is just the inverse: **if you're treating the device DB as authoritative, you have no backup**. Sync is the backup.
 
 ---
 

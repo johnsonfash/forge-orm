@@ -567,14 +567,39 @@ Filter on **`op`**, not on `semanticOp`. `op` is the physical operation and carr
 
 Order matters for some tests — the event stream is emission-ordered, which matches the order of the awaits in your code, so `events.map((e) => \`${e.model}:${e.op}\`)` is the cleanest way to assert "this sequence in this order."
 
-For queries that throw, subscribe to `'error'` instead and inspect `e.cause?.constraint` / `e.cause?.code`:
+For queries that throw, subscribe to `'error'` instead. An `ErrorEvent` carries
+the thrown error as **`error`** — there is no `cause` field on the event — and
+dialect-mapped failures arrive as a `DbKnownError`, which carries `code` and
+`meta`, not `constraint`:
 
 ```ts
-const errors: ErrorEvent[] = [];
-db.$on('error', (e) => errors.push(e));
-await expect(/* duplicate insert */).rejects.toThrow();
-expect(errors[0]?.cause?.constraint).toBe('user_email_key');
+import { DbKnownError } from 'forge-orm';
+import type { ErrorEvent } from 'forge-orm';
+
+test('a duplicate insert surfaces as P2002 on the error stream', async () => {
+  const errors: ErrorEvent[] = [];
+  const off = db.$on('error', (e) => errors.push(e));
+
+  await db.user.create({ data: aUser({ email: 'dup@example.com' }) });
+  await expect(
+    db.user.create({ data: aUser({ email: 'dup@example.com' }) }),
+  ).rejects.toThrow();
+
+  off();
+
+  expect(errors).toHaveLength(1);
+  expect(errors[0].error).toBeInstanceOf(DbKnownError);
+  expect((errors[0].error as DbKnownError).code).toBe('P2002');
+});
 ```
+
+`code` is the portable assertion — every adapter maps a unique violation to
+`P2002`. `meta` is not portable: Postgres and Mongo put the failing identifier
+in `meta.target` (an array — the constraint name on PG, the index name on
+Mongo), while SQLite fills `meta.sqliteCode` and `meta.detail` instead. Assert
+on `meta` only in a test pinned to one dialect. See
+[ERRORS.md](./ERRORS.md#the-dbknownerror-shape) for every code and the rest of
+the `meta` keys.
 
 ---
 
@@ -587,12 +612,19 @@ Forge's migration story has three test surfaces.
 ```ts
 test('migrate is idempotent', async () => {
   const r1 = await db.$migrate();
-  expect(r1.created.length).toBeGreaterThan(0);
+  expect(r1.applied.length).toBeGreaterThan(0);
+  expect(r1.failures).toEqual([]);
+
   const r2 = await db.$migrate();
-  expect(r2.created).toEqual([]);
+  expect(r2.applied).toEqual([]);      // nothing left to create
+  expect(r2.skipped.length).toBe(r1.applied.length);
   expect(r2.pending).toEqual([]);
 });
 ```
+
+The report is `{ applied, skipped, failures, alteredColumns, pending }` — objects
+created on this run land in `applied`, objects that already existed land in
+`skipped`. There is no `created` key.
 
 **Drift detection finds intentional drift.** Add a column to the schema after migrate, run again, assert the drift report mentions it. See [MIGRATIONS.md § Drift detection](./MIGRATIONS.md) for the report shape; the relevant test surface is `report.alteredColumns` for safe additions and `report.pending` for destructive items.
 
@@ -600,11 +632,14 @@ test('migrate is idempotent', async () => {
 test('adding a nullable column shows up under alteredColumns', async () => {
   await db.$migrate();   // baseline
 
-  // Schema now grows a column out-of-band — re-create the db handle pointing at the new schema.
-  const grownSchema = { ...schema, user: User.extend({ phone: f.text().nullable() }) };
-  const db2 = await createDb({ schema: grownSchema, driver: betterSqlite3Driver(raw) });
+  // Schema now grows a column out-of-band. There is no `.extend()` on a model —
+  // re-declare it with the extra field and hand the new map to a fresh db
+  // handle. Export the field map (`userFields` here) from your schema module so
+  // a test can rebuild the model without restating every column.
+  const GrownUser = model('user', { ...userFields, phone: f.text().optional() });
+  const db2 = await createDb({ schema: { ...schema, user: GrownUser }, driver: betterSqlite3Driver(raw) });
   const r = await db2.$migrate();
-  expect(r.alteredColumns).toContainEqual(expect.objectContaining({ table: 'user', column: 'phone' }));
+  expect(r.alteredColumns).toContain('user.phone');
 });
 ```
 

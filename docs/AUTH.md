@@ -38,7 +38,7 @@ This page covers the first. The second is application-shaped — bcrypt, JWT, OI
 
 The boundary matters because it determines where the secret rotates. A database password rotates on an infrastructure cadence (90 days, or on personnel change). A user password rotates on a user cadence (whenever the user clicks "change password"). The two have no shared interface and no shared storage; treating them as the same problem leads to either user passwords in your `pg_hba.conf` or DB passwords in your `users` table, both of which are wrong.
 
-Two patterns blur the boundary. **Per-tenant database roles** — a SaaS where each customer gets a Postgres role that the application impersonates with `SET ROLE` after the connection opens — is still DB auth (the service holds the master credential), gated on the application's actor. It composes with RLS; see [MULTI-TENANT.md](./MULTI-TENANT.md#schema-per-tenant). **End-user IAM** — a desktop app where each user's AWS IAM credential connects directly to RDS — is coherent for analyst tools (Redshift, BigQuery), rare for SaaS, and forge passes the token through unchanged.
+Two patterns blur the boundary. **Per-tenant database roles** — a SaaS where each customer gets a Postgres role that the application impersonates with `SET ROLE` after the connection opens — is still DB auth (the service holds the master credential), gated on the application's actor. It composes with RLS; see [MULTI-TENANT.md](./MULTI-TENANT.md#schema-per-tenant-postgres-search_path). **End-user IAM** — a desktop app where each user's AWS IAM credential connects directly to RDS — is coherent for analyst tools (Redshift, BigQuery), rare for SaaS, and forge passes the token through unchanged.
 
 ---
 

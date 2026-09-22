@@ -200,7 +200,7 @@ const User = model('users', {
 
 Run `forge push`. The push emits `ALTER TABLE users ADD COLUMN handle TEXT NULL`. Old app code still reads/writes `username` and ignores the new column; new app code starts dual-writing to both.
 
-The expand phase must be backward-compatible. The expand DDL adds optional columns or indexes only — never drops, never renames, never tightens constraints. The migrations system covers what's expressible at this phase in [MIGRATIONS.md](./MIGRATIONS.md#zero-downtime-change-patterns).
+The expand phase must be backward-compatible. The expand DDL adds optional columns or indexes only — never drops, never renames, never tightens constraints. The migrations system covers what's expressible at this phase in [MIGRATIONS.md](./MIGRATIONS.md#bluegreen-schema-rollouts).
 
 ### Phase 2 — migrate clients
 
@@ -479,7 +479,7 @@ Enums are a special case because the dialects treat them differently.
 | MSSQL | (no native enum; stored as VARCHAR with CHECK) | Yes — `ALTER TABLE … DROP CONSTRAINT …; ADD CONSTRAINT …` |
 | Mongo | no enum at the DB layer — app-side validation only | Trivially safe |
 
-forge's `f.enum([...])` declares values at the schema level. Adding a value to the array and pushing produces the ALTER on each dialect. The differ does not re-order enum values — appending is the safe pattern; inserting in the middle on MySQL forces a table rewrite.
+forge's `f.enumOf([...])` declares values at the schema level. Adding a value to the array and pushing produces the ALTER on each dialect. The differ does not re-order enum values — appending is the safe pattern; inserting in the middle on MySQL forces a table rewrite.
 
 The forward-compat caveat: old app code that has the old enum values hard-coded won't *use* the new value, but it also won't *break* on reading rows whose values are still old. The risk is the reverse — old code reading a row whose value is the new enum that the old code doesn't know about. That's a code-side decision: validate against a known set or accept any string.
 

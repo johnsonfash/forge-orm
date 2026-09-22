@@ -115,11 +115,11 @@ export const IdempotencyRecord = model('idempotency_records', {
   idempotency_key: f.string(),
   request_hash:    f.string(),       // sha256 of canonicalised body
   response_status: f.int(),
-  response_body:   f.json().nullable(),
+  response_body:   f.json().optional(),
   state:           f.string().default('pending'),  // 'pending' | 'completed' | 'failed'
-  created_at:      f.timestamp().default('now'),
-  completed_at:    f.timestamp().nullable(),
-  expires_at:      f.timestamp(),
+  created_at:      f.dateTime().default('now'),
+  completed_at:    f.dateTime().optional(),
+  expires_at:      f.dateTime(),
 }, {
   uniques: [['scope', 'idempotency_key']],
   indexes: [

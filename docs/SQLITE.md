@@ -354,7 +354,7 @@ From `dialect.ts` (`columnType()`):
 | `f.dateTime()` | `TEXT` | ISO 8601 string |
 | `f.json()` / `f.embed()` / `f.embedMany()` | `TEXT` | JSON-encoded; `json_extract` for path queries |
 | `f.stringArray()` / `f.intArray()` | `TEXT` | JSON array |
-| `f.enum(...)` | `TEXT` | + `CHECK (col IN (...))` |
+| `f.enumOf(...)` | `TEXT` | + `CHECK (col IN (...))` |
 | `f.geoPoint()` (SpatiaLite available) | `BLOB` | binary WKB |
 | `f.geoPoint({ fallback: true })` | `TEXT` | JSON `{lng,lat}`; Haversine in JS |
 | `f.vector(N)` | `TEXT` | JSON array; sqlite-vec virtual table holds the index |

@@ -432,7 +432,7 @@ stream.on('change', async (event) => {
 
 How this differs from a SQL trigger:
 
-* **Not atomic with the write.** The original `users.update()` commits, then the change-stream consumer sees the event, then it writes the audit row. The consumer can crash between the two. The fix is the [resume-token pattern](#audit-log-trigger) — the consumer stores the last-processed resume token, and on restart resumes from there. The downside is at-least-once delivery (the audit row may be written twice on a crash); idempotency on the audit table covers it.
+* **Not atomic with the write.** The original `users.update()` commits, then the change-stream consumer sees the event, then it writes the audit row. The consumer can crash between the two. The fix is the [resume-token pattern](#d-mongo-change-stream-as-the-trigger-alternative) — the consumer stores the last-processed resume token, and on restart resumes from there. The downside is at-least-once delivery (the audit row may be written twice on a crash); idempotency on the audit table covers it.
 * **Out of process.** The change-stream listener is a worker, not a server-side hook. It can be killed, restarted, scaled horizontally (one consumer per collection, or partitioned by shard key). The DB doesn't care if you have a listener or not.
 * **Requires a replica set.** Standalone `mongod` doesn't support change streams. Atlas and any real production cluster do.
 * **No `BEFORE` analogue.** Change streams fire after the write. To enforce a constraint before the write commits, you need app-layer validation — or Mongo's `validator` schema clause, which fires per-document and is the closest Mongo gets to a `BEFORE` trigger.

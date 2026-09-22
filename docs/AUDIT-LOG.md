@@ -121,18 +121,18 @@ import { model, f } from 'forge-orm';
 
 export const AuditLog = model('audit_log', {
   id:          f.id(),
-  at:          f.timestamp().default(() => new Date()),
+  at:          f.dateTime().default('now'),
   model:       f.string(),
   entity_id:   f.string(),
   action:      f.string(),        // insert | update | delete | softDelete | restore
-  actor_id:    f.string().nullable(),
-  actor_kind:  f.string().nullable(),
-  before:      f.json().nullable(),
-  after:       f.json().nullable(),
-  request_id:  f.string().nullable(),
-  ip:          f.string().nullable(),
-  user_agent:  f.string().nullable(),
-  semantic_op: f.string().nullable(),
+  actor_id:    f.string().optional(),
+  actor_kind:  f.string().optional(),
+  before:      f.json().optional(),
+  after:       f.json().optional(),
+  request_id:  f.string().optional(),
+  ip:          f.string().optional(),
+  user_agent:  f.string().optional(),
+  semantic_op: f.string().optional(),
 }, {
   indexes: [
     ['model', 'entity_id'], ['actor_id', 'at'],
@@ -172,18 +172,18 @@ source plus the audit metadata.
 export const PostHistory = model('post_history', {
   id:           f.id(),
   post_id:      f.string(),      // entity, not an FK — row must survive parent delete
-  at:           f.timestamp().default(() => new Date()),
+  at:           f.dateTime().default('now'),
   action:       f.string(),
-  actor_id:     f.string().nullable(),
+  actor_id:     f.string().optional(),
 
   // mirrored Post fields, all nullable
-  title:        f.string().nullable(),
-  body:         f.string().nullable(),
-  author_id_v:  f.string().nullable(),
-  status:       f.string().nullable(),
-  updated_at_v: f.timestamp().nullable(),
+  title:        f.string().optional(),
+  body:         f.string().optional(),
+  author_id_v:  f.string().optional(),
+  status:       f.string().optional(),
+  updated_at_v: f.dateTime().optional(),
 
-  changed:      f.json().nullable(),   // which fields changed
+  changed:      f.json().optional(),   // which fields changed
 }, {
   indexes: [['post_id', 'at'], ['actor_id', 'at'], ['status', 'at']],
 });
@@ -223,9 +223,9 @@ export const OrderEvent = model('order_events', {
   id:        f.id(),
   order_id:  f.string(),           // the aggregate
   seq:       f.int(),              // monotonic per order_id
-  at:        f.timestamp().default(() => new Date()),
+  at:        f.dateTime().default('now'),
   type:      f.string(),           // 'placed' | 'paid' | 'shipped' | …
-  actor_id:  f.string().nullable(),
+  actor_id:  f.string().optional(),
   payload:   f.json(),
 }, {
   uniques: [['order_id', 'seq']],
@@ -647,7 +647,7 @@ Add two columns:
 ```ts
 export const AuditLog = model('audit_log', {
   // … existing …
-  prev_hash: f.string().nullable(),
+  prev_hash: f.string().optional(),
   row_hash:  f.string(),
 });
 ```
@@ -739,7 +739,7 @@ const pii = await db.auditLog.findMany({
 ```
 
 For multi-million-row exports, stream with cursor pagination —
-see [QUERIES.md](./QUERIES.md#cursor-pagination).
+see [QUERIES.md](./QUERIES.md#findmanystream--cursor-backed-streaming).
 
 ---
 
@@ -890,6 +890,8 @@ audit collection. The application stamps `_audit` on every write so
 the stream handler can recover the actor:
 
 ```ts
+import type { Db } from 'mongodb';
+
 function withAudit<T extends object>(data: T) {
   const ctx = auditCtx.getStore();
   return ctx ? { ...data, _audit: { actor_id: ctx.actor_id, request_id: ctx.request_id } } : data;
@@ -898,8 +900,11 @@ function withAudit<T extends object>(data: T) {
 await db.post.create({ data: withAudit({ title: 'Hello', body: 'World' }) });
 
 async function runAuditStream() {
-  const client = db.$raw();
-  const stream = client.watch(
+  // The Mongo adapter hands out the driver's own handles. `adapter` is typed as
+  // the shared `Adapter` interface, which doesn't declare them, so the cast is
+  // needed — see [MONGO.md](./MONGO.md#adapterdb-and-adaptermongoclient).
+  const mongo = (db.adapter as unknown as { db: Db }).db;
+  const stream = mongo.watch(
     [{ $match: { 'ns.coll': { $nin: ['audit_log', 'sessions'] } } }],
     {
       fullDocument:             'updateLookup',

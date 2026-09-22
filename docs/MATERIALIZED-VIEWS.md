@@ -809,7 +809,7 @@ Use cases that do **not** earn a matview:
 import { f, model } from 'forge-orm';
 
 export const DashboardStats = model('dashboard_stats', {
-  day:                f.date(),
+  day:                f.dateTime(),
   org_id:             f.objectId(),
   orders_placed:      f.int(),
   revenue_cents:      f.bigint(),
@@ -933,7 +933,7 @@ of scope for forge's default emit; write as a custom refresh function.
 ```ts
 export const DailySales = model('daily_sales', {
   _id:                f.string(),               // composite "YYYY-MM-DD:orgId"
-  day:                f.date(),
+  day:                f.dateTime(),
   org_id:             f.objectId(),
   orders_placed:      f.int(),
   revenue_cents:      f.bigint(),

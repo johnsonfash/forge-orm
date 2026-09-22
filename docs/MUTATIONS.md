@@ -992,7 +992,7 @@ const RequestLog = model('request_logs', {
   id:         f.id(),
   request_id: f.string().unique(),
   payload:    f.json(),
-  result:     f.json().nullable(),
+  result:     f.json().optional(),
 });
 
 async function handle(req: Request, body: Body) {
@@ -1122,7 +1122,11 @@ When `createMany` is not enough — sustained ingest above ~150k rows/s —
 drop to the dialect's native bulk path:
 
 * **Postgres**: `COPY … FROM STDIN`. Use the `pg-copy-streams` package
-  and forge's connection via `db.$raw().connection`.
+  against the pool the adapter holds —
+  `(db.adapter as unknown as { pool: Pool }).pool` — and `pool.connect()`
+  for the client you pipe into. See
+  [BATCH.md](./BATCH.md#beyond-createmany--native-bulk-loaders) for the
+  bring-your-own-driver caveat.
 * **MySQL**: `LOAD DATA LOCAL INFILE` from a tempfile. Requires
   `local_infile=ON` on the server.
 * **MSSQL**: `BULK INSERT` from a file or the `tedious` bulkLoad API.
@@ -1190,7 +1194,7 @@ const ProviderEvent = model('provider_events', {
   provider:   f.string(),
   event_id:   f.string(),
   payload:    f.json(),
-  processed:  f.boolean().default(false),
+  processed:  f.bool().default(false),
 }, {
   uniques: [['provider', 'event_id']],
 });

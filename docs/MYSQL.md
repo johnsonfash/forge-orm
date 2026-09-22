@@ -134,7 +134,7 @@ The forge implications:
   supported version. Only reach for `JSON_TABLE` in raw SQL on 8.x.
 * **Expression indexes are 8.0+ on MySQL, 10.5+ on MariaDB** —
   `index({ expression: 'LOWER(name)' })` is the schema form
-  (see [INDEXES](./INDEXES.md#expression-indexes)). On 5.7 the
+  (see [INDEXES](./INDEXES.md#5-expression-indexes)). On 5.7 the
   push fails with `ER_PARSE_ERROR`; the doctor probe surfaces this
   during pre-flight.
 * **Check constraints are advisory on 5.7** — `forge push` still
@@ -182,7 +182,7 @@ defaults err on the safe side for InnoDB row-format limits.
 | `f.bool()` | `TINYINT(1)` (`0`/`1`, never `TRUE`/`FALSE`) |
 | `f.dateTime()` | `DATETIME(3)` — millisecond precision |
 | `f.json()` | `JSON` |
-| `f.enum(['A','B'])` | `VARCHAR(64)` + `CHECK (col IN ('A','B'))` |
+| `f.enumOf(['A','B'])` | `VARCHAR(64)` + `CHECK (col IN ('A','B'))` |
 | `f.embed(M)` | `JSON` |
 | `f.embedMany(M)` | `JSON DEFAULT (JSON_ARRAY())` |
 | `f.stringArray()` / `f.intArray()` | `JSON` |
@@ -322,7 +322,7 @@ collation, store a `name_lc` generated column and filter on that:
 const User = model('users', {
   id:      f.id(),
   name:    f.string(),
-  name_lc: f.string().dbGenerated('LOWER(name)'),
+  name_lc: f.string().dbgenerated('LOWER(name)'),
 });
 // CREATE INDEX … ON users (name_lc);
 await db.user.findMany({ where: { name_lc: { contains: 'él' } } });
@@ -392,7 +392,7 @@ const User = model('users', {
   id:    f.id(),
   meta:  f.json(),
   // age is auto-extracted and indexed for cheap range scans
-  age:   f.int().dbGenerated("CAST(JSON_UNQUOTE(JSON_EXTRACT(meta, '$.profile.age')) AS UNSIGNED)"),
+  age:   f.int().dbgenerated("CAST(JSON_UNQUOTE(JSON_EXTRACT(meta, '$.profile.age')) AS UNSIGNED)"),
 }, {
   indexes: [{ keys: { age: 1 }, name: 'idx_users_age' }],
 });
@@ -419,7 +419,7 @@ const sql = forge.sql`
 const rows = await db.$queryRaw(sql);
 ```
 
-See [RAW-SQL](./RAW-SQL.md#interpolation-rules) for the safe
+See [RAW-SQL](./RAW-SQL.md#identifier-vs-value-interpolation) for the safe
 interpolation rules.
 
 ### `null` in a JSON column
@@ -611,7 +611,7 @@ column must share the SRID, or the query throws
 `POINT Z` — only the 2D ground point is indexed and stored. The
 adapter drops `alt` at the storage layer; the JSON-shape round-trip
 happens via a sibling scalar column. See
-[GEO](./GEO.md#3d-points-and-altitude) for the round-trip pattern.
+[GEO](./GEO.md#3d-coordinates) for the round-trip pattern.
 
 ---
 

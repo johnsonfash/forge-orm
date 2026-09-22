@@ -265,9 +265,11 @@ export const Patient = model('patients', {
   id: f.id(),
   email: f.string(),
   // The ciphertext column. Never index unless it's deterministic — see below.
-  ssn_ciphertext: f.bytes().nullable(),
+  ssn_ciphertext: f.bytes().optional(),
   // A search blind index if you need lookups — see Encrypted indexes.
-  ssn_blind_index: f.string().nullable().index(),
+  ssn_blind_index: f.string().optional(),
+}, {
+  indexes: [{ keys: { ssn_blind_index: 1 } }],
 });
 ```
 
@@ -409,14 +411,18 @@ export function blindIndex(key: Buffer, plaintext: string, truncBytes = 8): stri
 }
 ```
 
-In the schema, the blind-index column is just a `f.string().index()`:
+In the schema, the blind-index column is just a `f.string()` with an index
+declared in the model's `indexes` option — there is no `.index()` field
+modifier:
 
 ```ts
 export const User = model('users', {
   id: f.id(),
   email_ciphertext: f.bytes(),
-  email_blind_index: f.string().index(),
-  created_at: f.timestamp().defaultNow(),
+  email_blind_index: f.string(),
+  created_at: f.dateTime().default('now'),
+}, {
+  indexes: [{ keys: { email_blind_index: 1 } }],
 });
 ```
 
@@ -670,10 +676,12 @@ export const Patient = model('patients', {
   id: f.id(),
   mrn: f.string().unique(),
   name: f.string(),
-  ssn_ciphertext: f.bytes().nullable(),
-  ssn_blind_index: f.string().nullable().index(),
-  ssn_dek_wrapped: f.bytes().nullable(),
-  created_at: f.timestamp().defaultNow(),
+  ssn_ciphertext: f.bytes().optional(),
+  ssn_blind_index: f.string().optional(),
+  ssn_dek_wrapped: f.bytes().optional(),
+  created_at: f.dateTime().default('now'),
+}, {
+  indexes: [{ keys: { ssn_blind_index: 1 } }],
 });
 ```
 

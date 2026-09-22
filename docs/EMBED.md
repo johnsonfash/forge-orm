@@ -396,7 +396,7 @@ const User = model('users', {
   address: f.embed(AddressEmbed).optional(),
   // Hot path — extracted as a generated column the index can target.
   address_city: f.string().optional()
-    .dbGenerated({
+    .dbgenerated({
       pg:     `("address"->>'city')`,
       mysql:  `(JSON_UNQUOTE(JSON_EXTRACT(address, '$.city')))`,
       sqlite: `(json_extract(address, '$.city'))`,
@@ -610,12 +610,12 @@ const Contact = model('contacts', {
   address: f.embed(AddressEmbed),
 
   // Hot paths extracted for index
-  city: f.string().optional().dbGenerated({
+  city: f.string().optional().dbgenerated({
     pg:     `("address"->>'city')`,
     mysql:  `(JSON_UNQUOTE(JSON_EXTRACT(address, '$.city')))`,
     sqlite: `(json_extract(address, '$.city'))`,
   }),
-  postcode: f.string().optional().dbGenerated({
+  postcode: f.string().optional().dbgenerated({
     pg:     `("address"->>'postcode')`,
     mysql:  `(JSON_UNQUOTE(JSON_EXTRACT(address, '$.postcode')))`,
     sqlite: `(json_extract(address, '$.postcode'))`,
@@ -1007,7 +1007,7 @@ const Article = model('articles', {
     summary:  f.string(),
     content:  f.string(),
   })),
-  search: f.text().searchable().dbGenerated({
+  search: f.text().searchable().dbgenerated({
     pg: `(setweight(to_tsvector('english', body->>'title'),   'A') ||
           setweight(to_tsvector('english', body->>'summary'), 'B') ||
           setweight(to_tsvector('english', body->>'content'), 'C'))`,
@@ -1022,7 +1022,7 @@ await db.article.findMany({ where: { search: { search: 'forge migration' } } });
 ### MySQL — `FULLTEXT` over a generated column
 
 ```ts
-search: f.string().dbGenerated({
+search: f.string().dbgenerated({
   mysql: `(CONCAT_WS(' ',
     JSON_VALUE(body, '$.title'),
     JSON_VALUE(body, '$.summary'),

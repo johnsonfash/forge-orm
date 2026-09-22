@@ -172,7 +172,7 @@ DuckDB values:
 The `nativeCascades: false` flag is the one that changes runtime
 behaviour you might not expect. A `delete()` on a parent row triggers
 the wrapper's cascade walker — see
-[RELATIONS.md → On-delete behaviour](./RELATIONS.md#on-delete) — which
+[RELATIONS.md → On-delete behaviour](./RELATIONS.md#cascade-rules) — which
 issues one `DELETE` per dependent collection. This is correct but
 slower than a native cascade. If you cascade-delete millions of rows
 on DuckDB, batch the IDs and run the deletes yourself, or treat the
@@ -200,7 +200,7 @@ the `columnType()` method. The full table:
 | `f.bool()` | `BOOLEAN` | |
 | `f.dateTime()` | `TIMESTAMPTZ` | stored UTC, surfaced as JS `Date` |
 | `f.json()` | `JSON` | native logical type — dictionary-encoded on disk, columnar |
-| `f.enum(values)` | `VARCHAR` + `CHECK` | DuckDB has a native `ENUM` type but the forge dialect emits a `CHECK` constraint to stay parameter-only |
+| `f.enumOf(values)` | `VARCHAR` + `CHECK` | DuckDB has a native `ENUM` type but the forge dialect emits a `CHECK` constraint to stay parameter-only |
 | `f.embed(shape)` | `JSON` | embedded sub-document; see [EMBED.md](./EMBED.md) |
 | `f.embedMany(shape)` | `JSON` | array of embedded sub-documents |
 | `f.stringArray()` | `VARCHAR[]` | DuckDB has native list types — no JSON marshalling at read time |
@@ -229,7 +229,7 @@ Three points worth flagging:
 
 For the full type list against all six dialects see
 [TYPES.md](./TYPES.md). For the embed / embedMany emit see
-[EMBED.md → DuckDB](./EMBED.md#duckdb).
+[EMBED.md → DuckDB](./EMBED.md#per-dialect-storage).
 
 ---
 
@@ -597,7 +597,7 @@ table and the index-time tradeoffs, sits in
 [JSON-PATH.md → DuckDB](./JSON-PATH.md#duckdb).
 
 For the embed / embedMany API surface and how it maps to JSON on
-DuckDB see [EMBED.md → DuckDB](./EMBED.md#duckdb).
+DuckDB see [EMBED.md → DuckDB](./EMBED.md#per-dialect-storage).
 
 ---
 
@@ -930,7 +930,7 @@ patterns to Prisma-style P-codes. The high-frequency cases:
 | DuckDB error | Forge code | Cause |
 |---|---|---|
 | `Constraint Error: duplicate key … UNIQUE constraint` | `P2002` | `nativeUpsert` not used; insert into a unique column. Convert to `upsert()` or catch and handle. |
-| `Constraint Error: NOT NULL` | `P2011` | Insert/update with `null` against a `NOT NULL` column. Schema fields without `.nullable()` emit NOT NULL. |
+| `Constraint Error: NOT NULL` | `P2011` | Insert/update with `null` against a `NOT NULL` column. Schema fields without `.optional()` emit NOT NULL. |
 | `Constraint Error: CHECK constraint` | `P2004` | Likely an enum mismatch — forge enums emit `CHECK ("col" IN ('a','b','c'))`. Add the value to the schema's enum and push. |
 | `Constraint Error: foreign key` | `P2003` | Rare — DuckDB doesn't enforce FKs at write time. This fires if you wrote a check via raw SQL. |
 | `Catalog Error: Table … does not exist` | `P2021` | Schema not pushed, wrong DB attached, or you're querying an `ATTACH`ed catalog without the qualifier. |
@@ -1162,7 +1162,7 @@ on the API node's local disk. Total cost: zero additional infra.
   expression indexes, the typed `path` operator.
 - [FTS.md → DuckDB and MSSQL](./FTS.md#duckdb-and-mssql) — the `fts`
   extension, `match_bm25`, and the ILIKE fallback.
-- [EMBED.md → DuckDB](./EMBED.md#duckdb) — `f.embed()` / `f.embedMany()`
+- [EMBED.md → DuckDB](./EMBED.md#per-dialect-storage) — `f.embed()` / `f.embedMany()`
   emit to native JSON.
 - [TYPES.md](./TYPES.md) — the full type table across all six
   dialects.

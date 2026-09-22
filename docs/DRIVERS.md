@@ -425,7 +425,7 @@ Five things any sqlite driver wrapper has to get right:
 
 You can run `db.$migrate()` on any sqlite driver — including
 `tauriSqlDriver` — to apply the schema at runtime. See
-[BROWSER](./BROWSER.md#runtime-migrate).
+[BROWSER](./BROWSER.md#dbmigrate--runtime-ddl-apply--drift-detection).
 
 ---
 
@@ -716,7 +716,7 @@ the database.
 
 Browser drivers also have `browserDoctor()` that probes OPFS, SAB,
 and persistent storage in addition to SQLite features. See
-[BROWSER](./BROWSER.md#doctor).
+[BROWSER](./BROWSER.md#browserdoctor--runtime-capability-probe).
 
 ---
 

@@ -614,8 +614,8 @@ export const Project = model('projects', {
   id:         f.id(),
   org_id:     f.objectId(),
   name:       f.string(),
-  archived:   f.boolean().default(false),
-  created_at: f.dateTime().createdAt(),
+  archived:   f.bool().default(false),
+  created_at: f.dateTime().default('now'),
 });
 
 // View: only projects for the current tenant, only non-archived ones.

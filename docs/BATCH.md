@@ -724,10 +724,14 @@ bypasses the prepared-statement protocol and the typed model
 wrapper:
 
 * **Postgres `COPY FROM STDIN`** — the canonical bulk path. Use
-  `pg-copy-streams` against the underlying `pg.Pool` exposed by
-  `db.$raw().connection`. Streaming-friendly: pipe a CSV / NDJSON
-  stream straight into the COPY socket. Typical throughput: 500k-1M
-  rows/s on a single client.
+  `pg-copy-streams` against the `pg.Pool` the adapter holds:
+  `(db.adapter as unknown as { pool: Pool }).pool`, then `pool.connect()`
+  for the client to pipe into. That getter returns a real pool only when
+  forge opened the connection from a URL; with a bring-your-own
+  `pgDriver(myPool)` it hands back the queryable port, which has no
+  `.connect()` — keep your own `Pool` reference for the COPY path in that
+  setup. Streaming-friendly: pipe a CSV / NDJSON stream straight into the
+  COPY socket. Typical throughput: 500k-1M rows/s on a single client.
 * **MySQL `LOAD DATA LOCAL INFILE`** — stream a tempfile through
   the wire. Requires `local_infile=ON` on the server. The mysql2
   driver supports it via the `infileStreamFactory` option.

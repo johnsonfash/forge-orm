@@ -118,7 +118,7 @@ sticks with `NUMERIC` / `DECIMAL` so the column is portable.
 
 If you want to emit a literal `MONEY` column (for compatibility with an
 existing schema), use `f.text()` and the migration writer's escape hatch —
-see [MIGRATIONS.md](./MIGRATIONS.md#native-column-types).
+see [MIGRATIONS.md](./MIGRATIONS.md#per-dialect-emit-table).
 
 ---
 

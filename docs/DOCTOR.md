@@ -2,7 +2,7 @@
 
 `forge doctor` (CLI) and `db.$doctor()` / `browserDoctor()` (runtime) are live capability probes. They connect to the actual database and report what features are present, what's missing, and what to do about each gap.
 
-Companion to the README's **[Doctor](../README.md#doctor)** note and the [MIGRATIONS](./MIGRATIONS.md#forge-doctor) deep-dive's `forge doctor` section. That section is the one-paragraph tour; this file is the full reference: every probe per dialect, the `DoctorReport` shape, fix recipes for each failure mode, and how to wire doctor into CI and production readiness probes.
+Companion to the README's **[Doctor](../README.md#forge-doctor--live-capability-probe)** note and the [MIGRATIONS](./MIGRATIONS.md#forge-doctor) deep-dive's `forge doctor` section. That section is the one-paragraph tour; this file is the full reference: every probe per dialect, the `DoctorReport` shape, fix recipes for each failure mode, and how to wire doctor into CI and production readiness probes.
 
 The browser-side equivalent — `browserDoctor()` for the wasm adapter — is the same idea adapted for a Web Worker and OPFS instead of a Postgres pool. The runtime `$doctor()` dispatches to the right implementation based on the active adapter.
 
@@ -782,7 +782,7 @@ Pair this with the React Query `db-health` query in [the runtime example](#runti
 * **[VECTOR.md](./VECTOR.md)** — `f.vector()` and per-dialect drivers. If doctor reports `sqliteVec: false`, this is where the fallback path is documented.
 * **[FTS.md](./FTS.md)** — `.searchable()` per-dialect. If doctor reports `fts5: false` or warns about a missing FULLTEXT setup, this explains what the fallback does.
 * **[DRIVERS.md](./DRIVERS.md)** — adapter / driver matrix. Cross-check what `report.driverPackage` means and which custom drivers can be injected via `createDb({ driver })`.
-* **README's [Doctor](../README.md#doctor) note** — one-paragraph entry point. This file is the deep reference.
+* **README's [Doctor](../README.md#forge-doctor--live-capability-probe) note** — one-paragraph entry point. This file is the deep reference.
 
 Back to the [README index](../README.md#contents).
 

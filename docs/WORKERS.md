@@ -789,7 +789,7 @@ export const User = model('users', {
   id: f.id(),
   email: f.string().unique(),
   name: f.string(),
-  createdAt: f.datetime().now(),
+  createdAt: f.dateTime().default('now'),
 });
 export const schema = { user: User };
 ```

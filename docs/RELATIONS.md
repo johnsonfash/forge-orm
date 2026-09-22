@@ -1139,7 +1139,7 @@ const User = model('users', { id: f.id(), email: f.string().unique(), name: f.st
 
 const Post = model('posts', {
   id: f.id(), author_id: f.objectId(), title: f.string(), body: f.text(),
-  status: f.enum(['DRAFT', 'PUBLISHED']).default('DRAFT'),
+  status: f.enumOf(['DRAFT', 'PUBLISHED']).default('DRAFT'),
 }).relate(() => ({
   author:   rel.one('user',     { on: 'author_id', refs: 'id', onDelete: 'Cascade' }),
   comments: rel.many('comment', { on: 'post_id',   refs: 'id' }),
@@ -1283,7 +1283,7 @@ user `SetNull`s the buyer (audit-safe orphan), deleting an order
 const Order = model('orders', {
   id: f.id(), buyer_id: f.objectId().optional(),
   total: f.decimal({ scale: 2 }),
-  status: f.enum(['PLACED', 'PAID', 'SHIPPED', 'CANCELLED']),
+  status: f.enumOf(['PLACED', 'PAID', 'SHIPPED', 'CANCELLED']),
   deleted_at: f.dateTime().softDeleteAt(),
 })
   .relate(() => ({

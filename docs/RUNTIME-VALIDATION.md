@@ -209,10 +209,10 @@ const User = model('users', {
   id:         f.id(),
   email:      f.string().unique(),
   name:       f.string(),
-  role:       f.enumOf('member', 'admin', 'owner').default('member'),
+  role:       f.enumOf(['member', 'admin', 'owner']).default('member'),
   created_at: f.dateTime().default('now'),
   updated_at: f.dateTime().updatedAt(),
-  deleted_at: f.dateTime().nullable(),
+  deleted_at: f.dateTime().optional(),
 });
 ```
 
@@ -714,7 +714,7 @@ const User = model('users', {
   id:    f.id(),
   email: f.string().unique(),
   name:  f.string(),
-  age:   f.int().nullable(),
+  age:   f.int().optional(),
 });
 
 // Hand-write the API input schema:

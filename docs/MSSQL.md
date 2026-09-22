@@ -181,9 +181,9 @@ when `forge push` runs against MSSQL:
 | `f.dateTime()`           | `DATETIMEOFFSET`          | Preserves the timezone offset. `DATETIME2` is the no-tz alternative — drop down via `$queryRaw` if you need it. `DATETIME` (the legacy 1900-9999 type) is intentionally not emitted; its 3.33ms precision is a footgun. |
 | `f.uuid()`               | `UNIQUEIDENTIFIER`        | Distinct from `id(\|'uuid')` only in that this is a regular column. |
 | `f.json()`               | `NVARCHAR(MAX)`           | SQL Server 2025 adds a real `JSON` type — forge stays on `NVARCHAR(MAX)` for portability. `ISJSON()` check constraint not added; declare it via `$executeRaw` if you want write-time validation. |
-| `f.embed(...)` / `embedMany(...)` | `NVARCHAR(MAX)` | Adapter `coerceInbound` does `JSON.stringify` on write. Reads come back as text — see [EMBED](./EMBED.md#mssql) for the auto-parse hook. |
+| `f.embed(...)` / `embedMany(...)` | `NVARCHAR(MAX)` | Adapter `coerceInbound` does `JSON.stringify` on write. Reads come back as text — see [EMBED](./EMBED.md#per-dialect-storage) for the auto-parse hook. |
 | `f.stringArray()` / `intArray()` | `NVARCHAR(MAX)` | T-SQL has no array type. Stored as JSON, read with `OPENJSON` or `JSON_VALUE`. The IR's array operators (`in`, `contains`) compile to `OPENJSON`-backed subqueries. |
-| `f.enum(...)`            | `NVARCHAR(255)` + CHECK   | `CHECK ([col] IN ('a', 'b', …))` added at table-create time. Adding a value later means dropping + recreating the CHECK — see [MIGRATIONS](./MIGRATIONS.md#enum-drift). |
+| `f.enumOf(...)`            | `NVARCHAR(255)` + CHECK   | `CHECK ([col] IN ('a', 'b', …))` added at table-create time. Adding a value later means dropping + recreating the CHECK — see [MIGRATIONS](./MIGRATIONS.md). |
 | `f.geoPoint()`           | `GEOGRAPHY`               | Default — WGS84. See [Spatial](#spatial--geography-and-geometry). |
 | `f.geoPoint({ fallback: true })` | `NVARCHAR(MAX)` | JSON `{lat, lng}` fallback for editions without spatial (Azure SQL Edge). |
 | `f.vector(N)`            | `VECTOR(N)`               | SQL Server 2025 only. Earlier targets need a JSON-stored fallback; see [Vector](#vector--json-fallback-and-sql-server-2025). |
@@ -623,7 +623,7 @@ FULLTEXT INDEX … START FULL POPULATION`.
 Azure SQL Database does **not** support full-text search — Azure SQL
 Managed Instance does. If you need FTS on Azure SQL, switch to MI or
 fall back to `LIKE` / a sidecar (Elasticsearch / Meilisearch). See
-[FTS](./FTS.md#mssql) for the long-form companion.
+[FTS](./FTS.md#duckdb-and-mssql) for the long-form companion.
 
 ---
 
@@ -713,7 +713,7 @@ The polygon is converted to WKT with `lng lat` ordering (the
 `'lng-lat'` axis hint in `toGeoWKT`) to match SQL Server's
 expectation. MultiPolygon and GeometryCollection work the same way —
 the WKT helper handles both, and SRID defaults to 4326. See
-[GEO](./GEO.md#mssql) for the cross-dialect deep dive.
+[GEO](./GEO.md#dialect-feature-matrix) for the cross-dialect deep dive.
 
 ### Azure SQL Edge
 
@@ -750,7 +750,7 @@ SELECT … FROM [events] WHERE JSON_VALUE([meta], '$.source') = @p1;
 
 `JSON_VALUE` returns NVARCHAR(4000). For ints/floats wrap with
 `CAST`; forge does that automatically for typed `f.json()` access via
-the typed-path API (see [JSON-PATH](./JSON-PATH.md#mssql)). Untyped
+the typed-path API (see [JSON-PATH](./JSON-PATH.md#mssql-2016)). Untyped
 `{path:[…], eq: 42}` compares against the string `'42'` — equal under
 T-SQL implicit conversion but not index-eligible.
 
@@ -797,7 +797,7 @@ CROSS APPLY OPENJSON([items])
 WHERE [orders].[id] = @p1;
 ```
 
-See [JSON-PATH](./JSON-PATH.md#mssql) for the typed JSON access pattern.
+See [JSON-PATH](./JSON-PATH.md#mssql-2016) for the typed JSON access pattern.
 
 ---
 
@@ -840,7 +840,7 @@ dominates. Options:
   native `VECTOR_DISTANCE` predicate. The dialect already emits it;
   doctor probes for the version and reports availability.
 
-See [VECTOR](./VECTOR.md#mssql) for the full strategy doc.
+See [VECTOR](./VECTOR.md#picking-a-dialect) for the full strategy doc.
 
 ---
 
@@ -1128,9 +1128,9 @@ which throttles throughput.
 * [DRIVERS](./DRIVERS.md#mssqldriver) — the `MssqlDriver` port contract, common bugs (`@p1` unbound), wire-compatible swaps (Azure SQL Edge).
 * [QUERIES](./QUERIES.md) — `findMany`, `findFirst`, `where`, `orderBy`, `groupBy`, cursor pagination — adapter-agnostic.
 * [INDEXES](./INDEXES.md) — `f.index()` / `f.unique()` shape and what the MSSQL DDL writes (partial-filter via `WHERE`, computed-column tricks).
-* [FTS](./FTS.md#mssql) — full-text deep dive across all six dialects; MSSQL catalog provisioning recipes.
-* [GEO](./GEO.md#mssql) — spatial type / WKT axis conventions / withinPolygon / MultiPolygon.
-* [JSON-PATH](./JSON-PATH.md#mssql) — typed JSON path access, OPENJSON projections, computed-column indexing.
+* [FTS](./FTS.md#duckdb-and-mssql) — full-text deep dive across all six dialects; MSSQL catalog provisioning recipes.
+* [GEO](./GEO.md#dialect-feature-matrix) — spatial type / WKT axis conventions / withinPolygon / MultiPolygon.
+* [JSON-PATH](./JSON-PATH.md#mssql-2016) — typed JSON path access, OPENJSON projections, computed-column indexing.
 * [MUTATIONS](./MUTATIONS.md) — `create`, `update`, `delete`, `upsert` shapes; the MERGE rewrite is the MSSQL specialisation.
 * [TRANSACTIONS](./TRANSACTIONS.md) — `db.$transaction(fn)` semantics; per-adapter session shape including `MssqlQueryable`.
 * [MIGRATIONS](./MIGRATIONS.md) — `forge push`, plan/apply, idempotent DDL wrappers (`IF NOT EXISTS (sys.tables …) BEGIN … END`).

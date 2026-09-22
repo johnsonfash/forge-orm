@@ -179,7 +179,7 @@ const Doc = model('docs', {
   title:      f.string(),
   body:       f.string(),
   version:    f.int().default(0),
-  updated_at: f.dateTime().now(),
+  updated_at: f.dateTime().default('now'),
 });
 
 async function saveDoc(id: string, body: string, expected: number) {
@@ -734,7 +734,7 @@ const Doc = model('docs', {
   id:           f.id(),
   body:         f.string(),
   version:      f.int().default(0),
-  pending_sync: f.boolean().default(false),    // local-only sync metadata
+  pending_sync: f.bool().default(false),    // local-only sync metadata
 });
 
 // Local write — save and mark pending.

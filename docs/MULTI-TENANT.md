@@ -91,7 +91,7 @@ import { f, model } from 'forge-orm';
 const Org = model('orgs', {
   id: f.id(),
   name: f.string(),
-  created_at: f.dateTime().defaultNow(),
+  created_at: f.dateTime().default('now'),
 });
 
 const User = model('users', {
@@ -113,7 +113,7 @@ const Order = model('orders', {
   tenant_id: f.string(),
   user_id: f.string(),
   total: f.float(),
-  created_at: f.dateTime().defaultNow(),
+  created_at: f.dateTime().default('now'),
 }, {
   indexes: [
     { keys: { tenant_id: 1, created_at: -1 }, name: 'idx_orders_tenant_recent' },

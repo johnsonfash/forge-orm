@@ -226,7 +226,7 @@ The README is the surface reference. For more depth — extra examples, edge cas
 | Type safety — `Row`, every `Infer*` helper, `ForgeOf` / `ForgeModels`, autocomplete tricks, generics, 5 worked patterns | **[docs/TYPES.md](docs/TYPES.md)** |
 | Primary keys — UUIDv4 vs v7 vs ULID vs Snowflake vs serial, fragmentation, per-dialect emit, migration | **[docs/PRIMARY-KEYS.md](docs/PRIMARY-KEYS.md)** |
 | Foreign keys — REFERENCES emit, onDelete/onUpdate, deferred checking, composite, online add, per-dialect quirks | **[docs/FOREIGN-KEYS.md](docs/FOREIGN-KEYS.md)** |
-| Enums — `f.enum(...)`, per-dialect emit, evolution (adding values online, expand/contract), lookup-table alternative | **[docs/ENUMS.md](docs/ENUMS.md)** |
+| Enums — `f.enumOf(...)`, per-dialect emit, evolution (adding values online, expand/contract), lookup-table alternative | **[docs/ENUMS.md](docs/ENUMS.md)** |
 | CHECK constraints — DB-enforced row invariants, `NOT VALID`+`VALIDATE`, NULL semantics, vs zod, Mongo `$jsonSchema` | **[docs/CHECKS.md](docs/CHECKS.md)** |
 | Generated columns — STORED vs VIRTUAL, indexable JSON extracts, per-dialect matrix, common patterns | **[docs/GENERATED-COLUMNS.md](docs/GENERATED-COLUMNS.md)** |
 | Views — `CREATE VIEW`, updatable rules, SECURITY_BARRIER, indexed views, Mongo collection views | **[docs/VIEWS.md](docs/VIEWS.md)** |

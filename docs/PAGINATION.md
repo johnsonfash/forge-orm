@@ -209,7 +209,7 @@ sequential scan and the page-N pattern is as slow as offset. See
 [INDEXES](./INDEXES.md#2-plain-b-tree) for the declaration:
 
 ```ts
-const post = f.model('post', { /* … */ }, {
+const post = model('post', { /* … */ }, {
   indexes: [{ fields: ['created_at', 'id'] }],
 });
 ```
@@ -671,7 +671,7 @@ export function PostFeed({ orgId }: { orgId: string }) {
 }
 ```
 
-See [React patterns](./REACT.md#search-as-you-type-with-debounce--cursor-pagination)
+See [React patterns](./REACT.md#f-search-as-you-type-with-debounce--cursor-pagination)
 for the search-as-you-type variant with `useDeferredValue` +
 `useTransition`.
 
@@ -743,7 +743,7 @@ inequality is applied independently.
 the scan reads them, and the filter discards them downstream:
 
 ```ts
-const post = f.model('post', { /* … */ }, {
+const post = model('post', { /* … */ }, {
   indexes: [{ fields: ['created_at', 'id'], where: { deleted_at: null } }],
 });
 ```
@@ -836,7 +836,7 @@ Backing index — leading column is the multi-tenant scope, then the
 in-filter equality, then the sort tuple:
 
 ```ts
-const post = f.model('post', { /* … */ }, {
+const post = model('post', { /* … */ }, {
   indexes: [{
     fields: ['org_id', 'status', 'created_at', 'id'],
     where:  { deleted_at: null },
@@ -997,7 +997,7 @@ switch to cursor.
 
 - [Queries deep-dive](./QUERIES.md) — `findMany` operator reference,
   `where` / `orderBy` shapes, and the original cursor sketch.
-- [React patterns](./REACT.md#search-as-you-type-with-debounce--cursor-pagination)
+- [React patterns](./REACT.md#f-search-as-you-type-with-debounce--cursor-pagination)
   — TanStack Query `useInfiniteQuery` with debounced search.
 - [Backend patterns](./BACKEND.md) — HTTP envelopes, ETag, idempotency.
 - [Indexes](./INDEXES.md#2-plain-b-tree) — compound and partial indexes

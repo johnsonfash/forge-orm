@@ -696,7 +696,7 @@ const AuditLog = model('audit_log', {
   before:     f.json().optional(),    // null on create
   after:      f.json().optional(),    // null on delete
   actor_id:   f.objectId().optional(),
-  at:         f.dateTime().createdAt(),
+  at:         f.dateTime().default('now'),
 }, {
   indexes: [
     { keys: { table_name: 1, row_id: 1, at: -1 } },
@@ -746,7 +746,7 @@ const WebhookEvent = model('webhook_events', {
   event_type:   f.string(),                 // 'invoice.paid'
   delivery_id:  f.string().unique(),        // dedupe
   payload:      f.json(),
-  received_at:  f.dateTime().createdAt(),
+  received_at:  f.dateTime().default('now'),
   processed_at: f.dateTime().optional(),
   attempts:     f.int().default(0),
 }, {

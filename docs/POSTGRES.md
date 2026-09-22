@@ -813,7 +813,7 @@ across pool borrows. This is the cleanest tenant-isolation pattern on
 Postgres — it works with any forge query because the policy is enforced
 below the SQL forge emits.
 
-See [BACKEND](./BACKEND.md#tenant-isolation) for the full pattern,
+See [BACKEND](./BACKEND.md#multi-tenant-patterns) for the full pattern,
 including a recipe for swapping `current_setting` for a JWT claim via
 `set_config()`.
 

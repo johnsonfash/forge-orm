@@ -144,7 +144,7 @@ await db.providerEvent.upsert({
 The compound form uses the synthesized key name forge generates from
 the `uniques: [['provider', 'event_id']]` declaration — `<col1>_<col2>`
 joined with an underscore. See
-[`docs/INDEXES.md`](./INDEXES.md#compound-unique-keys) for the naming
+[`docs/INDEXES.md`](./INDEXES.md#auto-name-convention) for the naming
 rules and how to override them.
 
 ### Non-eq filters in `where` are silently ignored
@@ -452,7 +452,7 @@ degenerates to "insert always" (since there is nothing to conflict
 with). See the duplicate-row pitfall below.
 
 The memory entry
-[`feedback_forge_atomic_and_db_unique`](../README.md#repo-pattern--atomic-upsert-is-mandatory)
+[`feedback_forge_atomic_and_db_unique`](#repo-pattern--atomic-upsert-is-mandatory)
 captures this rule as a project-level standard — all dallio repos that
 do create-or-update must use atomic `upsert`, not `findFirst` + branch.
 See [Repo pattern](#repo-pattern--atomic-upsert-is-mandatory) below.
@@ -819,7 +819,7 @@ The rule is: every upsert `where` column-set must be DB-enforced unique.
 Either declare `.unique()` on the column, `uniques: [['col1', 'col2']]`
 on the model, or `indexes: [{ on: […], unique: true }]` if the
 constraint needs a partial filter. See
-[`docs/INDEXES.md`](./INDEXES.md#unique-indexes-and-partial-filters).
+[`docs/INDEXES.md`](./INDEXES.md#4-partial-filter-indexes).
 
 ### Composite primary key with a `NULL` part
 
@@ -836,7 +836,7 @@ The fix is either:
 * mark the columns as `NOT NULL` so the issue cannot arise (the
   default for primary-key columns), or
 * use a `UNIQUE INDEX` with `NULLS NOT DISTINCT` (Postgres 15+) — see
-  [`docs/POSTGRES.md`](./POSTGRES.md#unique-index-with-nulls-not-distinct)
+  [`docs/POSTGRES.md`](./POSTGRES.md)
   for the syntax and the cross-dialect simulation forge provides for
   older versions.
 
@@ -887,7 +887,7 @@ unique-indexed `ON` clause, so the dialect's row-level locks on the
 unique-index B-tree already serialise the conflict check. If your
 schema or your isolation level is unusual enough that this matters,
 drop to `$executeRaw` and add the hint. See
-[`docs/MSSQL.md`](./MSSQL.md#merge-and-concurrency).
+[`docs/MSSQL.md`](./MSSQL.md#merge-caveats).
 
 ### Mongo without a unique index
 
@@ -923,7 +923,7 @@ const RequestLog = model('request_logs', {
   id:          f.id(),
   request_id:  f.string().unique(),
   payload:     f.json(),
-  result:      f.json().nullable(),
+  result:      f.json().optional(),
   status:      f.string().default('pending'),
 });
 
@@ -1012,8 +1012,8 @@ const Bookmark = model('bookmarks', {
   id:       f.id(),
   user_id:  f.string(),
   url:      f.string(),
-  title:    f.string().nullable(),
-  saved_at: f.timestamp().default('now()'),
+  title:    f.string().optional(),
+  saved_at: f.dateTime().default('now'),
 }, {
   uniques: [['user_id', 'url']],
 });
@@ -1042,7 +1042,7 @@ hit:
 const PageView = model('page_views', {
   url:        f.string(),
   count:      f.int().default(0),
-  last_view:  f.timestamp(),
+  last_view:  f.dateTime(),
 }, {
   uniques: [['url']],
 });
@@ -1072,7 +1072,7 @@ existing and incoming score:
 const HighScore = model('high_scores', {
   player_id: f.string().unique(),
   score:     f.int(),
-  set_at:    f.timestamp(),
+  set_at:    f.dateTime(),
 });
 
 async function reportScore(playerId: string, score: number) {
@@ -1134,8 +1134,8 @@ User profile that records `first_seen` (set once, never updated) and
 ```ts
 const Profile = model('profiles', {
   user_id:    f.string().unique(),
-  first_seen: f.timestamp(),
-  last_seen:  f.timestamp(),
+  first_seen: f.dateTime(),
+  last_seen:  f.dateTime(),
 });
 
 async function touchProfile(userId: string) {
@@ -1213,9 +1213,9 @@ const WebhookEvent = model('webhook_events', {
   id:           f.id(),
   provider:     f.string(),
   event_id:     f.string(),
-  received_at:  f.timestamp().default('now()'),
+  received_at:  f.dateTime().default('now'),
   payload:      f.json(),
-  processed:    f.boolean().default(false),
+  processed:    f.bool().default(false),
 }, {
   uniques: [['provider', 'event_id']],
 });

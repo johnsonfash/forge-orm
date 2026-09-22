@@ -20,7 +20,7 @@ Related deep-dives:
 
 * [MODEL.md](./MODEL.md#boolean-and-datetime) — `f.dateTime()` in the
   field catalogue.
-* [TYPES.md](./TYPES.md#row-typeof-model) — what `Row` resolves to per
+* [TYPES.md](./TYPES.md#rowtypeof-model) — what `Row` resolves to per
   builder.
 * [RUNTIME-VALIDATION.md](./RUNTIME-VALIDATION.md) — zod transforms for
   parsing dates at API boundaries.
@@ -839,7 +839,7 @@ const Audit = model('audit', {
 });
 ```
 
-The `method` knob is defined in [INDEXES.md](./INDEXES.md#method) —
+The `method` knob is defined in [INDEXES.md](./INDEXES.md#7-index-methods) —
 forge passes it through to PG and ignores it on dialects that don't
 support BRIN. For non-time-series workloads (random reads, point
 lookups by date), B-tree wins; BRIN only pays for itself when reads

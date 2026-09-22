@@ -37,7 +37,7 @@ Three things forge guarantees by construction, and three things it deliberately 
 
 1. **Every typed query is fully parameterised.** `findMany`, `findFirst`, `create`, `update`, `delete`, `upsert`, `aggregate`, `groupBy` — the whole typed surface — emits SQL where every user-controllable value travels in the driver's params array, never spliced into the SQL string. The compiler in `src/raw-sql.ts` is the only path that produces a parameter; the typed planners feed it the same way `$queryRaw` does. There is no public API on a typed call that string-concatenates a value into SQL.
 2. **The `forgeSql` template tag follows the same rule.** Anything inside `${…}` that is a value gets bound; anything that is a pre-built `SqlFragment` gets inlined as SQL. The renumbering across nested fragments (covered in [RAW-SQL.md](./RAW-SQL.md#composing-sqlfragments)) means there is no way for a parameter from one fragment to escape into another's SQL surface.
-3. **The Mongo channel is BSON, not strings.** `db.<model>.find`, `aggregate`, and `$runCommandRaw` all build BSON documents and ship them through the driver. There is no SQL injection equivalent on Mongo because there is no SQL; what there *is* is operator injection (a user-supplied `{ $ne: null }`), and the typed surface refuses to accept operator objects from untyped input. See [MONGO.md](./MONGO.md#operator-injection) when this file lands.
+3. **The Mongo channel is BSON, not strings.** `db.<model>.find`, `aggregate`, and `$runCommandRaw` all build BSON documents and ship them through the driver. There is no SQL injection equivalent on Mongo because there is no SQL; what there *is* is operator injection (a user-supplied `{ $ne: null }`), and the typed surface refuses to accept operator objects from untyped input. See [MONGO.md](./MONGO.md) when this file lands.
 
 **What forge does not guarantee.**
 
@@ -332,7 +332,7 @@ db.$on('query', (e) => {
 });
 ```
 
-The handler mutates `e.result` in place; the original row already left the call site, so this only affects what downstream subscribers (logs, tracing, metrics) see. The further nuance is in [LOGGING.md](./LOGGING.md#redacting-pii-from-query-events) — log shippers tend to capture the SQL too, and the `$1, $2, …` placeholders mean PII in `e.params` needs the same redaction by column position.
+The handler mutates `e.result` in place; the original row already left the call site, so this only affects what downstream subscribers (logs, tracing, metrics) see. The further nuance is in [LOGGING.md](./LOGGING.md#redaction) — log shippers tend to capture the SQL too, and the `$1, $2, …` placeholders mean PII in `e.params` needs the same redaction by column position.
 
 ---
 
@@ -340,7 +340,7 @@ The handler mutates `e.result` in place; the original row already left the call 
 
 When the database operator is in the threat model — a managed-DB provider, a shared cluster — at-rest encryption (covered below) isn't enough. The data still appears in plaintext to the database engine, and any operator with `SELECT` privilege can read it. Field-level encryption shifts the trust boundary: the application encrypts on write, decrypts on read, and the database stores ciphertext.
 
-The forge composition shape: declare the column as `f.binary()` (or `f.string()` for base64), put encrypt/decrypt in a small repository wrapper, and never reach for raw SQL on the encrypted column unless you've wrapped the query side too.
+The forge composition shape: declare the column as `f.bytes()` (or `f.string()` for base64), put encrypt/decrypt in a small repository wrapper, and never reach for raw SQL on the encrypted column unless you've wrapped the query side too.
 
 ### AES-GCM with a derived key per record
 
@@ -391,14 +391,14 @@ The version byte is the path to rotation — when you swap the KEK or the HKDF i
 
 ### Repository wrapper around an encrypted column
 
-The model declares the column as `f.binary()`. The repository wraps `findFirst` and `create`/`update` so the rest of the application sees plaintext.
+The model declares the column as `f.bytes()`. The repository wraps `findFirst` and `create`/`update` so the rest of the application sees plaintext.
 
 ```ts
 const User = model('users', {
   id:        f.id(),
   email:     f.string().unique(),
-  ssn_enc:   f.binary(),                       // ciphertext blob
-  ssn_hash:  f.string().nullable(),            // HMAC for equality lookup, see below
+  ssn_enc:   f.bytes(),                        // ciphertext blob
+  ssn_hash:  f.string().optional(),            // HMAC for equality lookup, see below
 });
 
 export const userRepo = {
@@ -456,7 +456,7 @@ Disk encryption is the database operator's responsibility, not forge's. The shap
 
 For most teams the answer is "native encryption is on by default at the provider, plus application-layer encryption on the small set of columns where the operator is in the threat model". Don't stop at native — a database support engineer with the right ticket is one query away from any unencrypted column.
 
-The browser SQLite case (covered in [BROWSER.md](./BROWSER.md#encryption-at-rest)) inverts the question: the user **is** the operator. There, the right shape is per-user passphrase deriving a SQLCipher key, plus a forge-side hook that re-derives on each session.
+The browser SQLite case (covered in [BROWSER.md](./SQLCIPHER.md)) inverts the question: the user **is** the operator. There, the right shape is per-user passphrase deriving a SQLCipher key, plus a forge-side hook that re-derives on each session.
 
 ---
 
@@ -555,7 +555,7 @@ The `DATABASE_URL` for the API points at `forge_writer`. The CI's `DATABASE_URL`
 
 ### MySQL and MSSQL
 
-Same shape, different syntax. MySQL: `GRANT SELECT, INSERT, UPDATE, DELETE ON app.* TO 'forge_writer'@'%';`. MSSQL: separate logins per role, mapped to a database user with `db_datareader` / `db_datawriter` / `db_owner` membership. The browser SQLite case has no concept of roles — the database **is** the user — so this section doesn't apply; see [BROWSER.md → File-system permissions](./BROWSER.md#file-system-permissions) for the analog.
+Same shape, different syntax. MySQL: `GRANT SELECT, INSERT, UPDATE, DELETE ON app.* TO 'forge_writer'@'%';`. MSSQL: separate logins per role, mapped to a database user with `db_datareader` / `db_datawriter` / `db_owner` membership. The browser SQLite case has no concept of roles — the database **is** the user — so this section doesn't apply; see [BROWSER.md → File-system permissions](./BROWSER.md) for the analog.
 
 ### Mongo
 
@@ -841,7 +841,7 @@ The `worker-src 'self' blob:` clause is required because forge runs the SQLite e
 
 **Trusted Types.** If the host page enables Trusted Types via `require-trusted-types-for 'script'`, every string-to-script path needs a trusted-type policy. forge's worker boot fetches the wasm via `fetch()` (not `eval`), so it doesn't trigger Trusted Types directly. The path that does is `forgeSql.raw(...)` — but `raw` only lands in a SQL string passed to a Worker, never in DOM script. Trusted Types and forge compose without issue.
 
-**SharedArrayBuffer / OPFS isolation.** The OPFS-SAH-Pool driver (covered in [BROWSER.md](./BROWSER.md#opfs-sahpool-driver)) uses `SharedArrayBuffer` for cross-thread coordination. `SharedArrayBuffer` requires the page to be cross-origin isolated:
+**SharedArrayBuffer / OPFS isolation.** The OPFS-SAH-Pool driver (covered in [BROWSER.md](./BROWSER.md#url-schemes-opfs-opfs-sahpool-memory)) uses `SharedArrayBuffer` for cross-thread coordination. `SharedArrayBuffer` requires the page to be cross-origin isolated:
 
 ```
 Cross-Origin-Embedder-Policy: require-corp
@@ -932,9 +932,9 @@ import { f, model } from 'forge-orm';
 export const User = model('users', {
   id:        f.id(),
   email:     f.string().unique(),
-  ssn_enc:   f.binary(),
-  ssn_hash:  f.string().nullable(),
-  created_at: f.timestamp().default(() => new Date()),
+  ssn_enc:   f.bytes(),
+  ssn_hash:  f.string().optional(),
+  created_at: f.dateTime().default('now'),
 }, {
   indexes: [{ keys: { ssn_hash: 1 }, name: 'idx_users_ssn_hash' }],
 });

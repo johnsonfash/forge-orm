@@ -419,7 +419,7 @@ This means:
 
 * **A column added to a model in the schema** — push only emits `CREATE TABLE`. If the table already exists, the missing column stays missing. The path to add it is `forge diff apply`, which emits `ALTER TABLE … ADD COLUMN`. (On the browser, `db.$migrate()` since 2.5.1 does this automatically for safely-additive cases — nullable or with a constant default. See [BROWSER.md](./BROWSER.md#dbmigrate--runtime-ddl-apply--drift-detection).)
 * **A column's type changed** — push does nothing. `forge diff` flags it as `kind: 'columnType', direction: 'mismatch'`; `forge diff apply` doesn't currently generate the `ALTER COLUMN TYPE` (it's the conservative gap, because narrowing types loses data).
-* **An index's method, where clause, or include list drifted** — the named-match check in push says "exists, skip". The deep-compare lives in `forge diff` (see [DIFF.md](./DIFF.md#deep-field-index-drift)); fixing requires `forge diff apply` (which emits DROP INDEX + CREATE INDEX) or a manual statement.
+* **An index's method, where clause, or include list drifted** — the named-match check in push says "exists, skip". The deep-compare lives in `forge diff` (see [DIFF.md](./DIFF.md#the-driftitem-taxonomy)); fixing requires `forge diff apply` (which emits DROP INDEX + CREATE INDEX) or a manual statement.
 * **A table or column was removed from the schema** — push does nothing. Drops only happen via `forge diff apply`.
 
 If you want push to "really make the database match the schema", chain it with diff apply:
