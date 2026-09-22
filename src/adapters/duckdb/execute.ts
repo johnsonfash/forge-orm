@@ -23,7 +23,8 @@ import {
 } from './compile-from-ir';
 import { withDuckdbErrors } from './errors';
 import type { DuckdbQueryable } from './driver';
-import { hydrateManyRelation } from '../../ir/hydrate-many';
+import { hydrateManyRelation, hydrateOneRelation } from '../../ir/hydrate-many';
+import { softDeleteField } from '../../ir/build/soft-delete';
 
 export interface DuckdbExecOpts {
   /** Transaction-bound queryable (passed by `withTransaction`). */
@@ -162,20 +163,10 @@ async function hydrateOwningOne(
   rel: RelationPlan,
   targetModel: ModelDef<any>,
 ): Promise<void> {
-  const fks = unique(rows.map((r) => r[rel.on]).filter(notNull));
-  if (fks.length === 0) { for (const r of rows) r[rel.name] = null; return; }
-  const subNode: SelectNode = {
-    kind: 'select', model: rel.target, cardinality: 'many',
-    where: { kind: 'leaf', field: rel.refs, op: 'in', value: fks },
-    ...(rel.nested ?? {}),
-  };
-  const found = await executeDuckdbSelect(exec, subNode, targetModel);
-  const byRef = new Map<string, any>();
-  for (const t of found) byRef.set(stringKey(t[rel.refs]), t);
-  for (const r of rows) {
-    const k = r[rel.on];
-    r[rel.name] = k == null ? null : (byRef.get(stringKey(k)) ?? null);
-  }
+  await hydrateOneRelation({
+    rows, rel, parentField: rel.on, targetField: rel.refs, keyOf: stringKey,
+    runSelect: (node) => executeDuckdbSelect(exec, node, targetModel),
+  });
 }
 
 async function hydrateInverseOne(
@@ -184,20 +175,10 @@ async function hydrateInverseOne(
   rel: RelationPlan,
   targetModel: ModelDef<any>,
 ): Promise<void> {
-  const refs = unique(rows.map((r) => r[rel.refs]).filter(notNull));
-  if (refs.length === 0) { for (const r of rows) r[rel.name] = null; return; }
-  const subNode: SelectNode = {
-    kind: 'select', model: rel.target, cardinality: 'many',
-    where: { kind: 'leaf', field: rel.on, op: 'in', value: refs },
-    ...(rel.nested ?? {}),
-  };
-  const found = await executeDuckdbSelect(exec, subNode, targetModel);
-  const byFk = new Map<string, any>();
-  for (const t of found) byFk.set(stringKey(t[rel.on]), t);
-  for (const r of rows) {
-    const k = r[rel.refs];
-    r[rel.name] = k == null ? null : (byFk.get(stringKey(k)) ?? null);
-  }
+  await hydrateOneRelation({
+    rows, rel, parentField: rel.refs, targetField: rel.on, keyOf: stringKey,
+    runSelect: (node) => executeDuckdbSelect(exec, node, targetModel),
+  });
 }
 
 async function hydrateMany(
@@ -232,7 +213,9 @@ async function applyRelationCounts(
     const sql =
       `SELECT "${rel.on}" AS fk, CAST(COUNT(*) AS BIGINT) AS c ` +
       `FROM "${targetModel.collection}" ` +
-      `WHERE "${rel.on}" = ANY($1) GROUP BY "${rel.on}"`;
+      `WHERE "${rel.on}" = ANY($1)` +
+      (softDeleteField(targetModel) ? ` AND "${softDeleteField(targetModel)}" IS NULL` : '') +
+      ` GROUP BY "${rel.on}"`;
     const { rows: groups } = await exec.query(sql, [refs]);
     const byFk = new Map<string, number>();
     for (const g of groups) byFk.set(stringKey(g.fk), Number(g.c));

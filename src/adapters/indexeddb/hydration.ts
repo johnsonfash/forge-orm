@@ -20,6 +20,9 @@ import type { RelationPlan } from '../../ir/types';
 import type { SchemaShape } from '../../schema/active';
 import { primaryKeyField } from './planner';
 import { cursorScanIds } from './cursor-scan';
+import { softDeleteField } from '../../ir/build/soft-delete';
+import { compilePredicate } from './predicate';
+import type { WhereTree } from '../../ir/types';
 
 export async function hydrate(
   db: IDBDatabase,
@@ -34,9 +37,17 @@ export async function hydrate(
   for (const rel of hydration) {
     const targetModel = schema[rel.target] as unknown as ModelDef<any> | undefined;
     if (!targetModel) continue;
+    // A nested `where` never reached IndexedDB at all: rows were fetched by
+    // index and handed back unfiltered, so `include: { posts: { where: … } }`
+    // silently returned everything — and the soft-delete predicate the IR now
+    // attaches to a relation sub-select would have been ignored with it.
+    // There is no predicate to push down here, so it is evaluated in JS with
+    // the same compiler the top-level residual filter uses.
+    const keep = compilePredicate((rel.nested as { where?: WhereTree } | undefined)?.where);
+
     if (rel.kind === 'many') {
       const parentKeys = uniqueKeys(parents.map((p) => p[rel.refs]));
-      const rows = await getByIndex(db, targetModel.collection, rel.on, parentKeys);
+      const rows = (await getByIndex(db, targetModel.collection, rel.on, parentKeys)).filter(keep);
       const grouped = new Map<string, Record<string, unknown>[]>();
       for (const r of rows) {
         const key = String(r[rel.on]);
@@ -55,7 +66,7 @@ export async function hydrate(
       }
     } else {
       const childIds = uniqueKeys(parents.map((p) => p[rel.on]));
-      let rows = await cursorScanIds(db, targetModel.collection, childIds);
+      let rows = (await cursorScanIds(db, targetModel.collection, childIds)).filter(keep);
       if (rel.nested?.hydration) rows = await hydrate(db, schema, rel.target, rows, rel.nested.hydration);
       const targetPk = primaryKeyField(targetModel);
       const byId = new Map(rows.map((r) => [String(r[targetPk]), r] as const));
@@ -98,7 +109,12 @@ export async function applyRelationCounts(
       continue;
     }
     const parentKeys = uniqueKeys(parents.map((p) => p[rel.refs]));
-    const rows = await getByIndex(db, targetModel.collection, rel.on, parentKeys);
+    const fetched = await getByIndex(db, targetModel.collection, rel.on, parentKeys);
+    // Soft-deleted children are excluded so `_count` agrees with the rows
+    // `include` hands back. IDB has no predicate to push down, so the filter
+    // is applied here on the fetched rows.
+    const sd = softDeleteField(targetModel);
+    const rows = sd ? fetched.filter((r) => (r as Record<string, unknown>)[sd] == null) : fetched;
     const byFk = new Map<string, number>();
     for (const r of rows) {
       const k = String(r[rel.on]);

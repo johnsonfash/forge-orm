@@ -472,7 +472,7 @@ The three shapes for bulk writes, ranked by throughput, are documented in [MUTAT
 
 1. **`createMany`** — one statement, one round-trip. Best.
 2. **`$transaction(async tx => for chunk { tx.x.createMany(chunk) })`** — chunks inside a single commit.
-3. **`$transaction([...])`** — N promises, one logical group, no transaction wrap. Use for fan-out reads, not idempotent writes.
+3. **`$transaction([() => …, () => …])`** — N thunks, run in order inside one transaction (2.19.0; before that it was a `Promise.all` with no transaction, and an array of promises is now refused).
 
 The shape for a million-row seed:
 

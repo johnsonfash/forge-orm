@@ -238,7 +238,7 @@ The README is the surface reference. For more depth — extra examples, edge cas
 |---|---|
 | Queries — every operator with per-dialect SQL/Mongo emit, cursor pagination, distinct, streaming, common bugs, 8 worked queries | **[docs/QUERIES.md](docs/QUERIES.md)** |
 | Mutations — create/update/upsert/delete asymmetry, atomic ops, nested writes, idempotency, optimistic+pessimistic concurrency, 8 worked patterns | **[docs/MUTATIONS.md](docs/MUTATIONS.md)** |
-| Transactions — callback vs array, per-dialect mechanics, savepoints, isolation, deadlock retry, Mongo replica-set, outbox, 5 worked patterns | **[docs/TRANSACTIONS.md](docs/TRANSACTIONS.md)** |
+| Transactions — the ambient session (a repository joins without `tx`), thunk array form, per-dialect mechanics, savepoints, isolation, deadlock retry, Mongo replica-set, outbox, 5 worked patterns | **[docs/TRANSACTIONS.md](docs/TRANSACTIONS.md)** |
 | Raw SQL — `forgeSql` composition, identifier-vs-value safety, per-dialect placeholders, `$runCommandRaw`, per-dialect worked patterns | **[docs/RAW-SQL.md](docs/RAW-SQL.md)** |
 | `$explain` — see a query without running it, both callback forms, the plan via `analyze`, why `EXPLAIN ANALYZE` is never emitted, per-dialect support | **[docs/EXPLAIN.md](docs/EXPLAIN.md)** |
 | Upsert — `ON CONFLICT` / `ON DUPLICATE KEY` / `MERGE` / `findOneAndUpdate` per dialect, partial updates, race semantics | **[docs/UPSERT.md](docs/UPSERT.md)** |
@@ -310,7 +310,7 @@ The README is the surface reference. For more depth — extra examples, edge cas
 
 | Topic | File |
 |---|---|
-| Soft delete — `softDelete`/`restore`, partial-filter uniques, query defaults, retention purge, GDPR caveats | **[docs/SOFT-DELETE.md](docs/SOFT-DELETE.md)** |
+| Soft delete — `softDelete`/`restore`, partial-filter uniques, query defaults, `include` scoped at every depth, `_count` and relation-filter consistency, retention purge, GDPR caveats | **[docs/SOFT-DELETE.md](docs/SOFT-DELETE.md)** |
 | Audit log — three shapes (single table, per-model history, append-only event), actor capture, hash-chain tamper resistance | **[docs/AUDIT-LOG.md](docs/AUDIT-LOG.md)** |
 | Multi-tenant — shared-schema/schema-per-tenant/DB-per-tenant trade-offs, `scopedDb`, RLS, per-tenant migration orchestration | **[docs/MULTI-TENANT.md](docs/MULTI-TENANT.md)** |
 | Sharding — shard-key choice, routing, cross-shard query patterns, resharding, native helpers (Vitess, Citus, Mongo) | **[docs/SHARDING.md](docs/SHARDING.md)** |
@@ -1611,7 +1611,7 @@ await db.order.findMany({ distinct: ['status'] });    // one row per status
 await db.order.count({ distinct: ['channel'] });      // how many distinct channels
 ```
 
-See more — **[docs/QUERIES.md](docs/QUERIES.md#groupby--having)** for the full groupBy / having vocabulary and per-dialect emit.
+See more — **[docs/QUERIES.md](docs/QUERIES.md#groupby-and-having)** for the full groupBy / having vocabulary and per-dialect emit.
 
 ---
 
@@ -1626,11 +1626,44 @@ await db.$transaction(async (tx) => {
 });
 ```
 
-If the callback throws, nothing is saved. You can also pass an array of queries
-to run together: `await db.$transaction([db.user.findMany(), db.post.count()])`.
+If the callback throws, nothing is saved.
+
+**Code called from inside the callback is in the transaction too**, even when
+it never sees `tx`. The session rides on `AsyncLocalStorage`, per adapter, so a
+repository layer that closes over the root `db` joins the transaction instead of
+escaping it:
+
+```ts
+await db.$transaction(async () => {
+  await stockRepo.record(orgId, movement);    // these use the plain `db`,
+  await itemRepo.incrementStock(orgId, sku);  // and are both in the transaction
+});
+```
+
+That is Node only — there is no async context in the browser, where the
+IndexedDB adapter has no interactive transaction to join anyway. Before 2.19.0
+neither leg was in the transaction and a throw rolled back nothing, so if you
+threaded `tx` through every function to work around that, you can stop.
+
+You can also pass an **array of functions**, which run in order inside one
+transaction:
+
+```ts
+await db.$transaction([
+  () => db.account.update({ where: { id: from }, data: { bal: { decrement: n } } }),
+  () => db.account.update({ where: { id: to },   data: { bal: { increment: n } } }),
+]);
+```
+
+**Behaviour change in 2.19.0:** that array used to hold already-running
+promises and was a `Promise.all` with no transaction around it. Promises are now
+refused with an error showing both working forms. Add `() =>` to each element —
+and note that every call site you have to change was not atomic before.
 
 On Mongo, transactions need a replica set (a single-node `mongod` cannot run
-them), which is the same requirement Prisma has.
+them), which is the same requirement Prisma has. Each `createDb()` owns its own
+Mongo connection as of 2.19.0, so two handles mean two databases and
+`$disconnect()` on one leaves the other usable.
 
 **One thing to watch on Postgres:** do not catch a constraint error inside a
 transaction and keep going. Postgres marks the whole transaction as failed after
@@ -1642,7 +1675,7 @@ transaction fail and retry it.
 **DuckDB** doesn't support `SAVEPOINT`, so nested transactions degrade to a
 single outer one. Migration batches that abort can't partially recover.
 
-See more — **[docs/TRANSACTIONS.md](docs/TRANSACTIONS.md)** for callback vs array semantics, per-dialect BEGIN/COMMIT mechanics, savepoint behaviour, isolation levels, deadlock retry, Mongo replica-set rules, AsyncLocalStorage HTTP pattern, and five worked patterns.
+See more — **[docs/TRANSACTIONS.md](docs/TRANSACTIONS.md)** for the ambient session and its rules, callback vs array semantics, per-dialect BEGIN/COMMIT mechanics, savepoint behaviour, isolation levels, deadlock retry, Mongo replica-set rules, the request-scoped HTTP pattern, and five worked patterns.
 
 ---
 
@@ -2525,7 +2558,7 @@ for await (const user of db.user.findManyStream({ where: { active: true } })) {
 }
 ```
 
-See more — **[docs/QUERIES.md](docs/QUERIES.md#findmanystream)** for `findManyStream` internals per driver and the memory profile.
+See more — **[docs/QUERIES.md](docs/QUERIES.md#findmanystream--cursor-backed-streaming)** for `findManyStream` internals per driver and the memory profile.
 
 ---
 
@@ -2549,6 +2582,14 @@ await db.account.softDeleteMany({ where: { tenantId: 't9' } });
 // Reads skip soft-deleted rows by default; opt back in with _withDeleted.
 await db.account.findMany();                                   // excludes a1
 await db.account.findMany({ where: { _withDeleted: true } });  // includes a1
+
+// A relation pulled in from a parent is scoped the same way, at any depth,
+// using the TARGET model's own column (2.19.0). Assuming a user has accounts:
+await db.user.findUnique({ where: { id: 'u1' }, include: { accounts: true } });
+await db.user.findUnique({                        // opt that one level back in
+  where: { id: 'u1' },
+  include: { accounts: { where: { _withDeleted: true } } },
+});
 
 // Restore — clears deleted_at, row is active again.
 await db.account.restore({ where: { id: 'a1' } });

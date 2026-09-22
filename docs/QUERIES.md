@@ -1314,12 +1314,15 @@ export const customerRepo = {
 };
 ```
 
-Forge has first-class soft-delete (`f.softDelete()` + `db.x.softDelete()`
-and the auto-filter on `findMany`), so the helper above is the
-escape hatch only when you have non-soft-delete columns to merge in.
-For a model declared with `f.softDelete()`, every read already
-appends `WHERE "deleted_at" IS NULL` and every write skips
-already-deleted rows.
+Forge has first-class soft-delete (`f.dateTime().softDeleteAt()` on the
+column + the `db.x.softDelete()` verb, with the auto-filter on reads), so
+the helper above is the escape hatch only when you have non-soft-delete
+columns to merge in. On a model with a `.softDeleteAt()` column every read
+already appends `WHERE "deleted_at" IS NULL`, including the sub-select
+behind an `include`. Writes are the exception and deliberately so: an
+`update` or a `delete` still reaches a soft-deleted row, which is what
+makes `restore` possible. See
+[docs/SOFT-DELETE.md](./SOFT-DELETE.md#query-time-defaults).
 
 ### (h) Recursive WITH — top of the comment tree
 

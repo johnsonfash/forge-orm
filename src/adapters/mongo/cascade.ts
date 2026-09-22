@@ -1,6 +1,6 @@
 import type { ObjectId } from 'mongodb';
 import { mongo } from './bson';
-import { dbClient } from './client';
+import { getDefaultClient } from './client';
 import { RelationInfo } from '../../schema/core';
 import { ModelDef, OnDeleteAction } from '../../schema/types';
 import { schema } from '../../schema';
@@ -58,6 +58,10 @@ export async function applyCascadesForDelete(
   parentModel: ModelDef<any>,
   parentDocs: Array<Record<string, any>>,
   ctx: CascadeContext = { visited: new Set() },
+  // The connection to cascade on. Falls back to the process default only for
+  // callers that have no adapter; the library path always passes it, because a
+  // cascade that resolved to the wrong database would delete the wrong rows.
+  db: import('mongodb').Db = getDefaultClient().db,
 ): Promise<void> {
   if (parentDocs.length === 0) return;
   const children = findChildRelations(parentModel);
@@ -87,7 +91,7 @@ export async function applyCascadesForDelete(
         )
       : parentRefValues;
 
-    const childCollection = dbClient.db.collection(childModel.collection);
+    const childCollection = db.collection(childModel.collection);
     const filter = { [rel.on]: { $in: inValues } };
 
     if (onDelete === 'SetNull') {
@@ -113,7 +117,7 @@ export async function applyCascadesForDelete(
     // integrity if any of the cascading writes are observed mid-flight by
     // a concurrent reader (best-effort; we're not in a transaction by
     // default — Mongo requires a replica set).
-    await applyCascadesForDelete(childModel, fresh, ctx);
+    await applyCascadesForDelete(childModel, fresh, ctx, db);
 
     const ids = fresh.map((d) => d._id);
     await childCollection.deleteMany({ _id: { $in: ids } } as any);

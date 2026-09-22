@@ -3,23 +3,28 @@
 The [Transactions chapter](../README.md#transactions) in the README is the
 tour: callback in, callback out, throw to roll back. This doc is the
 companion reference for everything sitting behind that 20-line section —
-the callback form vs. the array form, how each adapter actually drives
-`BEGIN` / `COMMIT` / `ROLLBACK`, why nested `$transaction` calls don't
-emit `SAVEPOINT` the way you might assume, the isolation level you're
+the callback form vs. the array form, how a transaction reaches code
+that never sees `tx`, how each adapter actually drives `BEGIN` /
+`COMMIT` / `ROLLBACK`, why nested `$transaction` calls don't emit
+`SAVEPOINT` the way you might assume, the isolation level you're
 implicitly getting per dialect, deadlock-and-retry patterns, the
 long-tx toxicity story, why Mongo needs a replica set, and the
 distributed-tx footguns forge does not solve.
 
-Everything below assumes 2.5.x. The two relevant implementation files
-are `src/factory.ts` (the `$transaction` entrypoint and the per-tx proxy
-that hands `session` to every wrapper call) and
-`src/adapters/<dialect>/adapter.ts` plus the per-driver
+Everything below assumes **2.19.0**, which changed two things this page
+used to document the other way round: the callback form now reaches a
+repository layer on its own, and the array form takes **thunks** and is
+atomic. The relevant implementation files are `src/factory.ts` (the
+`$transaction` entrypoint, `runBatch`, and the per-tx proxy that hands
+`session` to every wrapper call), `src/session-context.ts` (the ambient
+session), and `src/adapters/<dialect>/adapter.ts` plus the per-driver
 `transaction(fn)` implementations in
 `src/adapters/<dialect>/driver.ts` / `src/adapters/mongo/client.ts`.
 
 ## Contents
 
 * [Callback form](#callback-form)
+* [The ambient session — how a transaction reaches a repository](#the-ambient-session--how-a-transaction-reaches-a-repository)
 * [Array form](#array-form)
 * [Per-dialect tx semantics](#per-dialect-tx-semantics)
 * [Savepoints and nested `$transaction`](#savepoints-and-nested-transaction)
@@ -58,7 +63,8 @@ same adapter as `db.user` but carrying an opaque `session` that the
 adapter injects into every `execute` / `coerce` / `decode` call. The
 proxy also exposes `tx.$queryRaw`, `tx.$executeRaw`,
 `tx.$runCommandRaw` (Mongo only), `tx.$on`, `tx.$off`, and a nested
-`tx.$transaction` that's a no-op shell (see
+`tx.$transaction` that joins the transaction already open rather than
+starting a second one (see
 [Savepoints](#savepoints-and-nested-transaction) below).
 
 **The session is opaque on purpose.** What `session` actually is depends
@@ -97,6 +103,12 @@ Worse: forgetting the `await` (not the `return`) inside the callback
 fires the query but the tx commits before it finishes — see
 [Common bugs](#common-bugs).
 
+**Anything awaited beneath the callback is in the transaction too**,
+including code that never sees `tx` and calls the root `db`. That is the
+ambient session, new in 2.19.0 — the next section. Before it, a callback
+that handed the work to a repository layer ran that work outside the
+transaction, and a throw rolled back nothing.
+
 **Throwing rolls back.** Any unhandled rejection inside the callback
 triggers `ROLLBACK` (or `abortTransaction()` on Mongo) and the rejection
 bubbles to your caller. Forge does not swallow tx errors and never
@@ -106,62 +118,256 @@ pattern you have to write yourself.
 
 ---
 
-## Array form
+## The ambient session — how a transaction reaches a repository
 
-The second call shape is `db.$transaction([ ...promises ])`:
+Until 2.19.0 the `tx` handle was the only way into the transaction, and
+that made the most common shape in a layered codebase a lie:
 
 ```ts
+await db.$transaction(async () => {           // tx discarded
+  await stockRepo.record(orgId, movement);    // the ambient db — no session
+  await itemRepo.incrementStock(orgId, sku);  // ditto
+});
+```
+
+`stockRepo` closes over the root `db`, not over `tx`. Neither leg
+carried the session, so neither leg was in the transaction: both writes
+went out on their own connection as they were issued, and the throw at
+the end rolled back nothing. The code read as atomic and was not, with
+no error and no log line. The only fix available was to thread `tx`
+through every function between the route and the query.
+
+The session now lives in an `AsyncLocalStorage`
+(`src/session-context.ts`). `$transaction` opens the driver session
+exactly as before, then runs the callback inside
+`runWithSession(adapter, session, …)`. A collection wrapper with no
+session of its own falls back to the ambient one, so anything awaited
+beneath the callback joins the transaction without knowing it exists —
+async context propagates across `await`, which is what puts a
+repository three layers down inside the same `BEGIN`.
+
+The snippet above is atomic as written. So is the same work expressed as
+thunks in the [array form](#array-form), and so is a nested
+`$transaction`.
+
+### The rules, precisely
+
+**Per adapter.** The stored scope carries the adapter that opened the
+session, identity-compared, and `currentSession(otherAdapter)` returns
+nothing. A session belongs to the connection that created it — hand a
+Mongo `ClientSession` to a different client and the driver rejects it —
+so in a process with two `createDb()` handles, one database's
+transaction is never picked up by the other's queries.
+
+**Resolved per call, not per wrapper.** The wrapper's `session` is a
+getter read at dispatch time. A repository built at boot, long before
+any transaction existed, still joins whichever transaction is open when
+it is called.
+
+**An explicit session still wins.** `tx.user` carries its own session
+and ignores the ambient one. Inside a callback on Node, `tx.user` and
+`db.user` therefore reach the same transaction — which is the point, but
+see [Common bugs](#common-bugs) for the two cases where they still
+differ.
+
+**The scope ends with the callback.** Work started after `$transaction`
+resolves, and sibling work outside it, sees no ambient session. It is a
+scope, not a global flag.
+
+**Node only, deliberately.** `node:async_hooks` is loaded through a
+specifier assembled at runtime, because a bundler resolves a literal
+`require('node:async_hooks')` at build time even inside a `try` — and
+that is a broken browser build, which matters because forge runs in the
+browser on sqlite-wasm and IndexedDB. Where there is no async context
+there is no ambient session, and that is the right answer rather than a
+degradation: IndexedDB's `$transaction` has no interactive transaction
+to join in the first place (it runs the callback with no session at all
+and each operation opens its own IDB txn), so in the browser `db.x`
+inside a callback is exactly as un-transactional as it always was, and
+`tx.x` is what you write.
+
+### The three exported helpers
+
+```ts
+import { ambientSessionsSupported, currentSession, runWithSession } from 'forge-orm';
+```
+
+| Helper | What it is for |
+| --- | --- |
+| `ambientSessionsSupported()` | `true` where async context exists — Node yes, browser no. Lets a startup check or a test assert that propagation is available instead of finding out from a rollback that did nothing. |
+| `currentSession(adapter)` | The session the current call is already inside for that adapter, or `undefined`. `currentSession(db.adapter) !== undefined` is the honest answer to "am I inside a transaction?" |
+| `runWithSession(adapter, session, fn)` | Runs `fn` with `session` ambient. This is the primitive `$transaction` itself uses; you need it directly only if you drive a driver session by hand. |
+
+### There is deliberately no `withoutAmbientSession()`
+
+The obvious companion — "run this one write outside the enclosing
+transaction, so the audit row survives the rollback" — is missing on
+purpose.
+
+Detaching the session only helps on a driver that hands out a separate
+connection per transaction. On SQLite, PGlite and DuckDB the
+transaction **is** the single connection the process has, so a statement
+issued without the session is still physically inside the open `BEGIN`
+and rolls back with it. That was measured on PGlite while this was being
+built: the row written with the session detached was gone after the
+rollback.
+
+An API that works on Postgres and silently does not on SQLite is the
+class of difference this library exists to remove, so it is not
+offered. The escape hatch is a second `createDb()` — a second
+connection, genuinely outside:
+
+```ts
+// One extra handle, its own pool, its own $disconnect().
+const sideChannel = await createDb({ url: process.env.DATABASE_URL!, schema });
+
+await db.$transaction(async () => {
+  await orders.place(input);                            // rolls back on throw
+  await sideChannel.attempt.create({ data: { … } });    // survives it
+});
+```
+
+Two handles in one process share the module-level active schema, so
+register the same schema in both — see
+[Cross-database transactions](#cross-database-transactions).
+
+---
+
+## Array form
+
+The second call shape is an array, and as of 2.19.0 it holds
+**functions**, not promises:
+
+```ts
+await db.$transaction([
+  () => db.account.update({ where: { id: from }, data: { bal: { decrement: n } } }),
+  () => db.account.update({ where: { id: to },   data: { bal: { increment: n } } }),
+]);
+```
+
+They run **in order, inside one real transaction**: one `BEGIN`, one
+connection, one `COMMIT`, and a throw from any of them rolls the
+earlier ones back. Note that the thunks call the plain `db` and are
+still inside the transaction — that is the
+[ambient session](#the-ambient-session--how-a-transaction-reaches-a-repository)
+at work, which also means a thunk may call a repository function that
+knows nothing about transactions. Each thunk is passed the `tx` handle
+as its argument as well, for code that prefers to be explicit:
+
+```ts
+await db.$transaction([
+  (tx) => tx.account.update({ where: { id: from }, data: { bal: { decrement: n } } }),
+  (tx) => tx.ledger.create({ data: { from, to, amount: n } }),
+]);
+```
+
+The results come back as an array, in the order the thunks were listed,
+each typed as its own thunk's resolved value — so `r[0].balance`
+typechecks. An empty array opens no transaction at all and resolves to
+`[]`.
+
+**Sequential, not concurrent.** The thunks are awaited one at a time
+rather than through `Promise.all`. A Mongo `ClientSession` rejects
+overlapping operations, and a single PG / MySQL / MSSQL client
+serialises statements anyway, so running them concurrently would buy
+nothing and break Mongo.
+
+### Behaviour change: an array of promises is refused
+
+This is the break. Before 2.19.0 the array form was one line —
+`Promise.all(arg)` — and it gave no atomicity at all, which is not an
+oversight so much as the only thing that shape *can* do. By the time
+the array reaches `$transaction`, every element is an already-running
+promise: `db.account.update(...)` dispatched the moment it was
+evaluated, while the array literal was being constructed. `Promise.all`
+then waits for writes that have already happened, independently, each
+on its own connection, in no transaction. A money transfer written that
+way lost atomicity silently — the worst way to lose it.
+
+So the promise form now throws instead of pretending:
+
+```
+[forge] $transaction([...]) takes functions, not promises — 2 of 2 items were already running.
+  A query starts the moment you write it, so by the time the array gets here the
+  writes have already gone to the database, each on its own. Nothing can wrap them
+  afterwards — this used to be a Promise.all, which looked atomic and was not.
+  Wrap each one in an arrow:
+    await db.$transaction([
+      () => db.a.create({ ... }),
+      () => db.b.update({ ... }),
+    ]);
+  Or use the callback form, which is equivalent:
+    await db.$transaction(async () => { ... });
+```
+
+The error counts the offending items, and a mix of thunks and promises
+is refused too. Note what the refusal cannot do: the promises had
+already started, so their writes may well have landed before the error
+was thrown. The exception tells you the code shape is wrong; it does
+not undo anything. Upgrading means finding every
+`$transaction([ ... ])` call site and adding `() =>` — and every one you
+find was not atomic before.
+
+**Upgrading a fan-out read.** The old array form was also used, quite
+reasonably, to run independent reads together:
+
+```ts
+// Before — a Promise.all in disguise.
 const [users, postCount] = await db.$transaction([
   db.user.findMany({ take: 10 }),
   db.post.count(),
 ]);
 ```
 
-What forge actually does here is one line of `src/factory.ts`:
+If you wanted parallelism and not atomicity, `Promise.all` is what that
+code always was, so say so:
 
 ```ts
-function $transaction(arg: any): any {
-  if (Array.isArray(arg)) return Promise.all(arg);
-  return adapter.$transaction(async (session) => arg(makeTx(session)));
-}
+const [users, postCount] = await Promise.all([
+  db.user.findMany({ take: 10 }),
+  db.post.count(),
+]);
 ```
 
-That is, **the array form is `Promise.all`. It is not wrapped in
-`BEGIN` / `COMMIT`.** Each item runs against the root db connection,
-in parallel, with no shared session. Two items can interleave; a
-constraint failure in item 2 does not roll back item 1.
-
-This is deliberate. The items in the array are already-built promises
-returned by `db.user.findMany({...})` — they were dispatched the moment
-you constructed the array literal, before forge ever saw it. There's
-no way to retroactively wrap them in `BEGIN`. The array form is purely
-a convenience for "fan out N independent queries and wait for them
-all," with the same tuple-typed return as `Promise.all`.
-
-If you actually want N statements wrapped in one tx, use the callback
-form and let it dispatch them with `tx`:
+If you wanted both reads on one session inside one transaction, thunks
+give you that — sequentially:
 
 ```ts
-const [users, postCount] = await db.$transaction(async (tx) => {
-  return Promise.all([
-    tx.user.findMany({ take: 10 }),
-    tx.post.count(),
-  ]);
+const [users, postCount] = await db.$transaction([
+  () => db.user.findMany({ take: 10 }),
+  () => db.post.count(),
+]);
+```
+
+Note that "one transaction" is not by itself "one snapshot": under
+Postgres's default READ COMMITTED each statement takes a fresh snapshot,
+so a concurrent commit between the two reads is visible to the second.
+If the two reads have to agree, raise the isolation level — see
+[Isolation levels](#isolation-levels).
+
+### Nesting joins, it does not stack
+
+A `$transaction` called while one is already open — the array form or
+the callback form, on `tx` or on the ambient `db` — **joins** the open
+transaction instead of starting a second:
+
+```ts
+await db.$transaction(async () => {
+  await debit(from, n);
+  // A repository being defensive: it opens a transaction of its own,
+  // from the ambient db, not knowing it is already inside one.
+  await db.$transaction(async () => { await credit(to, n); });
+  throw new Error('boom');           // rolls BOTH legs back
 });
 ```
 
-Now `tx.user.findMany` and `tx.post.count` both run on the same
-session. On Postgres / MySQL / MSSQL that's a single checked-out
-client; on SQLite it's a single driver handle; on Mongo it's a single
-`ClientSession`. The two queries are serialised against the driver
-(SQLite is single-threaded; the SQL drivers fan-out one statement at a
-time on a single client), but they're both inside the `BEGIN`.
-
-The array form **does** behave correctly inside a `tx` proxy: at line
-325 of `src/factory.ts`, `tx.$transaction([...])` is the same
-`Promise.all` shortcut, but every promise in the array was built off
-`tx.x` and so already carries the outer session. Use that to batch
-nested fan-outs.
+This is the common case rather than an exotic one, precisely because a
+repository holds `db` and not `tx`. It also has to be the behaviour:
+Postgres and Mongo both refuse a nested `BEGIN`, and on a driver that
+allows one, the inner commit would publish half of the outer
+transaction's work. What it does **not** give you is a savepoint — the
+inner block cannot fail and be recovered from independently. See
+[Savepoints](#savepoints-and-nested-transaction).
 
 ---
 
@@ -223,6 +429,28 @@ catch (e) { await this.db.exec('ROLLBACK'); throw e; }
 The `session` is the driver itself. There's no pool — SQLite has a
 single writer.
 
+**What that means for isolation, precisely.** Sequential work inside the
+callback is genuinely atomic: `BEGIN`, the statements, `COMMIT` or
+`ROLLBACK`, all on the one connection. What the shared connection cannot
+give you is isolation from work happening *outside* the callback at the
+same time. A write issued concurrently — another request, a timer, an
+unawaited promise — goes down the same connection, lands inside the open
+`BEGIN`, and rolls back with it if the transaction fails, even though it
+was never part of it. Two overlapping `$transaction` calls collide for
+the same reason: the second `BEGIN` arrives while the first is open. So
+treat a SQLite transaction as correct but not concurrent-safe, and keep
+one writer at a time. The same is true of DuckDB and of PGlite, which
+are also one connection per process.
+
+This is also why forge's transaction regression suite
+(`regression-transactions.ts`) runs on **PGlite** and not on SQLite. A
+rollback test on SQLite passes whether or not the session was
+propagated, because the transaction is the process's only connection —
+a query issued without the session is physically inside it anyway. Only
+a dialect with a real per-transaction connection can tell a propagated
+session from a shared one, so a new transaction test belongs there. See
+[Testing patterns](#testing-patterns).
+
 **Important: forge uses plain `BEGIN`, not `BEGIN IMMEDIATE`.** Plain
 `BEGIN` is a deferred tx — SQLite stays in read mode until the first
 write, then promotes to a reserved lock. If two concurrent writers race
@@ -250,6 +478,11 @@ or rolls back. DuckDB serialises writes per-process — there's only ever
 one writer at a time — so deadlocks don't exist but contention shows up
 as wait time, not retry errors.
 
+The connection is the process's one connection, so the SQLite caveat
+above applies verbatim: sequential work in the callback is atomic, and
+concurrent work outside it joins the same `BEGIN` and rolls back with
+it.
+
 DuckDB has **no `SAVEPOINT` support**. See
 [Savepoints](#savepoints-and-nested-transaction) for what that means
 for nested `$transaction`.
@@ -269,7 +502,10 @@ HOLDLOCK)`). Forge does not emit hints. If you need them, drop to
 
 ### Mongo
 
-`dbClient.transaction(fn)`:
+`DatabaseClient.transaction(fn)`, on the client this adapter owns —
+since 2.19.0 that is one client per `createDb()` rather than one per
+process, so a transaction is scoped to the database its handle is
+connected to. See [MONGO.md](./MONGO.md#one-client-per-createdb).
 
 ```ts
 const session = this.client.startSession();
@@ -292,6 +528,29 @@ for free on Mongo; you have to write it yourself on the SQL adapters.
 Requires a replica set or a `mongos`. See
 [Mongo replica-set requirement](#mongo-replica-set-requirement).
 
+### IndexedDB
+
+`indexeddbAdapter.$transaction(fn)` calls `fn(undefined)` — there is no
+session, and each operation underneath opens its own short-lived IDB
+transaction.
+
+That is a limitation of the platform, not a gap in the adapter. An
+`IDBTransaction` auto-commits as soon as the microtask queue goes idle,
+so it cannot survive an `await` on anything that is not an IDB request —
+which is to say an interactive transaction, the thing `$transaction`
+exposes everywhere else, is not expressible in IndexedDB. Per-operation
+transactions are the strongest atomicity available, and forge does not
+pretend otherwise: a throw stops later writes from being issued, but
+earlier ones are already committed.
+
+It is also why the absence of an ambient session in the browser costs
+nothing. There is no open transaction to join, so there is nothing for
+async context to carry. If you need all-or-nothing across several
+IndexedDB writes, model it as one document, or write a compensating
+undo.
+
+See [INDEXEDDB.md](./INDEXEDDB.md#transactions) for the per-op detail.
+
 ### The summary table
 
 | Dialect  | What forge does on `$transaction`                                  | Default isolation     | Built-in retry?                   |
@@ -302,31 +561,31 @@ Requires a replica set or a `mongos`. See
 | DuckDB   | `BEGIN TRANSACTION`, run, commit / rollback                        | SERIALIZABLE (single writer)           | No              |
 | MSSQL    | `mssql.Transaction.begin()`, run, commit / rollback                | READ COMMITTED        | No                                |
 | Mongo    | `startSession` → `withTransaction(fn)` → `endSession`              | snapshot (4.2+)       | Yes — driver retries transient    |
+| IndexedDB| Nothing — the callback runs with no session; each op gets its own IDB txn | per operation   | No                                |
 
 ---
 
 ## Savepoints and nested `$transaction`
 
-What you'd expect: calling `tx.$transaction(...)` inside a callback
-opens a `SAVEPOINT`, with `ROLLBACK TO SAVEPOINT` if the inner one
-throws. What forge **actually** does (`src/factory.ts:325`):
+What you'd expect: calling `$transaction(...)` inside a callback opens
+a `SAVEPOINT`, with `ROLLBACK TO SAVEPOINT` if the inner one throws.
+What forge actually does is **join** the open transaction — on `tx`,
+and (since 2.19.0) on the ambient `db` as well, which is the shape a
+defensive repository produces. The inner callback gets a `tx` proxy
+bound to the *same* session. There's no `SAVEPOINT`. There's no
+`RELEASE`. Any throw from the inner block aborts the outer transaction
+once it propagates and the outer `try`/`catch` triggers `ROLLBACK`.
 
-```ts
-if (key === '$transaction')
-  return (a: any) => Array.isArray(a) ? Promise.all(a) : a(makeTx(session));
-```
-
-The inner `$transaction` is a no-op shell. It calls the callback with a
-fresh `tx` proxy bound to the *same outer session*. There's no
-`SAVEPOINT`. There's no `RELEASE`. The inner callback runs in the outer
-tx and any throw from it aborts the outer tx (after the throw
-propagates and the outer's `try/catch` triggers `ROLLBACK`).
+Joining is the only safe answer: Postgres and Mongo both refuse a nested
+`BEGIN`, and on a driver that permits one the inner `COMMIT` would
+publish half the outer transaction's work.
 
 The practical consequences:
 
 * **You cannot partially recover** from an inner failure. If the inner
   block throws, the whole outer tx rolls back. There's no
-  "try-this-step-and-keep-going-if-it-fails" with `tx.$transaction`.
+  "try-this-step-and-keep-going-if-it-fails" with a nested
+  `$transaction`.
 * The README's note that "DuckDB doesn't support `SAVEPOINT`, so nested
   transactions degrade to a single outer one" is half the story.
   Nested `$transaction` is *always* a single outer one on every
@@ -596,6 +855,20 @@ The two scenarios people ask about:
   (`dbA.$transaction(...)` + `dbB.$transaction(...)`). The two txs are
   independent. If the second one fails after the first commits, the
   first is committed and you can't undo it.
+
+  The ambient session does not blur this line, on purpose. The session
+  is stored with the adapter that opened it and handed back only for
+  that adapter, so `dbB`'s queries inside `dbA.$transaction(...)` run
+  outside it. Anything else would mean handing one driver a session
+  another driver created, which the driver rejects.
+
+  One thing to watch when you do run two handles in one process: the
+  **active schema is module-level**, so relation targets resolve against
+  whichever schema was registered last. Register the same schema in both
+  handles, or keep the second one to raw statements. On Mongo each
+  `createDb()` now owns its own connection (2.19.0 — see
+  [MONGO.md](./MONGO.md#one-client-per-createdb)); the schema registry
+  is still shared.
 * **One forge instance, but writes that should fan out to another
   system** (cache, search index, message queue, third-party API).
   Same story — the external write isn't inside your tx and can succeed
@@ -647,68 +920,89 @@ soon" is good enough.
 
 ## Transactions in HTTP and job contexts
 
-Threading `tx` through every function in your service layer is
-miserable. The standard pattern — covered in detail in
-[BACKEND.md](./BACKEND.md#transactions-in-http-and-job-contexts) — is
-to ride the tx on `AsyncLocalStorage` and let any code under the
-request pull it out.
+The middleware pattern is "open a transaction for the request, let every
+handler and repository underneath it join". Since 2.19.0 that is the
+whole of it — the handlers need no parameter and no accessor, because
+the [ambient session](#the-ambient-session--how-a-transaction-reaches-a-repository)
+is what carries the transaction down the call stack:
 
 ```ts
-import { AsyncLocalStorage } from 'node:async_hooks';
-import type { ForgeDb } from 'forge-orm';
+app.use(async (req, res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD') return next();   // reads stay auto-commit
+  await db.$transaction(async () => {
+    await new Promise<void>((resolve, reject) => {
+      res.once('finish', resolve);
+      res.once('error', reject);
+      next();
+    });
+  });
+});
 
+// The handler and everything below it is inside the transaction.
+app.post('/orders', async (req, res) => {
+  const order = await orderRepo.create(req.body);   // plain `db` inside
+  await inventoryRepo.reserve(order);               // plain `db` inside
+  res.json(order);
+});
+```
+
+Background jobs are the same shape without the HTTP coupling:
+
+```ts
+worker.process(async (job) => {
+  await db.$transaction(async () => {
+    await handleJob(job);      // handleJob and its callees use `db`
+  });
+});
+```
+
+Three failure modes to know, and none of them changed:
+
+* **The route forgot to `await`.** Async work that outlives the response
+  runs *outside* the transaction — `finish` already fired and the
+  transaction already committed. Worse, the ambient scope is gone, so
+  that work is not merely late, it is un-transactional. Always `await`
+  everything before you respond.
+* **A long-running route holds the transaction open.** See
+  [Long-running transactions](#long-running-transactions). A 30-second
+  handler under this middleware means a 30-second transaction holding a
+  pool connection.
+* **Streaming responses.** SSE, WebSocket upgrades and chunked
+  responses confuse the `finish` event. Either keep streaming routes out
+  of this middleware, or finish the transaction before the first chunk.
+
+### You no longer need a `txStore` / `scoped()` pair
+
+Earlier revisions of this page, and the framework recipes in
+[BACKEND.md](./BACKEND.md#production-server-recipes), told you to build
+your own `AsyncLocalStorage` and give every repository a `scoped()`
+accessor:
+
+```ts
+// No longer necessary — forge does this internally, per adapter.
 export const txStore = new AsyncLocalStorage<ForgeDb<any>>();
 export const scoped = () => txStore.getStore() ?? db;
 ```
 
-Then every repo / service / query helper calls `scoped()` instead of
-closing over `db`, and the per-request middleware opens the tx:
+That was the only way to get a transaction into a repository that did
+not take `tx` as an argument, and it worked. It is now redundant: forge
+keeps the session in its own `AsyncLocalStorage`, keyed by adapter, and
+a wrapper with no session of its own picks it up.
 
-```ts
-app.use(async (req, _res, next) => {
-  if (req.method === 'GET') return next();        // GET stays auto-commit
-  await db.$transaction(async (tx) => {
-    await new Promise<void>((resolve, reject) => {
-      txStore.run(tx, () => {
-        next();
-        req.raw.once('close', resolve);
-      });
-      req.raw.once('error', reject);
-    });
-  });
-});
-```
+If you already have the pattern, it keeps working — `txStore.run(tx, …)`
+stores a `tx` handle whose wrappers carry an explicit session, and an
+explicit session wins over the ambient one. There is no conflict and
+nothing to migrate in a hurry. What you can now delete is the
+`scoped()` indirection in every repository, along with the ESLint rule
+that policed it.
 
-Three failure modes to know:
-
-* **The route forgot to `await`.** Async work after the response
-  finishes runs *outside* the tx — the `req.raw.once('close')` already
-  fired and the tx already committed. Always `await` everything before
-  returning the response.
-* **A long-running route holds the tx open.** See
-  [Long-running transactions](#long-running-transactions). A 30-second
-  HTTP handler with the tx pattern above means a 30-second open tx.
-* **Streaming responses.** SSE / WebSocket upgrades / chunked
-  responses confuse the `close` event. Either don't run streaming
-  routes inside this middleware, or close the tx explicitly before
-  yielding the first chunk.
-
-Background jobs (BullMQ, cron, queue consumers) do the same dance
-without the HTTP coupling:
-
-```ts
-worker.process(async (job) => {
-  await db.$transaction(async (tx) => {
-    await txStore.run(tx, async () => {
-      await handleJob(job);
-    });
-  });
-});
-```
-
-Same `scoped()` accessor works in both contexts. See
-[BACKEND.md](./BACKEND.md#transactions-in-http-and-job-contexts) for
-the Fastify, Express, NestJS, and Koa middleware variants.
+Two reasons to keep a store of your own anyway: you are on the browser
+adapters, where there is no async context and so no ambient session
+(`ambientSessionsSupported()` returns `false`); or the thing you want
+request-scoped is not the transaction but the *tenant* or the *shard*,
+which forge knows nothing about — see
+[MULTI-TENANT.md](./MULTI-TENANT.md#asynclocalstorage-middleware) and
+[SHARDING.md](./SHARDING.md#routing-pattern--asynclocalstorage-and-the-request-scope).
 
 ---
 
@@ -835,8 +1129,17 @@ beforeEach(async () => {
 afterEach(() => rollback());
 ```
 
-Tests then take `tx` instead of `db`. Every test sees a clean schema
-and the suite finishes orders of magnitude faster than truncate-between-tests.
+Tests then take `tx` instead of `db` — and they have to, even on
+2.19.0. The ambient session covers work awaited *beneath* the callback;
+this pattern deliberately escapes the callback (that is what the
+`resolve()` is for) so the test body runs in the async context that
+awaited it, outside the scope. A test body that reaches for `db` is
+therefore outside the transaction and its rows survive the rollback.
+Hand `tx` down, or open the transaction around the test body rather than
+around the fixture.
+
+Every test then sees a clean schema, and the suite finishes orders of
+magnitude faster than truncate-between-tests.
 
 Two caveats.
 
@@ -850,6 +1153,17 @@ materialised view refresh.** Anything that observes the actual committed
 state of the database from outside the tx will see nothing. Run those
 tests in a separate suite that commits.
 
+### If you are adding a transaction test to forge itself
+
+Use PGlite. `regression-transactions.ts` (in `forge:check` and in CI) is
+in-process, so it needs no service container, and it is the only
+available dialect that can actually *prove* session propagation: on
+SQLite the transaction is the process's one connection, so a query
+issued without the session is inside the transaction regardless and the
+test passes either way. A propagation bug is invisible there. PGlite
+hands out a real per-transaction connection, so a query that missed the
+session goes to a different one and the assertion fails.
+
 For Mongo, the same pattern works with `withTransaction` aborted —
 but Mongo's `withTransaction` automatically retries on transient
 errors, so a "forcibly throw to roll back" pattern can cause the
@@ -857,7 +1171,7 @@ driver to retry the test body. Use the lower-level
 `session.startTransaction()` / `session.abortTransaction()` directly:
 
 ```ts
-const session = dbClient.client.startSession();
+const session = db.adapter.mongoClient.startSession();
 session.startTransaction();
 try {
   await testBody(session);
@@ -873,20 +1187,30 @@ try {
 
 The four bugs that come up over and over.
 
-**Using `db` instead of `tx` inside the callback.** Silent: the write
-runs but it's not in the tx. If the tx rolls back, the write doesn't.
+**Using `db` instead of `tx` inside the callback — fixed on Node, still
+a bug in two places.** This used to be the first entry on this list: the
+write ran, it was not in the transaction, and a rollback left it behind.
+On Node it now joins the transaction through the
+[ambient session](#the-ambient-session--how-a-transaction-reaches-a-repository),
+which is what makes an untouched repository layer atomic.
 
 ```ts
 await db.$transaction(async (tx) => {
-  await tx.user.create({ data: ... });   // in tx
-  await db.post.create({ data: ... });   // NOT in tx — silently auto-committed
+  await tx.user.create({ data: ... });   // in the tx
+  await db.post.create({ data: ... });   // also in the tx, on Node, since 2.19.0
 });
 ```
 
-Forge has no way to detect this at runtime. The TypeScript types are
-the same on both. Code reviews and a lint rule
-(`no-restricted-syntax` matching `MemberExpression[object.name='db']`
-inside a function whose parameter is `tx`) are the only protections.
+Two cases where `db` is still outside it:
+
+* **In the browser** (sqlite-wasm, IndexedDB) there is no async context,
+  so there is no ambient session and the second line commits on its own.
+  `ambientSessionsSupported()` tells you which world you are in.
+* **A different `createDb()` handle.** The session is stored with its
+  adapter and returned only for that adapter, so `dbB.post.create(...)`
+  inside `dbA.$transaction(...)` is not in the transaction and cannot
+  be — see [Cross-database transactions](#cross-database-transactions).
+  That is deliberate: a driver rejects a session it did not create.
 
 **Forgetting `await` inside the callback.** The callback returns and
 the tx commits before the fire-and-forgotten promise resolves.
@@ -980,6 +1304,12 @@ async function transfer(fromId: string, toId: string, amount: number) {
 The stable lock order (lower id first) collapses the classic
 deadlock window. The retry loop catches the rare `P2034` that
 slips through anyway.
+
+The `Promise.all` over two reads is fine on the SQL adapters — one
+client serialises them for you — but **not on Mongo**, where a
+`ClientSession` rejects overlapping operations. Await the two reads one
+at a time if this has to run on Mongo. That is the same reason the
+[array form](#array-form) runs its thunks sequentially.
 
 ### (b) Bulk import
 

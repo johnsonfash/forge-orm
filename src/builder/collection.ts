@@ -24,7 +24,7 @@ const randomUUID = (): string => {
   }
   return s;
 };
-import { dbClient } from '../adapters/mongo/client';
+import { getDefaultClient } from '../adapters/mongo/client';
 import {
   CreateInput,
   CursorInput,
@@ -54,6 +54,7 @@ import { buildCount, buildDelete, buildGroupBy, buildInsert, buildProjection, bu
 import type { UpdateNode } from '../ir/types';
 import type { Adapter } from '../adapters/types';
 import { getDefaultMongoAdapter } from '../adapters/mongo/adapter';
+import { currentSession } from '../session-context';
 
 type ResolvedRow<F extends Record<string, Field<any, any>>> = {
   [K in keyof F]: F[K] extends Field<infer T, any> ? T : never;
@@ -270,13 +271,31 @@ export class CollectionWrapper<
 
   private get collection(): Collection<Document> {
     if (!this._collection) {
-      this._collection = dbClient.db.collection(this.model.collection);
+      // From the adapter that owns the connection, so a wrapper built by a
+      // second createDb() does not reach into the first one's database. The
+      // fallback keeps an adapter that predates the `db` accessor working.
+      const own = (this.adapter as { db?: unknown }).db as import('mongodb').Db | undefined;
+      this._collection = (own ?? getDefaultClient().db).collection(this.model.collection);
     }
     return this._collection;
   }
 
+  /**
+   * The session this call runs under: the one handed to this wrapper by
+   * `$transaction`, or the ambient one if we are inside a transaction
+   * callback that did not pass its `tx` down.
+   *
+   * Without the fallback, a repository called from inside a
+   * `$transaction(...)` callback ran OUTSIDE the transaction — the code read
+   * as atomic and was not, and nothing rolled back. See session-context.ts.
+   */
+  private get session(): unknown {
+    return this._session ?? currentSession(this._adapter);
+  }
+
   private get sessOpt() {
-    return this._session ? { session: this._session } : {};
+    const s = this.session;
+    return s ? { session: s } : {};
   }
 
   async findFirst<A extends {
@@ -366,7 +385,7 @@ export class CollectionWrapper<
       const mk = this._modelKey();
       const filtered = this._withSoftDeleteFilter(args);
       const node = buildSelect(mk, this.model, filtered ?? {}, 'many', schema as any);
-      const iter = (this.adapter as any).streamSelect(node, this.model, { session: this._session });
+      const iter = (this.adapter as any).streamSelect(node, this.model, { session: this.session });
       for await (const row of iter) yield row as ResolvedRow<F>;
       return;
     }
@@ -386,7 +405,7 @@ export class CollectionWrapper<
     const mk = this._modelKey();
     args = this._withSoftDeleteFilter(args);
     const node = buildCount(mk, this.model, args, schema as any);
-    return this.adapter.executeCount(node, this.model, { session: this._session });
+    return this.adapter.executeCount(node, this.model, { session: this.session });
   }
 
   // groupBy — typed aggregation. Each row of the result is shaped as
@@ -406,9 +425,17 @@ export class CollectionWrapper<
     take?: number; limit?: number;
     skip?: number; offset?: number;
   }>(args: A): Promise<any[]> {
+    // `_find`, `findManyStream` and `count` all do these two; groupBy did
+    // neither. So a soft-deleted row was counted and summed — and because
+    // `aggregate({ _sum: … })` routes through here, a revenue total silently
+    // included deleted orders. A typo'd `where` key was not caught either,
+    // which under strict mode means the filter matched nothing and the
+    // aggregate came back as if the rows did not exist.
+    this._assertStrictWhere((args as { where?: unknown }).where);
+    const scoped = this._withSoftDeleteFilter(args);
     const mk = this._modelKey();
-    const node = buildGroupBy(mk, this.model, args as any, schema as any);
-    return this.adapter.executeGroupBy(node, this.model, { session: this._session });
+    const node = buildGroupBy(mk, this.model, scoped as any, schema as any);
+    return this.adapter.executeGroupBy(node, this.model, { session: this.session });
   }
 
   // Lazily resolve the schema-side key for this model — IR builders and the
@@ -515,7 +542,7 @@ export class CollectionWrapper<
     const resolvedScalar = await this._resolveOwningConnectOrCreate(scalar, nested);
     const row = this.adapter.coerceInbound(this.model, this._fillAutoId(resolvedScalar));
     const node = buildInsert(mk, this.model, { rows: [row] }, schema as any);
-    const { docs } = await this.adapter.executeInsert(node, this.model, { session: this._session });
+    const { docs } = await this.adapter.executeInsert(node, this.model, { session: this.session });
     const doc = docs[0];
     if (nested.length > 0) await this._applyNestedWrites(doc, nested);
     return this._returnOne(doc, args);
@@ -559,7 +586,7 @@ export class CollectionWrapper<
       { rows, skipDuplicates: args.skipDuplicates },
       schema as any,
     );
-    const { count } = await this.adapter.executeInsert(node, this.model, { session: this._session });
+    const { count } = await this.adapter.executeInsert(node, this.model, { session: this.session });
     return { count };
   }
 
@@ -594,7 +621,7 @@ export class CollectionWrapper<
       schema as any,
     ));
     const { doc } = await this.adapter.executeUpdate(node, this.model, {
-      session: this._session,
+      session: this.session,
       semanticOp: _internal?.semanticOp,
     });
     if (!doc) throw notFoundError(this.model.collection, args.where);
@@ -623,7 +650,7 @@ export class CollectionWrapper<
       schema as any,
     ));
     const r = await this.adapter.executeUpdate(node, this.model, {
-      session: this._session,
+      session: this.session,
       semanticOp: _internal?.semanticOp,
     });
     return { count: r.count };
@@ -676,7 +703,7 @@ export class CollectionWrapper<
         { where: args.where, data: this._applyUpdatedAt(args.update), many: false },
         schema as any,
       ));
-      let { doc } = await this.adapter.executeUpdate(node, this.model, { session: this._session });
+      let { doc } = await this.adapter.executeUpdate(node, this.model, { session: this.session });
       if (!doc) {
         try {
           return await this.create({
@@ -689,7 +716,7 @@ export class CollectionWrapper<
           // Raced with a concurrent insert — the row exists now, so the
           // update leg must succeed. Anything else is a real error.
           if (!(err instanceof DbKnownError) || err.code !== 'P2002') throw err;
-          ({ doc } = await this.adapter.executeUpdate(node, this.model, { session: this._session }));
+          ({ doc } = await this.adapter.executeUpdate(node, this.model, { session: this.session }));
           if (!doc) throw err;
         }
       }
@@ -705,7 +732,7 @@ export class CollectionWrapper<
       { where: args.where, data: this._applyUpdatedAt(args.update), many: false, upsertCreate: createCoerced },
       schema as any,
     ));
-    const { doc } = await this.adapter.executeUpdate(node, this.model, { session: this._session });
+    const { doc } = await this.adapter.executeUpdate(node, this.model, { session: this.session });
     return this._returnOne(doc, args);
   }
 
@@ -726,7 +753,7 @@ export class CollectionWrapper<
       { where: args.where, many: false },
       schema as any,
     );
-    const { doc } = await this.adapter.executeDelete(node, this.model, { session: this._session });
+    const { doc } = await this.adapter.executeDelete(node, this.model, { session: this.session });
     if (!doc) throw notFoundError(this.model.collection, args.where);
     return this._returnOne(doc, args);
   }
@@ -741,7 +768,7 @@ export class CollectionWrapper<
       { where: args.where, many: true },
       schema as any,
     );
-    const r = await this.adapter.executeDelete(node, this.model, { session: this._session });
+    const r = await this.adapter.executeDelete(node, this.model, { session: this.session });
     return { count: r.count };
   }
 
@@ -905,7 +932,7 @@ export class CollectionWrapper<
     if (typeof (this.adapter as any).refreshView !== 'function') {
       throw new Error(`[forge] adapter '${this.adapter.kind}' does not implement materialised-view refresh.`);
     }
-    await (this.adapter as any).refreshView(this.model, { ...opts, session: this._session });
+    await (this.adapter as any).refreshView(this.model, { ...opts, session: this.session });
   }
 
   // Auto-refresh on an interval. Returns a stop() that clears the timer — the
@@ -970,7 +997,7 @@ export class CollectionWrapper<
     if (hardLimit != null && (node.limit == null || node.limit > hardLimit)) {
       node.limit = hardLimit;
     }
-    const rows = await this.adapter.executeSelect(node, this.model, { session: this._session });
+    const rows = await this.adapter.executeSelect(node, this.model, { session: this.session });
     return rows;
   }
 
@@ -985,7 +1012,7 @@ export class CollectionWrapper<
     // get the exact same select/include/omit semantics as reads.
     const { projection, hydration } = buildProjection(this.model, args, schema as any);
     await this.adapter.applyProjectionAndHydration(
-      rows, this.model, { projection, hydration }, { session: this._session },
+      rows, this.model, { projection, hydration }, { session: this.session },
     );
     // When `select` is exclusive, prune the row to just the requested scalar
     // keys (plus already-hydrated relations). The executor's projection only

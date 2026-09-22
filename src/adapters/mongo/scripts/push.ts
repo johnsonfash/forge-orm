@@ -3,7 +3,7 @@ import * as dotenv from 'dotenv';
 dotenv.config();
 
 import type { Collection } from 'mongodb';
-import { dbClient } from '../client';
+import { getDefaultClient } from '../client';
 import { schema as bundledSampleSchema } from '../../../schema';
 import { FieldDef, ModelDef } from '../../../schema/types';
 
@@ -365,8 +365,10 @@ export function collectIndexSpecs(modelName: string, model: ModelDef<any>): Inde
  *                        consumers should always pass their own schema.
  */
 export async function pushAllIndexes(consumerSchema?: any): Promise<void> {
-  await dbClient.connect();
-  const db = dbClient.db;
+  // A CLI run has no adapter, so it owns the process default outright.
+  const client = getDefaultClient();
+  await client.connect();
+  const db = client.db;
   const schema = consumerSchema ?? bundledSampleSchema;
 
   // bigserial is SQL-only by definition (auto-incrementing scalar). Throw

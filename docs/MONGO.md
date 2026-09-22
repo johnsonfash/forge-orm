@@ -22,6 +22,7 @@ shared with every other adapter.
 * [Read concerns and write concerns](#read-concerns-and-write-concerns)
 * [Sharding](#sharding)
 * [Connection pool](#connection-pool)
+* [One client per `createDb()`](#one-client-per-createdb)
 * [BSON types — round-trip with forge](#bson-types--round-trip-with-forge)
 * [`divide` compiles to a pipeline update](#divide-compiles-to-a-pipeline-update)
 * [The `update` path and BSON coercion](#the-update-path-and-bson-coercion)
@@ -121,7 +122,11 @@ export interface MongoDriver {
 
 `MongoAdapter.connect(url)` calls `client.connect()` (which is
 idempotent on the driver, safe whether the caller already connected) and
-caches the `Db` handle. Anything that implements `.db()`,
+caches the `Db` handle on the client **this adapter owns** — one per
+`createDb()` since 2.19.0; see
+[One client per `createDb()`](#one-client-per-createdb). The `url` is
+passed in rather than read from the environment, which is the load-bearing
+part of that fix. Anything that implements `.db()`,
 `.startSession()`, and the standard collection methods qualifies —
 DocumentDB, Cosmos (Mongo API), and FerretDB all fit the slot but with
 the feature-flag caveats below.
@@ -590,7 +595,7 @@ async transaction<T>(fn: (session: ClientSession) => Promise<T>): Promise<T> {
 automatically retries on `TransientTransactionError` and
 `UnknownTransactionCommitResult`. You get that retry for free; the
 SQL adapters have to implement it themselves (see
-[TRANSACTIONS](./TRANSACTIONS.md#interactive-transactions)).
+[TRANSACTIONS](./TRANSACTIONS.md#callback-form)).
 
 ### Replica set requirement
 
@@ -817,6 +822,109 @@ export const db = await createDb({ schema, driver: mongoDriver(client) });
 
 Register `db.$disconnect()` from your SIGTERM handler. `close()` is
 idempotent on the driver.
+
+**`close()` only closes what forge opened.** A client built from a `url`
+is closed. An injected one is *released*: the handle stops working (its
+`db` throws again) and your `MongoClient` stays open, because closing it
+is the caller's call. That is what makes the shared-client,
+database-per-tenant pattern in
+[MULTI-TENANT.md](./MULTI-TENANT.md#mongo-one-client-many-databases) safe
+— an evicted handle no longer takes every other tenant's connection with
+it. Close the client you created, once, at shutdown.
+
+---
+
+## One client per `createDb()`
+
+Each `MongoAdapter` owns its own `DatabaseClient`, which owns its own
+`MongoClient` and its own `Db`. Two `createDb()` calls in one process are
+two connections to two databases, and closing one does not touch the
+other.
+
+```ts
+const live = await createDb({ url: 'mongodb://host/app',      schema });
+const arch = await createDb({ url: 'mongodb://host/app_2023', schema });
+
+await live.order.count();      // app.orders
+await arch.order.count();      // app_2023.orders
+await arch.$disconnect();      // `live` is still usable
+```
+
+One thing that is still shared: the **active schema** is module-level, so
+relation targets resolve against whichever schema was registered last.
+Register the same schema in both handles (as above), or keep the second
+one to raw statements.
+
+That is new in 2.19.0, and the previous behaviour is worth stating
+because it was silent.
+
+### What the singleton broke
+
+`dbClient` used to be the only client there was — a module-level
+singleton every Mongo code path reached for directly. Two things
+compounded:
+
+* `connect()` **early-returned** when it already held a `Db`, so the
+  second `createDb()` kept the first one's connection.
+* it read `process.env.DATABASE_URL` rather than the URL it was handed,
+  so even without the early return it would have resolved to whichever
+  URL reached the environment first.
+
+So `createDb({ url: B })` wrote to **A**. No error, no warning, no log
+line other than the first connect's. And because both handles shared one
+client, `$disconnect()` on either closed the connection under both, so
+the surviving handle's next query failed for a reason with no obvious
+connection to the code that caused it.
+
+The three shapes that hit this are exactly the ones where it hurts most:
+a migration or backfill tool holding source and destination, a test
+harness holding a fixture database and the app database, and a
+database-per-tenant deployment. For the last one it is a cross-tenant
+data write, which is the kind of bug you find in a support ticket.
+
+### `adapter.db` and `adapter.mongoClient`
+
+The adapter exposes its own handles, which is what raw access should use
+now:
+
+```ts
+const coll = db.adapter.db.collection('audit_events');       // the Db
+const session = db.adapter.mongoClient.startSession();       // the MongoClient
+```
+
+Both throw a clear error if read before `connect()` has resolved, rather
+than returning `undefined` and failing later. The session that
+`$transaction` opens comes from this client, so it is valid against this
+database and no other — see
+[TRANSACTIONS.md](./TRANSACTIONS.md#the-ambient-session--how-a-transaction-reaches-a-repository)
+for why the ambient session is keyed by adapter.
+
+### The exported `dbClient` still works
+
+`dbClient` is public API — plenty of code uses it for raw collection
+access — so it was kept, and it is not deprecated. It forwards to the
+**first** client created, which in a single-database app is the only one
+there is:
+
+```ts
+import { dbClient } from 'forge-orm';
+
+await dbClient.db.collection('orders').watch();   // unchanged behaviour
+```
+
+A second `createDb()` gets its own client and does not disturb that
+default. Closing the first releases the default, so a later connect
+starts clean — and `close()` only closes a client forge opened, never one
+you injected (see [Connection pool](#connection-pool)). The rule of
+thumb: `dbClient` for a single-database app,
+`db.adapter.db` when there is more than one handle in the process — with
+two handles, `dbClient` silently means "the first one", which is the
+ambiguity you are trying to get away from.
+
+One deliberate leftover: `connect()` still populates
+`process.env.DATABASE_URL` from the first URL if it is not already set,
+because the CLI scripts (`forge push` and friends) connect without an
+adapter and read it from there.
 
 ---
 
@@ -1161,6 +1269,11 @@ A worker that reacts to every paid order, dedupes by `_id`, and
 survives restarts via resume tokens stored in a `cursor_state`
 collection.
 
+This uses the exported `dbClient`, which is the right choice for a
+single-database app. In a process with more than one `createDb()` handle,
+use `db.adapter.db` instead — `dbClient` means "the first client created"
+— see [One client per `createDb()`](#one-client-per-createdb).
+
 ```ts
 import type { ChangeStreamDocument, ResumeToken } from 'mongodb';
 import { dbClient } from 'forge-orm';
@@ -1290,7 +1403,7 @@ compose well into typed `include`.
 |---|---|
 | Adapter wiring + capabilities + doctor | `src/adapters/mongo/adapter.ts` |
 | Driver port (`MongoDriver`) | `src/adapters/mongo/driver.ts` |
-| MongoClient lifecycle + transactions | `src/adapters/mongo/client.ts` |
+| MongoClient lifecycle + transactions, one client per adapter | `src/adapters/mongo/client.ts` |
 | Lazy access to the `mongodb` peer dep | `src/adapters/mongo/bson.ts` |
 | IR → driver-call compiler | `src/adapters/mongo/compile-from-ir.ts` |
 | Args → IR compile API | `src/adapters/mongo/compile.ts` |

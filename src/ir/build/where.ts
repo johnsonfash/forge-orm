@@ -215,10 +215,44 @@ export function buildWhereTree(
     const rel = relations[key];
     if (rel && value && typeof value === 'object') {
       const targetModel = schema?.[rel.target] ?? model;
-      for (const mode of ['is', 'isNot', 'some', 'every', 'none'] as const) {
+      // A relation filter with no recognised mode pushed NO predicate and then
+      // fell through, so `where: { posts: { _count: { gt: 0 } } }` — which the
+      // docs advertised — matched EVERY parent row. Same failure class as an
+      // all-undefined `where`: a filter that does not filter, silently.
+      const MODES = ['is', 'isNot', 'some', 'every', 'none'] as const;
+      if (!MODES.some((m) => m in value)) {
+        const keys = Object.keys(value as Record<string, unknown>);
+        throw new Error(
+          `[forge] where.${key} is a relation, and ` +
+          `{ ${keys.join(', ')} } is not a relation filter — so it would have ` +
+          `matched every row.\n` +
+          `  Use one of: ${MODES.join(', ')} — e.g. ` +
+          `{ ${key}: { some: { … } } }.` +
+          (keys.includes('_count')
+            ? `\n  Counting related rows in a filter is not supported. ` +
+              `\`{ ${key}: { some: {} } }\` is "has at least one", ` +
+              `\`{ ${key}: { none: {} } }\` is "has none"; for a threshold use ` +
+              `groupBy with \`having\`.`
+            : ''),
+        );
+      }
+      for (const mode of MODES) {
         if (mode in value) {
-          const nested = buildWhereTree(targetModel, value[mode], schema) ?? null;
-          children.push({ kind: 'relation', relation: key, mode, nested });
+          // `_withDeleted` is a directive, not a column. Left in place it
+          // compiles to a filter on a column no table has.
+          const raw = value[mode];
+          let withDeleted = false;
+          let inner = raw;
+          if (raw && typeof raw === 'object' && !Array.isArray(raw) && '_withDeleted' in raw) {
+            const { _withDeleted, ...rest } = raw as Record<string, unknown>;
+            withDeleted = !!_withDeleted;
+            inner = Object.keys(rest).length ? rest : undefined;
+          }
+          const nested = buildWhereTree(targetModel, inner, schema) ?? null;
+          children.push({
+            kind: 'relation', relation: key, mode, nested,
+            ...(withDeleted ? { withDeleted: true } : {}),
+          });
         }
       }
       continue;

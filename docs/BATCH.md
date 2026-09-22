@@ -281,9 +281,10 @@ re-`SELECT` by some natural key, your options shrink to:
    sensible at very small N.
 
 The `updateMany` / `deleteMany` rows-back gap is universal — no
-adapter returns the affected rows. Workarounds: `$transaction([
-findMany, updateMany ])`, or a `RETURNING *` raw query on Postgres
-specifically (``db.$queryRaw`UPDATE … RETURNING *```).
+adapter returns the affected rows. Workarounds:
+`$transaction([() => findMany(…), () => updateMany(…)])` — thunks, as of
+2.19.0 — or a `RETURNING *` raw query on Postgres specifically
+(``db.$queryRaw`UPDATE … RETURNING *```).
 
 The `select` and `include` keys are not honoured on `createMany` —
 the verb returns `{ count }` even on dialects that support
@@ -300,7 +301,7 @@ trade-offs.
 | Shape                                | Round-trips | Statements parsed | Commits | Memory peak |
 |--------------------------------------|-------------|--------------------|---------|-------------|
 | `createMany({ data: N rows })`       | 1           | 1                  | 1       | N rows       |
-| `$transaction([N creates])`          | 1           | N                  | 1       | N rows       |
+| `$transaction([N create thunks])`    | N           | N                  | 1       | N rows       |
 | N separate `create` calls            | N           | N                  | N       | 1 row        |
 
 Rough numbers, single client on a local Postgres, 200-byte rows
@@ -311,6 +312,11 @@ Rough numbers, single client on a local Postgres, 200-byte rows
 | `createMany({ data: 10_000 rows })`| ~150,000      |
 | `$transaction([10_000 creates])`   | ~25,000       |
 | 10,000 separate `create` calls     | ~3,000        |
+
+The middle figure was measured before 2.19.0, when the array form was a
+`Promise.all` over already-running promises. The thunk form runs them one
+at a time inside one transaction, so treat ~25,000 as an upper bound and
+`createMany` as the answer for a real bulk load.
 
 The shape of the difference is the same on every adapter. Exact
 numbers shift with network latency (RTT pads the per-round-trip

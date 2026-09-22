@@ -20,7 +20,8 @@ import {
 import { withSqliteErrors } from './errors';
 import type { SqliteDriver } from './driver';
 import { fromDriverBytes } from '../../bytes';
-import { hydrateManyRelation } from '../../ir/hydrate-many';
+import { hydrateManyRelation, hydrateOneRelation } from '../../ir/hydrate-many';
+import { softDeleteField } from '../../ir/build/soft-delete';
 
 // SQLite IR executor. Talks to a SqliteDriver port (see driver.ts), so it works
 // over a synchronous driver (better-sqlite3) or an async one (expo-sqlite,
@@ -217,22 +218,13 @@ async function hydrateOne(
   targetModel: ModelDef<any>,
   owning: boolean,
 ): Promise<void> {
-  const fromField = owning ? rel.on : rel.refs;
-  const toField   = owning ? rel.refs : rel.on;
-  const fks = unique(rows.map((r) => r[fromField]).filter((v) => v != null));
-  if (fks.length === 0) { for (const r of rows) r[rel.name] = null; return; }
-  const subNode: SelectNode = {
-    kind: 'select', model: rel.target, cardinality: 'many',
-    where: { kind: 'leaf', field: toField, op: 'in', value: fks },
-    ...(rel.nested ?? {}),
-  };
-  const found = await executeSqliteSelect(db, subNode, targetModel);
-  const byKey = new Map<string, any>();
-  for (const t of found) byKey.set(String(t[toField]), t);
-  for (const r of rows) {
-    const k = r[fromField];
-    r[rel.name] = k == null ? null : (byKey.get(String(k)) ?? null);
-  }
+  await hydrateOneRelation({
+    rows, rel,
+    parentField: owning ? rel.on : rel.refs,
+    targetField: owning ? rel.refs : rel.on,
+    keyOf: (v) => String(v),
+    runSelect: (node) => executeSqliteSelect(db, node, targetModel),
+  });
 }
 
 async function hydrateMany(
@@ -265,7 +257,14 @@ async function applyRelationCounts(
     if (refs.length === 0) { for (const r of rows) r._count[relName] = 0; continue; }
     // SQLite supports IN (?, ?, ?, …) but not ANY($1) array syntax.
     const placeholders = refs.map(() => '?').join(', ');
-    const sql = `SELECT "${rel.on}" AS fk, COUNT(*) AS c FROM "${targetModel.collection}" WHERE "${rel.on}" IN (${placeholders}) GROUP BY "${rel.on}"`;
+    // Soft-deleted children are excluded, so `_count` agrees with the rows
+    // `include` hands back. Without it `_count: { posts: true }` said 7 while
+    // `include: { posts: true }` returned 5.
+    const sd = softDeleteField(targetModel);
+    const sql = `SELECT "${rel.on}" AS fk, COUNT(*) AS c FROM "${targetModel.collection}" `
+      + `WHERE "${rel.on}" IN (${placeholders})`
+      + (sd ? ` AND "${sd}" IS NULL` : '')
+      + ` GROUP BY "${rel.on}"`;
     const groups = await withSqliteErrors(() => db.all(sql, encodeParams(refs)));
     const byFk = new Map<string, number>();
     for (const g of groups) byFk.set(String(g.fk), Number(g.c));

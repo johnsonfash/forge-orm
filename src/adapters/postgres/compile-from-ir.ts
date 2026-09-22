@@ -14,6 +14,7 @@ import type { FieldDef, ModelDef } from '../../schema/types';
 import { schema } from '../../schema';
 import { PostgresDialect, type Dialect } from './dialect';
 import { multiPolygonBbox } from '../shared/wkt';
+import { softDeleteField } from '../../ir/build/soft-delete';
 
 // Hard rules:
 //   • Never interpolate values into the SQL string — always via params.
@@ -313,8 +314,18 @@ function compileRelationFilter(
   const isOwning = ctx.model.fields[rel.on] != null;
   const parentCol = isOwning ? rel.on  : rel.refs;
   const targetCol = isOwning ? rel.refs : rel.on;
+  // The soft-delete scope goes on the JOIN condition, not into `nested`.
+  // It has to: `every` compiles to NOT EXISTS of the NEGATED inner condition,
+  // so a scope folded into `nested` would be negated with it and `every`
+  // would come to mean "every related row is live AND matches" — failing for
+  // any parent that has ever deleted a child. On the join condition it
+  // restricts which rows the subquery considers, which is right for all five
+  // modes.
+  const sd = tree.withDeleted ? undefined : softDeleteField(targetModel);
+  const scopeClause = sd ? ` AND ${aliasQ}.${ctx.d.quoteIdent(sd)} IS NULL` : '';
   const joinCondition =
-    `${aliasQ}.${ctx.d.quoteIdent(targetCol)} = ${ctx.table}.${ctx.d.quoteIdent(parentCol)}`;
+    `${aliasQ}.${ctx.d.quoteIdent(targetCol)} = ${ctx.table}.${ctx.d.quoteIdent(parentCol)}` +
+    scopeClause;
 
   const inner = tree.nested
     ? compileWhereNode(

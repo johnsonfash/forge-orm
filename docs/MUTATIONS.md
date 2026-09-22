@@ -934,7 +934,7 @@ See [docs/RAW-SQL.md](./RAW-SQL.md) for the `$queryRaw` shape.
 Three shapes for bulk writes, in order of throughput:
 
 1. **`createMany`** — one statement, one round-trip. Best.
-2. **`$transaction([...])`** — N statements, one round-trip, one commit.
+2. **`$transaction([() => …, () => …])`** — N statements, one transaction, one commit. The array holds thunks as of 2.19.0; promises are refused.
 3. **N `create` calls** — N statements, N round-trips, N commits. Worst.
 
 Rough numbers, single client on a local Postgres, 200-byte rows:
@@ -947,7 +947,9 @@ Rough numbers, single client on a local Postgres, 200-byte rows:
 
 The shape of the difference is the same on every adapter — exact
 numbers shift with network latency, row width, and the index count on
-the target table.
+the target table. The middle figure was measured before 2.19.0, when the
+array form was a `Promise.all`; the thunk form runs sequentially inside
+one transaction, so read it as an upper bound.
 
 When `createMany` is not enough — sustained ingest above ~150k rows/s —
 drop to the dialect's native bulk path:

@@ -259,7 +259,7 @@ app.get('/me', async (req, res) => {
 });
 ```
 
-Compose with the request-scoped transaction store from [BACKEND.md — Production server recipes](./BACKEND.md#production-server-recipes): the outer middleware binds tenant, the inner middleware binds tx, the handler calls `scoped()` and gets a tenant-safe handle inside a transaction.
+Compose with the request-scoped transaction middleware from [BACKEND.md — Production server recipes](./BACKEND.md#production-server-recipes): the outer middleware binds the tenant, the inner one opens the transaction, and the handler calls `scoped()` to get a tenant-safe handle. Since 2.19.0 only the tenant part needs a store of your own — the transaction propagates on forge's own `AsyncLocalStorage`, so a handle taken from your tenant store is inside the open transaction already (see [TRANSACTIONS.md](./TRANSACTIONS.md#the-ambient-session--how-a-transaction-reaches-a-repository)).
 
 ### Compile-time guard against missing scopes
 
@@ -563,7 +563,9 @@ await client.connect();
 
 const cache = new LRUCache<string, ForgeDb>({
   max: 5_000,
-  dispose: async (db) => { await db.$disconnect(); /* doesn't close the shared client */ },
+  // Safe as of 2.19.0: $disconnect() releases an injected client rather than
+  // closing it, so an eviction does not take the other tenants down.
+  dispose: async (db) => { await db.$disconnect(); },
 });
 
 export async function getTenantDb(tenantId: string) {
@@ -579,6 +581,10 @@ export async function getTenantDb(tenantId: string) {
 ```
 
 The forge `mongoDriver(client, dbName)` form is the entire story. There's no per-tenant connect cost; the same TCP connection multiplexes commands across databases. This is why Mongo is the cheapest dialect to operate shape 3 on. Cap the cache at "how many tenants you want forge metadata in memory for"; the underlying connection pool is shared.
+
+**This shape needs 2.19.0, in two ways.** Before it, every `createDb()` in a process shared one module-level Mongo client, and adopting an injected client early-returned once it held a database — so the *second* `getTenantDb()` call silently ran against the *first* tenant's database. Same pool, wrong database, no error. Each adapter now owns its client wrapper, so the `dbName` you pass is the database you get.
+
+And `close()` now only closes what forge opened. An injected client is *released* — the handle is torn down, your `MongoClient` is left open — so the `dispose` above is safe. Before 2.19.0 the first eviction closed the shared client under every other tenant. Close the shared client yourself, once, at shutdown.
 
 ---
 

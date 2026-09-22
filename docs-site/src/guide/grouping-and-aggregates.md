@@ -41,6 +41,6 @@ await db.order.findMany({ distinct: ['status'] });    // one row per status
 await db.order.count({ distinct: ['channel'] });      // how many distinct channels
 ```
 
-See more — **[docs/QUERIES.md](/reference/queries#groupby--having)** for the full groupBy / having vocabulary and per-dialect emit.
+See more — **[docs/QUERIES.md](/reference/queries#groupby-and-having)** for the full groupBy / having vocabulary and per-dialect emit.
 
 ---

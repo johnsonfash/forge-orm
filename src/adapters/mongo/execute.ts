@@ -1,5 +1,5 @@
-import type { ClientSession, Document } from 'mongodb';
-import { dbClient } from './client';
+import type { ClientSession, Db, Document } from 'mongodb';
+import { getDefaultClient } from './client';
 import type {
   CountNode,
   DeleteNode,
@@ -24,9 +24,23 @@ import { applyCascadesForDelete } from './cascade';
 import { notFoundError, rethrowMongoError } from './errors';
 import type { ObjectId } from 'mongodb';
 import { mongo } from './bson';
-import { hydrateManyRelation } from '../../ir/hydrate-many';
+import { hydrateManyRelation, hydrateOneRelation } from '../../ir/hydrate-many';
+import { softDeleteField } from '../../ir/build/soft-delete';
 
-interface ExecOpts { session?: ClientSession }
+interface ExecOpts { session?: ClientSession; db?: Db }
+
+/**
+ * The `Db` this call runs against.
+ *
+ * It comes from the adapter that owns the connection. The fallback exists for
+ * the CLI scripts, which call the executors without an adapter — it is NOT a
+ * convenience for the library path, which always passes `db`, because reaching
+ * for a process-wide default is exactly how two databases ended up sharing one
+ * connection.
+ */
+function mongoDb(opts: ExecOpts | undefined): Db {
+  return (opts?.db as Db | undefined) ?? getDefaultClient().db;
+}
 
 export async function executeSelect(
   node: SelectNode,
@@ -47,7 +61,7 @@ export async function executeSelect(
   }
 
   const artifact = compileSelect(node, model);
-  const coll = dbClient.db.collection(artifact.collection);
+  const coll = mongoDb(opts).collection(artifact.collection);
   const filter = artifact.args.filter ?? {};
   const options = artifact.args.options ?? {};
 
@@ -76,7 +90,7 @@ export async function executeSelect(
     out = dedupeBy(out, node.distinct);
   }
 
-  await applyProjectionAndHydration(out, model, node, opts.session);
+  await applyProjectionAndHydration(out, model, node, opts);
   return out;
 }
 
@@ -105,7 +119,7 @@ async function executeSelectWithGeoNear(
   opts: ExecOpts,
 ): Promise<any[]> {
   const artifact = compileSelect(node, model);
-  const coll = dbClient.db.collection(artifact.collection);
+  const coll = mongoDb(opts).collection(artifact.collection);
   const sessOpt = opts.session ? { session: opts.session } : undefined;
 
   // Walk the artifact filter once. Same-field $near collapses into the
@@ -144,7 +158,7 @@ async function executeSelectWithGeoNear(
 
   let out = docs.map((r) => decodeRow(model, r));
   if (node.distinct?.length) out = dedupeBy(out, node.distinct);
-  await applyProjectionAndHydration(out, model, node, opts.session);
+  await applyProjectionAndHydration(out, model, node, opts);
   return out;
 }
 
@@ -224,7 +238,7 @@ async function executeSelectWithVectorSearch(
   opts: ExecOpts,
 ): Promise<any[]> {
   const artifact = compileSelect(node, model);
-  const coll = dbClient.db.collection(artifact.collection);
+  const coll = mongoDb(opts).collection(artifact.collection);
   const sessOpt = opts.session ? { session: opts.session } : undefined;
   const dbField = nearToEntry.field;
   const v = nearToEntry.nearTo as { vector: number[] };
@@ -252,7 +266,7 @@ async function executeSelectWithVectorSearch(
   const docs = await coll.aggregate(pipeline, sessOpt).toArray();
   let out = docs.map((r) => decodeRow(model, r));
   if (node.distinct?.length) out = dedupeBy(out, node.distinct);
-  await applyProjectionAndHydration(out, model, node, opts.session);
+  await applyProjectionAndHydration(out, model, node, opts);
   return out;
 }
 
@@ -263,14 +277,14 @@ async function applyProjectionAndHydration(
   rows: any[],
   model: ModelDef<any>,
   node: { projection?: SelectNode['projection']; hydration?: RelationPlan[] },
-  session?: ClientSession,
+  opts: ExecOpts,
 ): Promise<void> {
   if (rows.length === 0) return;
   if (node.projection?.counts?.length) {
-    await applyRelationCounts(rows, model, node.projection.counts, session);
+    await applyRelationCounts(rows, model, node.projection.counts, opts);
   }
   if (node.hydration?.length) {
-    await hydrate(rows, model, node.hydration, session);
+    await hydrate(rows, model, node.hydration, opts);
   }
 }
 
@@ -285,7 +299,7 @@ export async function executeInsert(
   opts: ExecOpts = {},
 ): Promise<{ docs: any[]; count: number }> {
   const artifact = compileInsert(node, model);
-  const coll = dbClient.db.collection(artifact.collection);
+  const coll = mongoDb(opts).collection(artifact.collection);
   const sessOpt = opts.session ? { session: opts.session } : undefined;
   try {
     if (artifact.op === 'insertOne') {
@@ -314,7 +328,7 @@ export async function executeUpdate(
   opts: ExecOpts = {},
 ): Promise<{ doc?: any; count: number }> {
   const artifact = compileUpdate(node, model);
-  const coll = dbClient.db.collection(artifact.collection);
+  const coll = mongoDb(opts).collection(artifact.collection);
   const sessOpt = opts.session ? { session: opts.session } : undefined;
   const filter = artifact.args.filter ?? {};
   const update = artifact.args.update;
@@ -356,7 +370,7 @@ export async function executeDelete(
   opts: ExecOpts = {},
 ): Promise<{ doc?: any; count: number }> {
   const artifact = compileDelete(node, model);
-  const coll = dbClient.db.collection(artifact.collection);
+  const coll = mongoDb(opts).collection(artifact.collection);
   const sessOpt = opts.session ? { session: opts.session } : undefined;
   const filter = artifact.args.filter ?? {};
   if (artifact.op === 'findOneAndDelete') {
@@ -364,7 +378,7 @@ export async function executeDelete(
     const target = await coll.findOne(filter, sessOpt);
     if (!target) return { doc: undefined, count: 0 };
     await coll.deleteOne({ _id: (target as any)._id }, sessOpt);
-    await applyCascadesForDelete(model, [target as any]);
+    await applyCascadesForDelete(model, [target as any], undefined, mongoDb(opts));
     return { doc: target, count: 1 };
   }
   // Fetch first so cascade enforcement runs against the pre-delete rows.
@@ -372,7 +386,7 @@ export async function executeDelete(
   if (targets.length === 0) return { count: 0 };
   const ids = targets.map((d) => (d as any)._id);
   const r = await coll.deleteMany({ _id: { $in: ids } }, sessOpt);
-  await applyCascadesForDelete(model, targets as any[]);
+  await applyCascadesForDelete(model, targets as any[], undefined, mongoDb(opts));
   return { count: r.deletedCount };
 }
 
@@ -404,7 +418,7 @@ export async function executeGroupBy(
   opts: ExecOpts = {},
 ): Promise<any[]> {
   const artifact = compileGroupBy(node, model);
-  const coll = dbClient.db.collection(artifact.collection);
+  const coll = mongoDb(opts).collection(artifact.collection);
   const sessOpt = opts.session ? { session: opts.session } : undefined;
   const docs = await coll.aggregate(artifact.args.pipeline, sessOpt).toArray();
   return docs.map((d) => reshapeMongoGroupByRow(d, node.by));
@@ -416,7 +430,7 @@ export async function executeCount(
   opts: ExecOpts = {},
 ): Promise<number> {
   const artifact = compileCount(node, model);
-  const coll = dbClient.db.collection(artifact.collection);
+  const coll = mongoDb(opts).collection(artifact.collection);
   const sessOpt = opts.session ? { session: opts.session } : undefined;
   const filter = artifact.args.filter ?? {};
 
@@ -440,7 +454,7 @@ async function hydrate(
   rows: any[],
   parentModel: ModelDef<any>,
   hydration: RelationPlan[],
-  session?: ClientSession,
+  opts: ExecOpts,
 ): Promise<void> {
   for (const rel of hydration) {
     const targetModel = (schema as any)[rel.target] as ModelDef<any> | undefined;
@@ -450,11 +464,11 @@ async function hydrate(
     // Inverse-side one or many: target holds FK pointing at parent.refs.
     const isOwningOne = rel.kind === 'one' && hasField(parentModel, rel.on);
     if (isOwningOne) {
-      await hydrateOwningOne(rows, rel, parentModel, targetModel, session);
+      await hydrateOwningOne(rows, rel, parentModel, targetModel, opts);
     } else if (rel.kind === 'one') {
-      await hydrateInverseOne(rows, rel, parentModel, targetModel, session);
+      await hydrateInverseOne(rows, rel, parentModel, targetModel, opts);
     } else {
-      await hydrateMany(rows, rel, parentModel, targetModel, session);
+      await hydrateMany(rows, rel, parentModel, targetModel, opts);
     }
   }
 }
@@ -464,34 +478,17 @@ async function hydrateOwningOne(
   rel: RelationPlan,
   parentModel: ModelDef<any>,
   targetModel: ModelDef<any>,
-  session?: ClientSession,
+  opts: ExecOpts,
 ): Promise<void> {
-  const fks = unique(rows.map((r) => r[rel.on]).filter(notNull));
-  if (fks.length === 0) {
-    for (const r of rows) r[rel.name] = null;
-    return;
-  }
-  const coercedRefs = fks.map((v) =>
-    coerceFieldValue(getFieldDef(targetModel, rel.refs) ?? targetModel.fields.id, v),
-  );
-  const subNode = mergeNested(rel, {
-    where: undefined,
-    cardinality: 'many',
+  const refDef = getFieldDef(targetModel, rel.refs) ?? targetModel.fields.id;
+  await hydrateOneRelation({
+    rows, rel,
+    parentField: rel.on,
+    targetField: rel.refs,
+    keyOf: stringKey,
+    mapRef: (v) => coerceFieldValue(refDef, v),
+    runSelect: (node) => executeSelect(node, targetModel, opts),
   });
-  const node: SelectNode = {
-    ...subNode,
-    kind: 'select',
-    model: rel.target,
-    cardinality: 'many',
-    where: { kind: 'leaf', field: rel.refs, op: 'in', value: coercedRefs },
-  };
-  const found = await executeSelect(node, targetModel, { session });
-  const byRef = new Map<string, any>();
-  for (const t of found) byRef.set(stringKey(t[rel.refs]), t);
-  for (const r of rows) {
-    const k = r[rel.on];
-    r[rel.name] = k == null ? null : (byRef.get(stringKey(k)) ?? null);
-  }
 }
 
 async function hydrateInverseOne(
@@ -499,32 +496,19 @@ async function hydrateInverseOne(
   rel: RelationPlan,
   parentModel: ModelDef<any>,
   targetModel: ModelDef<any>,
-  session?: ClientSession,
+  opts: ExecOpts,
 ): Promise<void> {
-  const parentRefs = unique(rows.map((r) => r[rel.refs]).filter(notNull));
-  if (parentRefs.length === 0) {
-    for (const r of rows) r[rel.name] = null;
-    return;
-  }
-  const fkDef = getFieldDef(targetModel, rel.on);
-  const coerced = parentRefs.map((v) =>
-    coerceFieldValue(fkDef ?? targetModel.fields[rel.on] ?? { kind: 'objectId' } as any, v),
-  );
-  const subNode = mergeNested(rel, { cardinality: 'many' });
-  const node: SelectNode = {
-    ...subNode,
-    kind: 'select',
-    model: rel.target,
-    cardinality: 'many',
-    where: { kind: 'leaf', field: rel.on, op: 'in', value: coerced },
-  };
-  const found = await executeSelect(node, targetModel, { session });
-  const byFk = new Map<string, any>();
-  for (const t of found) byFk.set(stringKey(t[rel.on]), t);
-  for (const r of rows) {
-    const k = r[rel.refs];
-    r[rel.name] = k == null ? null : (byFk.get(stringKey(k)) ?? null);
-  }
+  const fkDef = getFieldDef(targetModel, rel.on)
+    ?? targetModel.fields[rel.on]
+    ?? ({ kind: 'objectId' } as never);
+  await hydrateOneRelation({
+    rows, rel,
+    parentField: rel.refs,
+    targetField: rel.on,
+    keyOf: stringKey,
+    mapRef: (v) => coerceFieldValue(fkDef, v),
+    runSelect: (node) => executeSelect(node, targetModel, opts),
+  });
 }
 
 async function hydrateMany(
@@ -532,7 +516,7 @@ async function hydrateMany(
   rel: RelationPlan,
   parentModel: ModelDef<any>,
   targetModel: ModelDef<any>,
-  session?: ClientSession,
+  opts: ExecOpts,
 ): Promise<void> {
   const fkDef = getFieldDef(targetModel, rel.on);
   await hydrateManyRelation({
@@ -540,30 +524,17 @@ async function hydrateMany(
     keyOf: stringKey,
     mapRef: (v) =>
       coerceFieldValue(fkDef ?? targetModel.fields[rel.on] ?? ({ kind: 'objectId' } as any), v),
-    runSelect: (node) => executeSelect(node, targetModel, { session }),
+    runSelect: (node) => executeSelect(node, targetModel, opts),
   });
 }
 
-function mergeNested(rel: RelationPlan, fallback: { where?: any; cardinality: 'one' | 'many' }) {
-  const nested = rel.nested ?? {};
-  return {
-    where: (nested as any).where ?? fallback.where,
-    projection: (nested as any).projection,
-    hydration: (nested as any).hydration,
-    orderBy: (nested as any).orderBy,
-    limit: (nested as any).limit,
-    offset: (nested as any).offset,
-    cursor: (nested as any).cursor,
-    distinct: (nested as any).distinct,
-  };
-}
 
 // _count: { select: { posts: true } } — issue a countDocuments per relation.
 async function applyRelationCounts(
   rows: any[],
   parentModel: ModelDef<any>,
   counts: string[],
-  session?: ClientSession,
+  opts: ExecOpts,
 ): Promise<void> {
   if (rows.length === 0) return;
   const relMap = parentModel.relations();
@@ -573,7 +544,7 @@ async function applyRelationCounts(
     if (!rel) continue;
     const targetModel = (schema as any)[rel.target] as ModelDef<any> | undefined;
     if (!targetModel) continue;
-    const coll = dbClient.db.collection(targetModel.collection);
+    const coll = mongoDb(opts).collection(targetModel.collection);
     const refs = unique(rows.map((r) => r[rel.refs]).filter(notNull));
     const fkDef = getFieldDef(targetModel, rel.on);
     const coerced = refs.map((v) =>
@@ -583,10 +554,15 @@ async function applyRelationCounts(
       for (const row of rows) row._count[relName] = 0;
       continue;
     }
+    // Soft-deleted children are excluded so `_count` agrees with the rows
+    // `include` hands back — it used to say 7 where include returned 5.
+    const sd = softDeleteField(targetModel);
+    const match: Record<string, unknown> = { [appKeyToDbKey(rel.on)]: { $in: coerced } };
+    if (sd) match[appKeyToDbKey(sd)] = null;
     const grouped = await coll.aggregate([
-      { $match: { [appKeyToDbKey(rel.on)]: { $in: coerced } } },
+      { $match: match },
       { $group: { _id: `$${appKeyToDbKey(rel.on)}`, c: { $sum: 1 } } },
-    ], session ? { session } : undefined).toArray();
+    ], opts.session ? { session: opts.session } : undefined).toArray();
     const byFk = new Map<string, number>();
     for (const g of grouped) byFk.set(stringKey(g._id), g.c);
     for (const row of rows) row._count[relName] = byFk.get(stringKey(row[rel.refs])) ?? 0;

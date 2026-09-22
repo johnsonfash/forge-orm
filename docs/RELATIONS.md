@@ -25,6 +25,7 @@ point at related models (so cycles don't collapse the inference graph to
 * [Polymorphic relations (two patterns)](#polymorphic-relations-two-patterns)
 * [Deep includes](#deep-includes)
 * [Nested `take` and `skip` are per parent](#nested-take-and-skip-are-per-parent)
+* [The to-one side, and the filter it used to lose](#the-to-one-side-and-the-filter-it-used-to-lose)
 * [`select` inside `include`](#select-inside-include)
 * [Filtering by a relation](#filtering-by-a-relation)
 * [Counting and aggregating relations](#counting-and-aggregating-relations)
@@ -688,7 +689,61 @@ code once you know the child lists are small.
 
 In both plans the nested `where` you passed is ANDed with the foreign-key
 filter, so a nested `where` and a nested `take` compose the way you would
-expect.
+expect. The to-one side did not do that until 2.19.0 — next section.
+
+---
+
+## The to-one side, and the filter it used to lose
+
+`include: { author: true }` is the other half of hydration: one query
+against the target table with the collected keys, then each row matched
+back to its parent by key. It has two directions —
+
+* **owning** — the parent holds the FK, so match `target.<refs>` against
+  the parent's `<on>` values (`post.author_id` → `users.id`)
+* **inverse** — the target holds the FK, so match `target.<on>` against
+  the parent's `<refs>` values (`user.id` → `profiles.user_id`)
+
+— and until 2.19.0 every adapter had its own copy of it. Ten copies, and
+each one composed the FK filter with your nested `where` incorrectly. The
+sub-node was built as
+
+```ts
+{ where: <the FK filter>, ...(rel.nested ?? {}) }      // nested spread LAST
+```
+
+so on the SQL adapters a caller's `include: { author: { where: … } }`
+**replaced** the FK filter:
+
+```ts
+await db.post.findMany({
+  include: { author: { where: { active: true } } },
+});
+```
+
+```sql
+-- what it ran, before 2.19.0
+SELECT … FROM "users" WHERE "active" = $1;        -- every active user, no key filter
+-- what it runs now
+SELECT … FROM "users" WHERE "active" = $1 AND "id" IN ($2, $3, …);
+```
+
+The results were still **correct** — rows are matched back to parents by
+key afterwards, so the extra rows were dropped on the floor — which is
+why this went unnoticed. The only symptom was reading the whole target
+table to return one row per parent, and on a `users` table of any size
+that is the difference between an index lookup and a sequential scan.
+
+Mongo had the mirror of the same bug: it merged the nested filter first
+and then wrote the FK filter last, so the **caller's nested `where` was
+dropped**. There the symptom was visible and wrong — the filter simply
+did not apply, and you got the related document whether or not it matched.
+
+Both directions on all six adapters now go through one shared
+`hydrateOneRelation` (`src/ir/hydrate-many.ts`), which ANDs the two
+filters, the same treatment the many side got in 2.18.0. A parent whose
+key is null, or whose target row is missing or filtered out, gets `null`
+— not another parent's row.
 
 ---
 
@@ -828,41 +883,100 @@ const users = await db.user.findMany({
 // users[0]._count: { posts: 5, comments: 12 }
 ```
 
-Each entry in `_count.select` becomes a single column in the projection —
-on SQL a correlated subquery `(SELECT COUNT(*) FROM posts WHERE
-posts.author_id = users.id) AS _count_posts`, on Mongo a `$lookup`
-followed by `$size`.
+Each entry in `_count.select` becomes **one extra query**, batched across
+every parent — `SELECT "author_id" AS fk, COUNT(*) AS c FROM "posts" WHERE
+"author_id" = ANY($1) GROUP BY "author_id"` on Postgres, the same with
+`IN (?, ?, …)` on the dialects without `ANY`, a `$match` + `$group` on
+Mongo —
+materialised onto `row._count` afterwards. It is not a correlated
+subquery in the parent's SELECT list, and it is not a `$lookup`, whatever
+earlier revisions of this page said. Index the child's FK column or each
+count is a sequential scan of the child table.
 
-You can also count with a filter:
+Since 2.19.0 the count **excludes soft-deleted children**, so
+`_count.posts` and `include: { posts: true }.length` agree; before, they
+did not (7 against 5).
 
-```ts
-await db.user.findMany({
-  include: {
-    _count: {
-      select: { posts: { where: { status: 'PUBLISHED' } } },
-    },
-  },
-});
-// users[0]._count.posts is now COUNT(*) WHERE status='PUBLISHED'
-```
-
-### Filtering on `_count`
-
-You can filter the parent by the count of its children:
+**A filter inside `_count` is not supported, and is silently ignored:**
 
 ```ts
+// The `where` is DROPPED — this counts every post, not the published ones.
 await db.user.findMany({
-  where: { posts: { _count: { gt: 0 } } },              // users with ≥1 post
-});
-
-await db.user.findMany({
-  where: { posts: { _count: { lt: 3 } } },              // users with fewer than 3 posts
+  include: { _count: { select: { posts: { where: { status: 'PUBLISHED' } } } } },
 });
 ```
 
-On SQL this compiles to a `HAVING` clause if the planner already
-introduced a `GROUP BY`, or to a correlated subquery in the `WHERE`
-otherwise. On Mongo it routes through `$lookup` + `$expr`.
+The IR carries relation counts as a list of relation names and nothing
+else, so anything you nest under one is discarded when the query is
+built. Earlier revisions of this page documented the filtered form as
+working. It does not. Count it with a second query instead:
+
+```ts
+const published = await db.post.groupBy({
+  by: ['author_id'],
+  where: { author_id: { in: users.map(u => u.id) }, status: 'PUBLISHED' },
+  _count: { _all: true },
+});
+```
+
+### Filtering on `_count` — refused, with the alternative in the message
+
+This page used to document filtering the parent by the count of its
+children, with a `HAVING` clause or a correlated subquery as the claimed
+emit. None of that was ever implemented. The where-builder recognises
+exactly five keys inside a relation filter — `is`, `isNot`, `some`,
+`every`, `none` — and until 2.19.0 a relation filter carrying anything
+else contributed **no predicate at all**, so the query ran unfiltered and
+returned every parent row without a word.
+
+As of 2.19.0 it throws when the query is built:
+
+```ts
+await db.user.findMany({ where: { posts: { _count: { gt: 0 } } } });
+```
+
+```
+[forge] where.posts is a relation, and { _count } is not a relation filter — so
+it would have matched every row.
+  Use one of: is, isNot, some, every, none — e.g. { posts: { some: { … } } }.
+  Counting related rows in a filter is not supported. `{ posts: { some: {} } }`
+  is "has at least one", `{ posts: { none: {} } }` is "has none"; for a
+  threshold use groupBy with `having`.
+```
+
+The guard only fires when *nothing* is recognised, so
+`{ posts: { some: { title: 'x' }, extra: 1 } }` still builds — a filter
+that does carry a mode is never rejected. If you have the `_count` shape
+in your code it has been returning every parent row, and the upgrade
+turns that into an error rather than a quietly different result.
+
+Two shapes that do work:
+
+```ts
+// "at least one post" — a relation filter with no inner condition.
+await db.user.findMany({ where: { posts: { some: {} } } });
+
+// "no posts at all".
+await db.user.findMany({ where: { posts: { none: {} } } });
+```
+
+For a real threshold (`> 3` posts), group the children and filter with
+`having`, then fetch the parents:
+
+```ts
+const busy = await db.post.groupBy({
+  by: ['author_id'],
+  _count: { _all: true },
+  having: { _count: { _all: { gt: 3 } } },
+});
+const users = await db.user.findMany({
+  where: { id: { in: busy.map(b => b.author_id) } },
+});
+```
+
+Both relation-filter forms above are soft-delete scoped as of 2.19.0 —
+`some: {}` will not match a parent whose only child is soft-deleted. See
+[SOFT-DELETE.md](./SOFT-DELETE.md#relation-filters-matched-deleted-children).
 
 ### Aggregating across a relation
 
@@ -941,7 +1055,7 @@ On the five SQL dialects, every nested write runs inside a single
 transaction by default. A nested `create` that fails halfway rolls back
 the parent and any siblings created so far. The behaviour matches
 `db.$transaction(async tx => { ... })` — see
-[docs/QUERIES.md](./QUERIES.md#transactions) for the surface.
+[docs/TRANSACTIONS.md](./TRANSACTIONS.md#callback-form) for the surface.
 
 On Mongo, forge doesn't open a multi-document transaction unless the
 deployment is a replica set or sharded cluster. Without
@@ -1170,9 +1284,8 @@ const Order = model('orders', {
   id: f.id(), buyer_id: f.objectId().optional(),
   total: f.decimal({ scale: 2 }),
   status: f.enum(['PLACED', 'PAID', 'SHIPPED', 'CANCELLED']),
-  deleted_at: f.dateTime().optional(),
+  deleted_at: f.dateTime().softDeleteAt(),
 })
-  .softDelete()
   .relate(() => ({
     buyer: rel.one('user', { on: 'buyer_id', refs: 'id', onDelete: 'SetNull' }),
     items: rel.many('orderItem', { on: 'id', refs: 'order_id' }),
@@ -1186,9 +1299,12 @@ const OrderItem = model('order_items', {
 }));
 ```
 
-`.softDelete()` on Order means `db.order.delete` flips `deleted_at`
-rather than removing the row; the cascade to items only fires on
-`db.order.deleteHard`. See [soft delete](../README.md#soft-delete).
+`.softDeleteAt()` on Order's `deleted_at` means reads skip trashed
+orders — and, since 2.19.0, so does `include: { orders: true }` from the
+buyer. It does **not** change what `delete` does: `db.order.delete` is
+always a hard delete and always fires the cascade to items, while
+`db.order.softDelete` writes the timestamp and fires nothing. See
+[docs/SOFT-DELETE.md](./SOFT-DELETE.md).
 
 ### (f) Multi-tenant SaaS scoped by `orgId`
 
@@ -1276,12 +1392,27 @@ need their own application-side cleanup.
 
 ### Soft-delete interaction
 
-`softDelete()` on a model rewires the wrapper so `db.x.delete` only
-flips the `deleted_at` column. The cascade walker doesn't fire on a soft
-delete; children stay live with a parent they can no longer find via the
-default query path. If you want a soft delete to soft-delete the
-children too, either chain it manually or use `db.x.deleteHard` (which
-does fire the cascade and runs the FK constraints).
+`db.x.softDelete()` writes a timestamp, so as far as the database is
+concerned it is an `UPDATE`: **the cascade walker does not fire and no FK
+constraint is involved.** Children stay live under a parent that reads
+can no longer see, so soft-delete the children in the same transaction if
+that matters:
+
+```ts
+await db.$transaction(async (tx) => {
+  await tx.orderItem.softDeleteMany({ where: { order_id: orderId } });
+  await tx.order.softDelete({ where: { id: orderId } });
+});
+```
+
+Two notes. `db.x.delete()` is always a hard delete and always cascades —
+an older revision of this page described a model-level `.softDelete()`
+that rewired `delete`, and a `db.x.deleteHard()`; neither exists in v2.
+And since 2.19.0 a soft-deleted child is hidden from `include`,
+`_count` and relation filters as well as from a direct read, so the
+"live children under a deleted parent" state is invisible from every
+direction rather than leaking through the parent — see
+[docs/SOFT-DELETE.md](./SOFT-DELETE.md#include-is-scoped-at-every-depth).
 
 ---
 

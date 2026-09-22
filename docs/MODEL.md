@@ -1126,9 +1126,11 @@ value (not a thunk) blows up on circular embeds and re-evaluates on every
 schema build. Always wrap: `() => embed('Address', { … })`.
 
 **Forgetting `softDeleteAt()` flips reads.** Once any field on a model has
-`.softDeleteAt()`, every read auto-filters `WHERE col IS NULL`. To read
-deleted rows pass `where: { _withDeleted: true }`, and to permanently
-delete use `db.x.deleteHard(...)` rather than `db.x.delete(...)`.
+`.softDeleteAt()`, every read auto-filters `WHERE col IS NULL` — including
+the relation sub-select behind an `include`, at any depth (2.19.0). To read
+deleted rows pass `where: { _withDeleted: true }` at the level you want it.
+Writing the timestamp is `db.x.softDelete(...)`; `db.x.delete(...)` is
+always a hard delete.
 
 **One soft-delete column per model.** The wrapper picks one. A second
 `.softDeleteAt()` on the same model throws at schema build.

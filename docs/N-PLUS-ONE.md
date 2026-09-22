@@ -113,6 +113,46 @@ queries equals the **depth** of the include tree, not the breadth — with
 one exception, which is the next section: a nested `take` or `skip` turns
 that relation level into one query per parent.
 
+### The `IN` list is the whole trick, and 2.19.0 fixed a hole in it
+
+Query 2 above is worth a second look, because until 2.19.0 the `IN
+($1, $2, …)` disappeared from it as soon as you filtered the relation:
+
+```ts
+await db.post.findMany({
+  where:   { status: 'PUBLISHED' },
+  include: { author: { where: { active: true } } },
+});
+```
+
+```sql
+-- before 2.19.0 — the key filter was REPLACED by the caller's
+SELECT … FROM "users" WHERE "active" = $1;
+-- now — both filters
+SELECT … FROM "users" WHERE "active" = $1 AND "id" IN ($2, $3, …);
+```
+
+Every SQL adapter built the to-one sub-node with the caller's nested
+arguments spread **after** the foreign-key filter, so a nested `where`
+overwrote it. The answers were still right — the rows are matched back to
+their parents by key, so the surplus was discarded in memory — so this
+never showed up as a bug report. It showed up as a query plan: a
+sequential scan of `users` on every page of the feed, to return at most
+one author per post. If you have been sizing indexes against this page's
+claim of "one batched lookup by key", check that plan again on 2.19.0;
+it is now what was documented all along.
+
+Mongo had the same mistake in the other order — the nested filter was
+merged first and then overwritten by the key filter, so the **filter was
+dropped** and the related document came back whether or not it matched.
+That one was wrong, not just wasteful.
+
+Both directions of the to-one side (parent-holds-FK and target-holds-FK)
+now go through one shared `hydrateOneRelation`, joining ten
+near-identical copies into one — the same consolidation `hydrateMany`
+got in 2.18.0. See
+[RELATIONS.md](./RELATIONS.md#the-to-one-side-and-the-filter-it-used-to-lose).
+
 ### Per-dialect emit
 
 | Dialect    | Parent query | Included relation                                                                       |
@@ -657,19 +697,33 @@ for (const post of posts) {
 }
 ```
 
-forge emits a correlated subquery — one query, one round trip, the count
-arrives alongside the row:
+That is a fixed number of queries — one for the parents, plus **one per
+counted relation**, batched across every parent the way `include` is:
 
 ```sql
-SELECT "posts".*,
-       (SELECT COUNT(*) FROM "comments" WHERE "comments"."post_id" = "posts"."id") AS "_count_comments"
-  FROM "posts"
- WHERE "status" = $1;
+-- parents
+SELECT … FROM "posts" WHERE "status" = $1;
+-- the count, once for the whole batch (Postgres; IN (?, …) elsewhere)
+SELECT "post_id" AS fk, COUNT(*) AS c
+  FROM "comments"
+ WHERE "post_id" = ANY($1) AND "deleted_at" IS NULL
+ GROUP BY "post_id";
 ```
 
+(An earlier revision of this page showed a correlated subquery in the
+parent's SELECT list. That is not what any adapter emits — the counts are
+a separate batched query per relation, materialised onto the rows
+afterwards. Mongo runs the equivalent `$match` + `$group`. The
+`deleted_at IS NULL` is 2.19.0: the count now agrees with the rows
+`include` returns.)
+
+Two consequences of that shape. The child's FK column wants an index —
+without one this is a sequential scan of the child table per counted
+relation. And because the count is its own query, it does not multiply
+the parent rows the way a JOIN would.
+
 For more flexible aggregates (sum, average, min, max — not just count)
-the planner can't synthesise the correlated subquery and you reach for
-`groupBy` instead:
+there is no `_count` equivalent and you reach for `groupBy` instead:
 
 ```ts
 // Two queries — parents + a single groupBy keyed by parent id

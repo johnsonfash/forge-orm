@@ -102,3 +102,65 @@ export async function hydrateManyRelation(opts: HydrateManyOpts): Promise<void> 
 function unique<T>(xs: T[]): T[] {
   return Array.from(new Set(xs));
 }
+
+
+export interface HydrateOneOpts {
+  rows: Record<string, any>[];
+  rel: RelationPlan;
+  /** The field on the PARENT holding the value to match. */
+  parentField: string;
+  /** The field on the TARGET to match it against. */
+  targetField: string;
+  runSelect: (node: SelectNode) => Promise<Record<string, any>[]>;
+  keyOf: (v: unknown) => string;
+  mapRef?: (v: unknown) => unknown;
+}
+
+/**
+ * The to-one side of a relation, for both directions:
+ *   owning  — the parent holds the FK, match target.<refs> against parent.<on>
+ *   inverse — the target holds the FK, match target.<on> against parent.<refs>
+ *
+ * Centralised for the same reason the many side was, and to fix the same class
+ * of bug in the opposite direction. Every adapter built the sub-node as
+ *
+ *   { where: <the FK filter>, ...(rel.nested ?? {}) }
+ *
+ * with `nested` spread LAST, so a caller's `include: { author: { where: … } }`
+ * REPLACED the FK filter and the sub-select scanned the whole target table.
+ * Results still came out right — the rows are mapped by key afterwards — so
+ * the only symptom was reading every row of a table to return one per parent.
+ *
+ * Mongo had the mirror of it: `mergeNested(...)` then `where: <FK>` last,
+ * which DROPPED the caller's nested where instead, so the filter silently did
+ * not apply at all.
+ */
+export async function hydrateOneRelation(opts: HydrateOneOpts): Promise<void> {
+  const { rows, rel, parentField, targetField, runSelect, keyOf } = opts;
+  const mapRef = opts.mapRef ?? ((v: unknown) => v);
+  const nested = (rel.nested ?? {}) as Omit<SelectNode, 'kind' | 'model' | 'cardinality'>;
+
+  const keys = unique(rows.map((r) => r[parentField]).filter((v) => v != null));
+  if (keys.length === 0) {
+    for (const r of rows) r[rel.name] = null;
+    return;
+  }
+
+  const found = await runSelect({
+    ...nested,
+    kind: 'select',
+    model: rel.target,
+    cardinality: 'many',
+    where: andWhere(
+      nested.where as WhereTree | undefined,
+      { kind: 'leaf', field: targetField, op: 'in', value: keys.map(mapRef) },
+    ),
+  } as SelectNode);
+
+  const byKey = new Map<string, Record<string, any>>();
+  for (const t of found) byKey.set(keyOf(t[targetField]), t);
+  for (const r of rows) {
+    const k = r[parentField];
+    r[rel.name] = k == null ? null : (byKey.get(keyOf(k)) ?? null);
+  }
+}

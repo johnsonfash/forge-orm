@@ -23,6 +23,14 @@ await db.account.softDeleteMany({ where: { tenantId: 't9' } });
 await db.account.findMany();                                   // excludes a1
 await db.account.findMany({ where: { _withDeleted: true } });  // includes a1
 
+// A relation pulled in from a parent is scoped the same way, at any depth,
+// using the TARGET model's own column (2.19.0). Assuming a user has accounts:
+await db.user.findUnique({ where: { id: 'u1' }, include: { accounts: true } });
+await db.user.findUnique({                        // opt that one level back in
+  where: { id: 'u1' },
+  include: { accounts: { where: { _withDeleted: true } } },
+});
+
 // Restore — clears deleted_at, row is active again.
 await db.account.restore({ where: { id: 'a1' } });
 await db.account.restoreMany({ where: { tenantId: 't9' } });

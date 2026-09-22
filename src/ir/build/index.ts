@@ -11,6 +11,7 @@ import type {
 import { buildCursor } from './cursor';
 import { buildOrderBy } from './orderby';
 import { buildProjection } from './projection';
+import { softDeleteField, withSoftDeleteFilter } from './soft-delete';
 import { buildUpdateData } from './data';
 import { buildWhereTree, vanishedWhereError, whereVanished, type SchemaContext } from './where';
 
@@ -72,19 +73,28 @@ export function buildSelect(
 // SelectNode. This is what makes hydration recursive at the IR level: an
 // adapter executing a SelectNode can find a fully-resolved sub-SelectNode for
 // each related entity to fetch.
+//
+// Soft-delete scoping happens here too, against the TARGET model's own
+// `.softDeleteAt()` field — a `User` include of `posts` is scoped by `Post`'s
+// column. Depth comes for free: a sub-node's own hydration is materialised by
+// the recursive buildSelect call below.
 function materialiseHydration(
   hydration: RelationPlan[],
   schema?: SchemaContext,
 ): RelationPlan[] {
   if (!schema) return hydration;
   return hydration.map((rp) => {
-    if (!rp.nested) return rp;
-    const raw = (rp.nested as any).__rawArgs;
-    const target = (rp.nested as any).__target ?? rp.target;
-    if (!raw) return rp;
+    const target = (rp.nested as any)?.__target ?? rp.target;
     const targetModel = schema[target];
     if (!targetModel) return rp;
-    const sub = buildSelect(target, targetModel, raw, rp.kind === 'one' ? 'one' : 'many', schema);
+    const raw = (rp.nested as any)?.__rawArgs;
+    // A bare `include: { posts: true }` carries no nested args, so the old
+    // `if (!raw) return rp` skipped it — and that is exactly the shape that
+    // leaked soft-deleted rows. Build a node for it anyway when the target
+    // has a soft-delete column to filter on.
+    if (!raw && !softDeleteField(targetModel)) return rp;
+    const args = withSoftDeleteFilter(targetModel, raw ?? {});
+    const sub = buildSelect(target, targetModel, args, rp.kind === 'one' ? 'one' : 'many', schema);
     // RelationPlan's nested is a SelectNode minus kind/model, plus a cardinality
     // override — strip the former.
     const { kind: _k, model: _m, cardinality, ...rest } = sub;
@@ -297,4 +307,5 @@ export function buildGroupBy(
 }
 
 export { buildWhereTree, buildOrderBy, buildProjection, buildUpdateData, buildCursor };
+export { softDeleteField, withSoftDeleteFilter };
 export type { SchemaContext };

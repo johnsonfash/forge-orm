@@ -738,11 +738,13 @@ will land under the trace that *enqueued* them, not under the drain
 loop's context. That's almost always what you want for batched work
 that's morally still "this request's work".
 
-The pattern composes with forge's own `txStore` (`AsyncLocalStorage`-based
-transaction propagation, see [BACKEND.md](BACKEND.md#hyper-express)) —
-both stores propagate through the same await graph, so a request handler
-that enters a tx and emits an OTel span will be both txed *and* traced
-correctly without extra glue.
+The pattern composes with forge's transaction session, which is
+`AsyncLocalStorage`-based too (`src/session-context.ts`, since 2.19.0 — see
+[TRANSACTIONS.md](TRANSACTIONS.md#the-ambient-session--how-a-transaction-reaches-a-repository)).
+Both stores propagate through the same await graph, so a request handler that
+enters a transaction and emits an OTel span is both transacted *and* traced
+correctly without extra glue. The same holds for a `txStore` of your own, if
+you still keep one.
 
 ---
 

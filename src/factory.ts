@@ -1,7 +1,7 @@
 import type { ClientSession, Document } from 'mongodb';
 import { CollectionWrapper } from './builder/collection';
 import { coerceExtendedJSON } from './adapters/mongo/coerce';
-import { dbClient } from './client';
+import { getDefaultClient } from './client';
 import { schema, SchemaMap } from './schema';
 import { setActiveSchema, type SchemaShape } from './schema/active';
 import { ModelFields, ModelRelations, TypedModel } from './schema/core';
@@ -25,6 +25,7 @@ import { MysqlAdapter } from './adapters/mysql/adapter';
 import { SqliteAdapter } from './adapters/sqlite/adapter';
 import { DuckdbAdapter } from './adapters/duckdb/adapter';
 import { MssqlAdapter } from './adapters/mssql/adapter';
+import { currentSession, runWithSession } from './session-context';
 
 // createDb() — adapter-agnostic factory. Three call shapes, all returning the
 // same Db handle: URL only (adapter inferred), explicit type + URL, or
@@ -93,9 +94,19 @@ export type ForgeDb<S extends SchemaShape = SchemaMap> = Collections<S> & {
   readonly adapter: Adapter;
   $transaction: {
     <T>(fn: (tx: ForgeDb<S>) => Promise<T>): Promise<T>;
-    <T extends readonly unknown[] | []>(
-      promises: T,
-    ): Promise<{ -readonly [P in keyof T]: Awaited<T[P]> }>;
+    /**
+     * The array form takes THUNKS, not promises — a query starts the moment it
+     * is written, so an array of promises cannot be made atomic and is refused
+     * at runtime.
+     *
+     * The result type unwraps each thunk's return, so `r[0].balance` is typed.
+     * It used to be `Awaited<T[P]>` over the array elements, which typed the
+     * results as the FUNCTIONS when given thunks, so every property access on
+     * a result was an error.
+     */
+    <T extends readonly ((tx: ForgeDb<S>) => unknown)[] | []>(
+      thunks: T,
+    ): Promise<{ -readonly [P in keyof T]: Awaited<ReturnType<Extract<T[P], (...a: never) => unknown>>> }>;
   };
   $runCommandRaw(command: Document): Promise<any>;
   // Accepts BOTH call styles:
@@ -215,6 +226,18 @@ function unknownModel(key: string, models: Record<string, unknown>): Error {
     `[forge] unknown model "${key}". Active schema exposes: ${available}. ` +
     'Pass your model map as createDb({ schema }) and check the key spelling.',
   );
+}
+
+/**
+ * The Mongo `Db` a given adapter is connected to.
+ *
+ * The raw-command paths used to go through the module-level `dbClient`, which
+ * was one connection for the whole process — so `$runCommandRaw` on a second
+ * `createDb()` ran against the first one's database.
+ */
+function mongoDbOf(adapter: Adapter): import('mongodb').Db {
+  const own = (adapter as { db?: unknown }).db as import('mongodb').Db | undefined;
+  return own ?? getDefaultClient().db;
 }
 
 export async function createDb<S extends SchemaShape = SchemaMap>(
@@ -606,11 +629,97 @@ function makeDb(
     return $runCommandRaw({ explain: cmd, verbosity: 'queryPlanner' } as any);
   }
 
+  /**
+   * The array form of `$transaction`.
+   *
+   * It used to be `Promise.all(arg)`, which gives no atomicity whatsoever —
+   * and cannot. By the time the array reaches here every element is an
+   * already-running promise: `db.a.create(...)` dispatched the moment it was
+   * evaluated, before `$transaction` was even called. `Promise.all` then just
+   * waits for writes that already happened, independently, in no transaction.
+   * A money transfer written in that shape lost atomicity silently, which is
+   * the worst way to lose it.
+   *
+   * So the array now holds THUNKS, which have not run yet:
+   *
+   *   await db.$transaction([
+   *     () => db.account.update({ where: { id: from }, data: { bal: { decrement: n } } }),
+   *     () => db.account.update({ where: { id: to },   data: { bal: { increment: n } } }),
+   *   ]);
+   *
+   * They run in order inside one real transaction. Note the thunks use the
+   * plain `db`, not a `tx` handle: the ambient session makes that join the
+   * transaction, so a thunk may equally call a repository function that knows
+   * nothing about transactions. The `tx` handle is passed as an argument too,
+   * for code that prefers to be explicit.
+   *
+   * Sequential rather than concurrent on purpose: a Mongo ClientSession
+   * rejects overlapping operations, and a PG connection serialises them
+   * anyway.
+   */
+  function runBatch(items: any[], existingTx?: ForgeDb<any>): Promise<any[]> {
+    if (items.length === 0) return Promise.resolve([]);
+
+    const notThunks = items.filter((i) => typeof i !== 'function').length;
+    if (notThunks > 0) {
+      return Promise.reject(new Error(
+        `[forge] $transaction([...]) takes functions, not promises — ` +
+        `${notThunks} of ${items.length} ` +
+        `${items.length === 1 ? 'item' : 'items'} ` +
+        `${notThunks === 1 ? 'was' : 'were'} already running.\n` +
+        '  A query starts the moment you write it, so by the time the array ' +
+        'gets here the writes have already gone to the database, each on its ' +
+        'own. Nothing can wrap them afterwards — this used to be a ' +
+        'Promise.all, which looked atomic and was not.\n' +
+        '  Wrap each one in an arrow:\n' +
+        '    await db.$transaction([\n' +
+        '      () => db.a.create({ ... }),\n' +
+        '      () => db.b.update({ ... }),\n' +
+        '    ]);\n' +
+        '  Or use the callback form, which is equivalent:\n' +
+        '    await db.$transaction(async () => { ... });',
+      ));
+    }
+
+    const runAll = async (tx: ForgeDb<any>) => {
+      const out: any[] = [];
+      for (const thunk of items) out.push(await thunk(tx));
+      return out;
+    };
+
+    // Already inside a transaction — join it rather than opening a second,
+    // which both Mongo and PG refuse.
+    if (existingTx) return runAll(existingTx);
+
+    return adapter.$transaction(async (session) =>
+      runWithSession(adapter, session, () => runAll(makeTx(session))),
+    );
+  }
+
   // Dispatches through the adapter — works for both Mongo (replica-set
   // ClientSession) and Postgres (pg PoolClient).
+  //
+  // The callback runs inside `runWithSession`, so anything awaited beneath it
+  // — including a repository layer that never sees `tx` — joins the
+  // transaction. Before that, discarding the `tx` argument meant the callback
+  // body ran outside the transaction entirely while reading as though it did
+  // not, and nothing rolled back.
   function $transaction(arg: any): any {
-    if (Array.isArray(arg)) return Promise.all(arg);
-    return adapter.$transaction(async (session) => arg(makeTx(session)));
+    // Already inside one. This is the common case rather than the exotic one:
+    // a repository holds the ambient `db`, not a `tx` handle, so a repository
+    // that opens a transaction defensively calls THIS function from inside
+    // its caller's. Opening a second is refused by Postgres and by Mongo, and
+    // on a driver that allows it the inner commit would publish half the
+    // outer's work. So join it.
+    const open = currentSession(adapter);
+    if (open !== undefined) {
+      const tx = makeTx(open);
+      return Array.isArray(arg) ? runBatch(arg, tx) : arg(tx);
+    }
+    if (Array.isArray(arg)) return runBatch(arg);
+    return adapter.$transaction(async (session) =>
+      runWithSession(adapter, session, () => arg(makeTx(session))),
+    );
   }
 
   // Runtime DDL apply for the wasm path. Lazy-imports the migrator so the
@@ -704,7 +813,7 @@ function makeDb(
     if (adapter.kind !== 'mongo') {
       throw new Error('[forge] $runCommandRaw is Mongo-only. Use $queryRaw on SQL adapters.');
     }
-    return dbClient.db.command(coerceExtendedJSON(command));
+    return mongoDbOf(adapter).command(coerceExtendedJSON(command));
   }
 
   function makeTx(session: unknown): ForgeDb<any> {
@@ -714,14 +823,22 @@ function makeDb(
         if (typeof prop === 'symbol' || PROXY_PASSTHROUGH.has(prop)) return undefined;
         const key = String(prop);
         if (key === 'adapter') return adapter;
-        if (key === '$transaction') return (a: any) => Array.isArray(a) ? Promise.all(a) : a(makeTx(session));
+        if (key === '$transaction') {
+          // Already inside one. Mongo and PG both refuse a nested
+          // transaction, so this joins the open one rather than opening a
+          // second — which is what a repository calling $transaction
+          // defensively wants to happen.
+          return (a: any) => Array.isArray(a)
+            ? runWithSession(adapter, session, () => runBatch(a, makeTx(session)))
+            : runWithSession(adapter, session, () => a(makeTx(session)));
+        }
         if (key === '$queryRaw')   return makeRawCaller((frag) => adapter.$queryRaw(frag, { session }));
         if (key === '$executeRaw') return makeRawCaller((frag) => adapter.$executeRaw(frag, { session }));
         if (key === '$runCommandRaw') {
           if (adapter.kind !== 'mongo') {
             return () => Promise.reject(new Error('[forge] $runCommandRaw is Mongo-only.'));
           }
-          return (c: any) => dbClient.db.command(c, { session: session as ClientSession });
+          return (c: any) => mongoDbOf(adapter).command(c, { session: session as ClientSession });
         }
         if (key === '$disconnect') return () => adapter.close();
         if (key === '$on') return (event: any, cb: any) => adapter.emitter.on(event, cb);

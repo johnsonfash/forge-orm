@@ -147,6 +147,15 @@ export interface WhereRelation {
   relation: string;               // relation name on the parent model
   mode: 'is' | 'isNot' | 'some' | 'every' | 'none';
   nested: WhereTree | null;       // null === "any row exists" / "no row exists"
+  /**
+   * Set by `_withDeleted: true` inside the relation filter. Without it the
+   * compiler scopes the subquery to rows the target model has not
+   * soft-deleted, so `{ posts: { some: … } }` cannot match on a deleted post
+   * — which would otherwise contradict `include`, where those rows are now
+   * filtered out: the parent came back with an empty `posts` array from a
+   * filter that said it had some.
+   */
+  withDeleted?: boolean;
 }
 
 export type WhereOp =

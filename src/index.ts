@@ -71,6 +71,17 @@ export {
 // ─── Validator helper ───────────────────────────────────────────────────────
 export { forgeValidator } from './validator';
 
+// Ambient transaction session. Exported so an application can ask whether it
+// is inside a transaction, and so a test can assert that a repository joined
+// one. Stepping OUT of a transaction is deliberately not offered — see the
+// note in session-context.ts for why it cannot be delivered consistently.
+export {
+  ambientSessionsSupported,
+  currentSession,
+  runWithSession,
+} from './session-context';
+export type { SessionScope } from './session-context';
+
 // ─── Schema DSL — define YOUR OWN models, then `createDb({ schema })` ───────
 export { f, model, rel, enums, embed } from './schema/core';
 export type { Field, TypedModel, RelationInfo, EnumDef, ModelOptions } from './schema/core';

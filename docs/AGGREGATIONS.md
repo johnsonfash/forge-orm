@@ -132,25 +132,42 @@ await db.user.findMany({
 // → user[0]._count = { posts: 5, comments: 12 }
 ```
 
-Per relation, that emits a correlated subquery on SQL
-(`(SELECT COUNT(*) FROM "post" WHERE "post"."author_id" = "user"."id") AS "_count_posts"`)
-and a `$lookup` + `$size` on Mongo. The subquery form is sargable iff
-the relation's foreign-key column is indexed — `f.string().index()` on
-`author_id`, or part of a compound. Without that, every parent row
-triggers a sequential scan on the child table and the query collapses
-past a few thousand parents. See [N+1](./N-PLUS-ONE.md).
+Per relation, that is **one extra query**, batched across every parent —
+`SELECT "author_id" AS fk, COUNT(*) AS c FROM "post" WHERE "author_id" =
+ANY($1) GROUP BY "author_id"` on Postgres (`IN (?, …)` where `ANY` is not
+available), `$match` + `$group` on Mongo — stamped onto
+`row._count` afterwards. (Not a correlated subquery in the SELECT list,
+and not a `$lookup` + `$size`; earlier revisions of this page said
+otherwise.) It wants an index on the relation's foreign-key column —
+`f.string().index()` on `author_id`, or part of a compound. Without one,
+each counted relation is a sequential scan of the child table and the
+query collapses past a few thousand parents. See
+[N+1](./N-PLUS-ONE.md).
 
-A filtered `_count` picks up the inner filter inside the subquery:
+Since 2.19.0 the count excludes soft-deleted children, so it agrees with
+what `include` returns for the same relation.
+
+**A `where` nested inside `_count` is silently ignored:**
 
 ```ts
+// Counts EVERY post, not just the published ones — the filter is dropped.
 await db.user.findMany({
   include: { _count: { select: { posts: { where: { status: 'PUBLISHED' } } } } },
 });
 ```
 
-`_count: { posts: true }` counts every post; the filtered form counts
-only PUBLISHED. The two forms read similarly and the wrong one looks
-correct in testing until a draft shows up — be deliberate.
+The IR carries relation counts as bare relation names, so nested
+arguments are discarded at build time. This page previously documented
+the filtered form as working; it does not. Use a `groupBy` over the
+children with the filter and join in memory:
+
+```ts
+const published = await db.post.groupBy({
+  by: ['author_id'],
+  where: { author_id: { in: userIds }, status: 'PUBLISHED' },
+  _count: { _all: true },
+});
+```
 
 ### `count` accepts `take` / `skip` / `cursor`
 
@@ -895,7 +912,9 @@ The index only helps the `$match`. The optimisation lever is:
 
 For aggregations that run on every page load, materialise the result
 with `$merge` or `$out` into a rollup collection and read that
-directly. See [MONGO.md](./MONGO.md#materialised-aggregates).
+directly. See
+[MATERIALIZED-VIEWS.md](./MATERIALIZED-VIEWS.md) for the `$merge` / `$out`
+shape and the refresh strategies.
 
 ---
 

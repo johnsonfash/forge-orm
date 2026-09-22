@@ -38,8 +38,20 @@ amount of glue around that shape.
 
 The shape is the same in every framework. You build one `db` at boot, attach it
 to the request context, run handlers, and call `db.$disconnect()` on shutdown.
-Request-scoped transactions ride on `AsyncLocalStorage` so route handlers can
-opt into a tx without threading a parameter through every call.
+
+> **Since 2.19.0 you do not need the `txStore` / `scoped()` pair the recipes
+> below build.** forge keeps the transaction session in its own
+> `AsyncLocalStorage`, keyed by adapter, so anything awaited beneath a
+> `$transaction` callback — a repository closing over the root `db`, three
+> layers down — is already inside the transaction. The recipes are left as
+> written because they still work (an explicit session wins over the ambient
+> one, so nothing conflicts), but in new code the middleware is just
+> `await db.$transaction(async () => { … })` and the handlers call `db.x`
+> directly. Two reasons to keep a store of your own: you are on the browser
+> adapters, where there is no async context and so no ambient session; or what
+> you want request-scoped is the *tenant* or the *shard*, which forge knows
+> nothing about. See
+> [TRANSACTIONS.md](./TRANSACTIONS.md#the-ambient-session--how-a-transaction-reaches-a-repository).
 
 ### hyper-express
 
@@ -98,9 +110,10 @@ process.on('SIGTERM', stop);
 process.on('SIGINT', stop);
 ```
 
-The `scoped()` indirection is the price you pay for not threading `tx` through
-every function signature. It costs one `AsyncLocalStorage.getStore()` lookup
-per call — cheaper than a Map lookup, and Node optimises it heavily.
+The `scoped()` indirection used to be the price of not threading `tx` through
+every function signature. On 2.19.0 it is redundant — `scoped().user.create`
+and `db.user.create` reach the same transaction — so the accessor, and the
+lint rule that policed it, can go.
 
 ### Fastify
 
@@ -292,8 +305,15 @@ accepting requests, and close it **after** the HTTP server has drained.
 
 ## Transactions in HTTP and job contexts
 
-The recipes above already wire a request-scoped tx. Two patterns matter beyond
-the wiring.
+The recipes above already wire a request-scoped tx, and on 2.19.0 every
+repository underneath it joins that tx without being handed anything. Three
+patterns matter beyond the wiring.
+
+**A nested `$transaction` joins, it does not stack.** A repository that opens
+a transaction defensively — from the ambient `db`, because it has no `tx` —
+runs inside its caller's instead of opening a second one, which Postgres and
+Mongo both refuse. It does not create a savepoint, so an inner failure still
+rolls the whole thing back.
 
 **Savepoints for partial rollback.** A tx callback can `try/catch` inside, but
 on Postgres any error inside the outer tx poisons the rest of the transaction
@@ -480,6 +500,14 @@ async function tenantDb(tenantId: string) {
   return createDb({ schema, driver: mongoDriver(client, `tenant_${tenantId}`) });
 }
 ```
+
+This needs **2.19.0**: before it, every `createDb()` shared one module-level
+Mongo client, so the second `tenantDb()` call silently ran against the first
+tenant's database. `$disconnect()` on one of these handles is safe now too —
+an injected client is released rather than closed, so it does not take the
+other tenants down — but close the shared `MongoClient` yourself at shutdown,
+since forge never closes a client it did not open. See
+[MONGO.md](./MONGO.md#one-client-per-createdb).
 
 **Row-level (`tenant_id` scope).** Cheapest operationally — one schema, every
 table carries `tenant_id`, every query filters on it. Centralise the scope

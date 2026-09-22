@@ -13,6 +13,6 @@ for await (const user of db.user.findManyStream({ where: { active: true } })) {
 }
 ```
 
-See more — **[docs/QUERIES.md](/reference/queries#findmanystream)** for `findManyStream` internals per driver and the memory profile.
+See more — **[docs/QUERIES.md](/reference/queries#findmanystream--cursor-backed-streaming)** for `findManyStream` internals per driver and the memory profile.
 
 ---

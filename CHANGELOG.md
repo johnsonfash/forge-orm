@@ -4,6 +4,402 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.19.0 — a transaction that did not reach your repositories, and three more things forge only looked like it did
+
+**Minor, with one deliberate behaviour change. Upgrade.** Four fixes with
+one theme: each was code that ran without complaint while doing something
+other than what it said. A `$transaction` whose callback body escaped the
+transaction the moment it called a repository, an array form that was a
+`Promise.all` in disguise, two Mongo databases sharing one connection, and
+soft-deleted rows visible through every `include`.
+
+The behaviour change is the array form of `$transaction`: it now takes
+functions and refuses promises. Read
+[that section](#behaviour-change-transaction-takes-thunks-now) before
+upgrading — every call site you have to change was silently
+non-atomic.
+
+### `$transaction` did not reach a repository layer
+
+The callback form hands you a `tx` whose wrappers carry the driver
+session. That works when the callback does the writes itself, and not at
+all when it calls a repository:
+
+```ts
+await db.$transaction(async () => {          // tx discarded
+  await stockRepo.record(orgId, movement);   // uses the ambient db
+  await itemRepo.incrementStock(orgId, sku); // ditto
+});
+```
+
+`stockRepo` closes over the root `db`, not over `tx`. Neither leg carried
+the session, so neither leg was in the transaction: both writes went out
+as they were issued, and the throw that was supposed to undo them undid
+nothing. The code read as atomic and was not. In a layered codebase this
+is the *normal* way to write it, and the only fix available was to thread
+`tx` through every function between the route and the query.
+
+The session now lives in an `AsyncLocalStorage` (new
+`src/session-context.ts`). `$transaction` runs the callback inside
+`runWithSession(adapter, session, …)`, and a collection wrapper with no
+session of its own picks the ambient one up — so anything awaited beneath
+the callback joins the transaction without knowing it exists. The example
+above is now atomic as written.
+
+Four details that are part of the contract rather than the
+implementation:
+
+- **The session is stored with its adapter** and returned only for that
+  adapter, identity-compared. A driver rejects a session it did not
+  create, so one database's transaction must never be picked up by
+  another's queries. `dbB`'s writes inside `dbA.$transaction(...)` are
+  outside it, deliberately.
+- **It is resolved per call, not per wrapper.** A repository handle built
+  at boot, before any transaction existed, still joins the one that is
+  open when it is called.
+- **`node:async_hooks` is loaded through a runtime-assembled specifier**,
+  because a bundler resolves a literal `require('node:async_hooks')` at
+  build time even inside a `try` — which breaks a browser build, and
+  forge runs in the browser on sqlite-wasm and IndexedDB. Where there is
+  no async context there is no ambient session, and that is correct
+  rather than degraded: IndexedDB has no interactive transaction to join
+  (see the note below).
+- **An explicit session still wins**, so `tx.x` is unaffected and an
+  existing `AsyncLocalStorage`-plus-`scoped()` pattern of your own keeps
+  working. It is now redundant — see [Docs](#docs-2190).
+
+Exported: `ambientSessionsSupported()`, `currentSession(adapter)`,
+`runWithSession(adapter, session, fn)`.
+
+There is deliberately **no `withoutAmbientSession()`**. "Write this row so
+it survives the rollback" cannot be delivered consistently: on SQLite,
+PGlite and DuckDB the transaction *is* the process's one connection, so
+the statement is physically inside it however it is issued. Measured on
+PGlite — the row was gone. An API that works on Postgres and silently does
+not on SQLite is the class of difference this library exists to remove, so
+the escape hatch is a second `createDb()`, which is a second connection.
+
+Tests: `src/__tests__/ambient-session.spec.ts` (12), plus the new
+`regression-transactions.ts` against a real Postgres (8 checks).
+
+### Behaviour change: `$transaction([...])` takes thunks now
+
+The array form was one line — `Promise.all(arg)` — and gave no atomicity
+whatsoever. It could not: by the time the array arrives, every element is
+an already-running promise, because `db.a.create(...)` dispatched the
+moment it was evaluated, while the array literal was being built.
+`Promise.all` then waits for writes that already happened, independently,
+each on its own connection, in no transaction. A money transfer written in
+that shape lost atomicity silently.
+
+The array now holds **functions**:
+
+```ts
+await db.$transaction([
+  () => db.account.update({ where: { id: from }, data: { bal: { decrement: n } } }),
+  () => db.account.update({ where: { id: to },   data: { bal: { increment: n } } }),
+]);
+```
+
+They run in order inside one real transaction — one `BEGIN`, one
+connection, one `COMMIT`, and a throw from any of them rolls back the
+ones before it. Note the thunks call the plain `db`: the ambient session
+makes that join, so a thunk may equally call a repository. The `tx`
+handle is passed as the thunk's argument too, for code that prefers to be
+explicit. An empty array opens no transaction and returns `[]`.
+
+An array of already-started promises is now **refused**, with an error
+that counts them and shows both working forms:
+
+```
+[forge] $transaction([...]) takes functions, not promises — 2 of 2 items were
+already running.
+```
+
+Silence was the worse outcome. Note what the refusal cannot do: those
+promises had already started, so their writes may well have landed before
+the error was thrown. The exception tells you the shape is wrong; it does
+not undo anything.
+
+Upgrading: add `() =>` to every element of every `$transaction([ ... ])`
+call. If what you actually wanted was parallel independent queries, that
+code was always a `Promise.all` — write `Promise.all` and say so.
+
+The thunks run **sequentially**, not concurrently: a Mongo
+`ClientSession` rejects overlapping operations, and a single SQL client
+serialises statements anyway.
+
+The overload's result type unwraps each thunk's return, so `r[0].balance`
+typechecks. It was `Awaited<T[P]>` over the array elements, which typed
+the results as the *functions* when given thunks and made every property
+access on a result an error.
+
+### A nested `$transaction` joins the open one
+
+Including — and this is the common case, not the exotic one — a nested
+`$transaction` called on the ambient `db` from inside a callback, which
+is what a repository that opens a transaction defensively produces. It
+joins rather than opening a second: Postgres and Mongo both refuse a
+nested `BEGIN`, and on a driver that allows one the inner commit would
+publish half the outer transaction's work. There is still no `SAVEPOINT`
+— an inner failure rolls the whole thing back.
+
+Tests: `src/__tests__/batch-transaction.spec.ts` (12).
+
+### The Mongo client was one per process, not one per `createDb()`
+
+`connect()` early-returned when it already held a `Db`, and read
+`process.env.DATABASE_URL` rather than the URL it was given. So a second
+`createDb({ url: B })` silently kept writing to **A**, and
+`$disconnect()` on either handle closed the connection under both.
+
+For a migration tool, a test harness, or a database-per-tenant
+deployment, that is a data crossover with no error and no log line.
+
+Each `MongoAdapter` now owns a `DatabaseClient`, exposed as `adapter.db`
+and `adapter.mongoClient`, and `connect(url)` takes the URL explicitly.
+The handle is threaded to the executors through a new `ExecOpts.db`, at
+the single `mongoOpts()` choke point — the same mechanism `session`
+already used, rather than nine new call sites.
+
+The exported `dbClient` is **kept and still works**: it forwards to the
+first client created, which is the only one a single-database app has, so
+consumers using it for raw collection access are unaffected. A second
+`createDb()` gets its own client and does not disturb it.
+
+**`close()` now only closes what it opened.** A client forge built from a
+URL is closed; one handed to it through `mongoDriver(client)` is
+*released* — the handle is torn down, the caller's `MongoClient` is left
+open. Closing it was a second way to break the same deployment shape: the
+database-per-tenant recipe is an LRU of `createDb({ driver:
+mongoDriver(sharedClient, dbName) })` handles disposed with
+`db.$disconnect()`, and the first eviction would have closed the shared
+client under every other tenant.
+
+Verified live as well as in unit tests: two `createDb()` calls against two
+databases each wrote to their own, and `$disconnect()` on one left the
+other usable. Tests: `src/__tests__/mongo-client-isolation.spec.ts` (11).
+
+### Soft-deleted rows came back through every `include`
+
+Reads are supposed to add `WHERE <col> IS NULL`, and at the top level
+they did. Relation sub-selects are built in the IR and run in the
+adapters, neither of which had any soft-delete awareness, so
+
+```ts
+db.user.findUnique({ where: { id }, include: { posts: true } })
+```
+
+handed back the posts the caller had already soft-deleted. A "deleted"
+post still listed under the author's account is the user-visible
+failure, and it is silent — the rows simply appear. `docs/SOFT-DELETE.md`
+claimed the opposite in a worked example.
+
+The documented opt-out was broken in the other direction: `include: {
+posts: { where: { _withDeleted: true } } }` compiled to a filter on a
+column named `_withDeleted`, which no table has, and the database errored
+out.
+
+Relation sub-selects are now scoped at **every depth**, using the
+**target** model's own column — a `User` include of `posts` filters on
+`Post`'s column, whatever each is called. `_withDeleted: true` opts out at
+any level, and the flag is always stripped rather than reaching the
+where-builder. A caller's own filter on the soft-delete column wins
+untouched: that is how you ask for "deleted since Friday". `select: {
+posts: true }` is covered as well as `include`, and a bare `include: {
+posts: true }` — the shape that leaked, because no sub-node was built for
+it at all — now gets one whenever the target has a soft-delete column.
+
+New `src/ir/build/soft-delete.ts`. Tests:
+`src/__tests__/soft-delete-include.spec.ts` (18).
+
+### Four things then disagreed with the newly-correct `include`
+
+All four are fixed, and each had its own symptom.
+
+**`groupBy` scoped neither soft-delete nor strict mode**, unlike `_find`,
+`findManyStream` and `count`. Since `aggregate({ _sum })` routes through
+`groupBy`, a revenue total silently included deleted orders. A typo'd
+`where` key was not caught there either — which under `strict: true`
+means the filter matched nothing and the aggregate came back as though
+the rows did not exist.
+
+**Relation `_count` disagreed with the rows returned.** `_count: { posts:
+true }` said 7 where `include: { posts: true }` returned 5. The relation
+counts are hand-written per adapter, outside the IR; all seven now
+exclude soft-deleted children.
+
+**Relation filters matched on deleted children.** `where: { posts: {
+some: … } }` returned a parent whose only matching post was deleted —
+with an empty `posts` array, from a filter that said it had some. The
+scope goes on the subquery's **join condition**, not into the nested
+condition, and that placement is load-bearing: `every` compiles to `NOT
+EXISTS` of the *negated* inner condition, so a scope folded in there
+would be negated with it and `every` would come to mean "every child is
+live AND matches" — false for any parent that has ever deleted a child.
+On the join condition it is correct for all five modes (`is` / `isNot` /
+`some` / `every` / `none`). `_withDeleted: true` inside the relation
+filter opts out.
+
+**IndexedDB ignored a nested `where` entirely.** Rows were fetched by
+index and handed back unfiltered, so `include: { posts: { where: … } }`
+returned everything — and the new soft-delete predicate would have been
+ignored right along with it. It is now evaluated in JS with the same
+predicate compiler the top-level residual filter uses.
+
+Tests: `src/__tests__/soft-delete-consistency.spec.ts` (23).
+
+### Behaviour change: a relation filter with no recognised mode is refused
+
+Scoping relation filters put a spotlight on the branch that builds them,
+and it had the same hole as an all-`undefined` `where`. The builder
+recognises exactly five keys — `is`, `isNot`, `some`, `every`, `none` —
+and a relation filter carrying anything else pushed **no predicate at
+all** and fell through, so the filter evaporated and every parent row
+came back:
+
+```ts
+// Before: returned EVERY user. Nothing threw.
+await db.user.findMany({ where: { posts: { _count: { gt: 0 } } } });
+```
+
+That exact shape was documented on `docs/RELATIONS.md` as a supported
+feature, with a `HAVING` clause and a correlated subquery as its claimed
+emit. None of it existed. So anyone who followed the documentation has
+been reading a filter that never ran — the same failure class, and the
+same fix, as the vanished-`where` guard in 2.18.0: it now throws at
+IR-build time, names the five modes, and when the offending key is
+`_count` adds the advice for what was meant:
+
+```
+[forge] where.posts is a relation, and { _count } is not a relation filter — so
+it would have matched every row.
+  Use one of: is, isNot, some, every, none — e.g. { posts: { some: { … } } }.
+  Counting related rows in a filter is not supported. `{ posts: { some: {} } }`
+  is "has at least one", `{ posts: { none: {} } }` is "has none"; for a
+  threshold use groupBy with `having`.
+```
+
+The guard fires only when *nothing* is recognised, so a filter that does
+carry a mode is untouched even if it has extra keys alongside it. Tests:
+`src/__tests__/soft-delete-consistency.spec.ts`, "a relation filter with
+no recognised mode is refused".
+
+### To-one hydration lost one of its two filters, in both directions
+
+Every SQL adapter built the to-one sub-node as `{ where: <FK filter>,
+...(rel.nested ?? {}) }`, with `nested` spread **last**, so a caller's
+`include: { author: { where: … } }` *replaced* the FK filter and the
+sub-select scanned the whole target table. The results still came out
+right — rows are matched back to parents by key afterwards — so the only
+symptom was reading every row of a table to return one per parent. That
+is an index lookup turning into a sequential scan on a page that
+documented itself as a keyed batch fetch.
+
+Mongo had the mirror of it (`mergeNested(...)` and then `where: <FK>`
+last), which **dropped** the caller's nested where, so the filter
+silently did not apply at all and the related document came back whether
+or not it matched.
+
+Both are fixed by a shared `hydrateOneRelation`, joining the ten copies
+of this loader into one — the same treatment `hydrateMany` got in 2.18.0.
+
+### New: `regression-transactions.ts`
+
+Runs in `forge:check` and in CI. It uses PGlite, which is in-process and
+so needs no service container — and it is the only dialect that can tell
+a propagated session from a shared connection. On SQLite `$transaction`
+hands back the one connection the process has, so a rollback test there
+passes whether or not the session was propagated; a propagation bug is
+invisible. `@electric-sql/pglite` is now a declared devDependency.
+
+Suite totals for the release: **971 jest tests across 66 suites**, plus
+the 8 PGlite transaction checks. `npm run forge:check` exits 0 and
+`npm run build` is clean.
+
+### Known limits — what 2.19.0 does not change
+
+Two of these are platform facts rather than open bugs, and are stated as
+such; all three are things to know before you rely on the fixes above.
+
+- **SQLite, DuckDB and PGlite share one connection per process**, and
+  `$transaction` runs `BEGIN` on it. Sequential work inside the callback
+  is genuinely atomic there. What you do not get is isolation from
+  concurrent work: a write issued outside the transaction while it is
+  open goes down the same connection, lands inside the `BEGIN`, and rolls
+  back with it — and two overlapping transactions collide. One writer at
+  a time on those dialects.
+- **IndexedDB's `$transaction` runs the callback with no session**, and
+  each operation opens its own short-lived IDB transaction. That is the
+  platform, not a gap: an `IDBTransaction` auto-commits as soon as the
+  microtask queue idles, so it cannot survive an `await` on anything that
+  is not an IDB request — an interactive transaction is not expressible.
+  Per-operation transactions are the strongest atomicity available, and
+  it is also why the browser having no ambient session costs nothing:
+  there is no open transaction to join.
+- **Two `createDb()` calls in one process share the module-level active
+  schema**, so relation targets resolve against whichever was registered
+  last. The Mongo connection is per-instance now; the schema registry is
+  not. Register the same schema in both handles.
+- **A `where` nested inside a relation `_count`** —
+  `_count: { select: { posts: { where: … } } }` — is ignored. The IR
+  carries relation counts as bare relation names, so nested arguments are
+  discarded when the query is built. Documented as unsupported rather
+  than implemented; count with a `groupBy` over the children instead.
+
+<a id="docs-2190"></a>
+
+### Docs
+
+- [TRANSACTIONS.md](docs/TRANSACTIONS.md) documented the array form as
+  non-atomic (honestly) and told readers to build their own
+  `AsyncLocalStorage` store with a `scoped()` accessor in every
+  repository. Both are obsolete. The page now covers the ambient session,
+  its rules, the three helpers, why there is no
+  `withoutAmbientSession()`, and what is safe to delete from an existing
+  `txStore` / `scoped()` setup (all of it, on Node). It also states the
+  per-dialect transaction caveats precisely rather than in aggregate, and
+  says why a new transaction test belongs on PGlite.
+- [SOFT-DELETE.md](docs/SOFT-DELETE.md)'s "known gap" section, added in
+  2.18.0 when the `include` leak was found, is replaced by the real
+  behaviour: scoping at every depth, the `_withDeleted` opt-out at any
+  level, an explicit filter winning, and the four consistency fixes —
+  including why the relation-filter scope sits on the join condition.
+- [MONGO.md](docs/MONGO.md) gains "One client per `createDb()`": what the
+  singleton broke, `adapter.db` / `adapter.mongoClient`, and when
+  `dbClient` is still the right call.
+- [RELATIONS.md](docs/RELATIONS.md) and
+  [N-PLUS-ONE.md](docs/N-PLUS-ONE.md) document the to-one loader and the
+  filter each direction used to lose.
+- Retracted or corrected along the way, all found by checking the pages
+  above against the source:
+  - A model-level `.softDelete()` and a `db.x.deleteHard()` were still
+    documented in RELATIONS.md, FOREIGN-KEYS.md, MODEL.md and
+    QUERIES.md. Both are v1 shapes and neither exists in v2 —
+    `delete()` is always hard, the verb is `softDelete()`.
+  - Relation `_count` was described as a correlated subquery in the
+    parent's SELECT list (and `$lookup` + `$size` on Mongo) in
+    RELATIONS.md, AGGREGATIONS.md and N-PLUS-ONE.md. It is one batched
+    grouped query per counted relation, materialised onto the rows
+    afterwards. Filtering inside `_count` was documented as working;
+    it is ignored, and is now marked unsupported.
+  - Filtering a parent by `{ <relation>: { _count: … } }` was
+    documented as supported; it never was, and now throws — see above.
+  - INDEXEDDB.md described the array form of `$transaction` as "one IDB
+    `readwrite` txn spanning both stores, committed atomically", which
+    it never was.
+  - FOREIGN-KEYS.md claimed `forge doctor` flags FK columns with no
+    index. There is no such probe.
+  - MULTI-TENANT.md's database-per-tenant recipe disposed cached
+    handles with `$disconnect()` over one shared `MongoClient`. That is
+    safe as of this release (see the Mongo section) and the recipe
+    stands, but it needs 2.19.0 in two ways, both now stated on the
+    page.
+  - BATCH.md and MUTATIONS.md counted `$transaction([N creates])` as
+    one round trip. It is N, inside one commit, and the throughput
+    figure beside it was measured on the old `Promise.all` form.
+  - Twelve broken intra-page anchors.
+
 ## 2.18.0 — two injections, a filter that emptied tables, and the dialect leaks behind them
 
 **Minor, with several deliberate behaviour changes. Upgrade.** Almost

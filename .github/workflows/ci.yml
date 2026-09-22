@@ -37,6 +37,12 @@ jobs:
       - name: Test
         run: npx jest --ci
 
+      # Transactions against a real Postgres. PGlite is in-process, so this
+      # needs no service container — and it is the only dialect that can tell
+      # a propagated session from SQLite's shared connection.
+      - name: Transactions
+        run: npm run forge:regression:transactions
+
       # Catches what a typecheck cannot: a broken emit, a missing entry
       # point, a subpath in package.json that resolves to nothing.
       - name: Build

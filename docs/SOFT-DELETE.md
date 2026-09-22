@@ -13,7 +13,8 @@ the operational patterns that keep soft-delete from rotting over time.
 * [Declaring the column](#declaring-the-column)
 * [`softDelete` and `restore`](#softdelete-and-restore)
 * [Query-time defaults](#query-time-defaults)
-* [Known gap — `include` does not hide soft-deleted rows](#known-gap--include-does-not-hide-soft-deleted-rows)
+* [`include` is scoped at every depth](#include-is-scoped-at-every-depth)
+* [The four things that used to disagree with `include`](#the-four-things-that-used-to-disagree-with-include)
 * [Partial-filter indexes](#partial-filter-indexes)
 * [Cascading soft deletes](#cascading-soft-deletes)
 * [Restore semantics](#restore-semantics)
@@ -192,10 +193,19 @@ Affected verbs:
 * `findMany`
 * `findManyStream` (see [docs/QUERIES.md](./QUERIES.md#findmanystream--cursor-backed-streaming))
 * `count`
+* `groupBy`, and `aggregate({ _sum, _avg, _min, _max, _count })` with it —
+  the typed whole-table form routes through `groupBy` (since 2.19.0; before
+  that a revenue total quietly included deleted orders)
+* every relation sub-select reached through `include` or `select`, at any
+  depth — see [`include` is scoped at every depth](#include-is-scoped-at-every-depth)
+* every relation *filter* — `where: { posts: { some: … } }` and its four
+  siblings only consider live children
+* relation `_count`
 
-`aggregate` (Mongo) is **not** on that list: it hands your pipeline
-straight to the driver, so a `$match` you did not write yourself is never
-added. Filter the soft-delete column in the pipeline yourself.
+`aggregate({ pipeline })` / `aggregate([...])` — the Mongo escape hatch —
+is **not** on that list: it hands your pipeline straight to the driver, so a
+`$match` you did not write yourself is never added. Filter the soft-delete
+column in the pipeline yourself. Same for `$queryRaw` / `$executeRaw`.
 
 The augmentation is suppressed in three cases:
 
@@ -215,10 +225,10 @@ The augmentation is suppressed in three cases:
    soft-deleted row still hits the row.
 
 `_withDeleted` is a real key on `WhereInput` (declared in the strict-mode
-allow-list alongside `AND`, `OR`, `NOT`). Pass it at the **top level** of
-any read; the wrapper strips it before IR build. Nested inside an
-`include` it is not recognised — see
-[Known gap](#known-gap--include-does-not-hide-soft-deleted-rows).
+allow-list alongside `AND`, `OR`, `NOT`). It works at the top level of any
+read, inside an `include`'s `where`, and inside a relation filter — at each
+level it opts *that* level out, and it is stripped before the where-builder
+sees it either way. It is a directive, not a column.
 
 ### Strict mode and `_withDeleted`
 
@@ -230,62 +240,202 @@ filter.)
 
 ---
 
-## Known gap — `include` does not hide soft-deleted rows
+## `include` is scoped at every depth
 
-The auto-filter is applied by one helper, `_withSoftDeleteFilter` in
-`src/builder/collection.ts`, and that helper is called from exactly three
-places: `findManyStream`, `count`, and the private `_find` that backs
-`findMany` / `findFirst` / `findUnique`. It rewrites the **top-level**
-`where` of the query you called and nothing else.
+Until 2.19.0 the auto-filter rewrote the **top-level** `where` and nothing
+else. Relation sub-selects are built in the IR and run by the adapters, and
+neither had any soft-delete awareness, so soft-deleted children came back
+through every `include` — a post the user had trashed was hidden from
+`db.post.findMany()` and visible under their account. Nothing errored; the
+rows simply appeared. This page's worked example claimed the opposite.
 
-Relation subqueries are built in the IR and run by the adapters, and
-neither has any soft-delete awareness. So soft-deleted children come back
-through **every** `include`:
+That is fixed. A relation sub-select is now scoped with the **target**
+model's own soft-delete column, at every level of nesting:
 
 ```ts
-// Returns ALL of u1's posts — the soft-deleted ones included.
+// Only u1's live posts, and only each post's live comments.
 const user = await db.user.findUnique({
   where:   { id: 'u1' },
-  include: { posts: true },
+  include: { posts: { include: { comments: true } } },
 });
 ```
 
-The parent is filtered. The children are not. A "soft delete" that the
-user can still see listed under their account is the failure this
-produces, and it is silent — the rows simply appear.
-
-`_withDeleted` is no help here, and using it inside an `include` is worse
-than doing nothing. The wrapper only recognises and strips `_withDeleted`
-at the **top level** of a `where`. Anywhere else it is treated as an
-ordinary field name, so
-
-```ts
-// DO NOT — this is not an opt-in, it is a query against a column
-// that does not exist.
-include: { posts: { where: { _withDeleted: true } } }
+```sql
+-- the posts sub-select
+SELECT … FROM "posts"    WHERE "deleted_at" IS NULL AND "author_id" IN ($1);
+-- the comments sub-select, one level down
+SELECT … FROM "comments" WHERE "removed_at" IS NULL AND "post_id"   IN (…);
 ```
 
-compiles to `WHERE "posts"."_withDeleted" = $1` and the database errors
-out. (`_withDeleted` *is* valid and *does* work at the top level of
-`findMany`, `findFirst`, `findUnique`, `count` and `findManyStream` — see
-[Query-time defaults](#query-time-defaults).)
+(The scope comes from the IR node and the key filter is ANDed onto it by
+the shared loader, which is why it reads in that order.)
 
-**This is not fixed in 2.18.0.** Until it is, filter the child list
-yourself, naming the model's own soft-delete column:
+Four details worth being precise about.
+
+**The target's column, not the parent's.** A `User` include of `posts`
+filters on `Post`'s soft-delete column. The names need not match —
+`archived_at` on the user, `deleted_at` on the post, `removed_at` on the
+comment all work, because the scope is resolved per model from the
+`.softDeleteAt()` flag rather than from the column name.
+
+**`select` too, not just `include`.** `select: { id: true, posts: true }`
+pulls the relation through the same IR path and gets the same scope.
+
+**A bare `include: { posts: true }` is scoped.** That shape carries no
+nested arguments at all, and it was exactly the one that leaked: the old
+code skipped building a sub-node when there was nothing to build. A node
+is now built for it whenever the target has a soft-delete column.
+
+**Your own nested filter survives.** The scope is ANDed with whatever you
+wrote, so `include: { posts: { where: { title: 'x' } } }` filters on both.
+
+### `_withDeleted: true` opts out, at any level
 
 ```ts
-const user = await db.user.findUnique({
+// Live posts, but every comment including the deleted ones.
+include: {
+  posts: { include: { comments: { where: { _withDeleted: true } } } },
+}
+```
+
+This is the other half of the fix: the documented opt-out used to be
+actively broken. `_withDeleted` was only recognised at the top level of a
+`where`, so inside an `include` it was treated as an ordinary column name
+and compiled to a filter on a column called `_withDeleted`, which no table
+has — the database errored out. The flag is now recognised and **stripped**
+wherever it appears, whether or not it opts anything out, so it can never
+reach the where-builder as a column.
+
+### An explicit filter on the column wins
+
+If your nested `where` already mentions the target's soft-delete column,
+forge leaves it exactly as written and adds nothing:
+
+```ts
+// "What did this user delete since Friday?" — untouched by the auto-filter.
+include: { posts: { where: { deleted_at: { gte: friday } } } },
+```
+
+That is the same rule the top level has always had, and it is how you build
+a per-parent trash view. `{ deleted_at: null }` written by hand is
+therefore harmless, just redundant.
+
+### What is not covered
+
+* **IndexedDB relation filters.** A relation *predicate* (`where: { posts:
+  { some: … } }`) still matches everything on the IndexedDB adapter — there
+  is no cross-store join at that layer. Relation sub-selects from `include`
+  *are* scoped there; see below.
+* **Mongo relation filters throw** (2.18.0), so there is nothing to scope.
+  The two-step rewrite in the error message reads the ids with a normal
+  `findMany`, which is scoped.
+* **Raw statements.** `$queryRaw` / `$executeRaw` / `aggregate({ pipeline })`
+  never see the auto-filter. Write `deleted_at IS NULL` yourself.
+
+---
+
+## The four things that used to disagree with `include`
+
+Scoping `include` correctly exposed four places that answered a different
+question about the same rows. All four are fixed in 2.19.0, and they are
+worth knowing individually because each had its own symptom.
+
+### `groupBy` — and therefore `aggregate`
+
+`groupBy` applied neither the soft-delete filter nor the strict-mode
+`where` check, unlike `_find`, `findManyStream` and `count`. Since the
+typed `aggregate({ _sum: … })` routes through `groupBy`, a revenue total
+silently included deleted orders:
+
+```ts
+// Before 2.19.0: summed the cancelled-and-soft-deleted orders too.
+const { _sum } = await db.order.aggregate({ _sum: { total: true } });
+```
+
+A typo'd `where` key was not caught there either — which under
+`strict: true` means the filter matched nothing and the aggregate came
+back as though the rows did not exist. Both checks now run on `groupBy`.
+
+### Relation `_count` disagreed with the rows
+
+`_count: { posts: true }` said 7 where `include: { posts: true }` returned
+5. The relation counts are hand-written per adapter, outside the IR, so
+they did not inherit the new scope; all seven adapters now exclude
+soft-deleted children:
+
+```ts
+const u = await db.user.findUnique({
   where:   { id: 'u1' },
-  include: {
-    posts: { where: { deleted_at: null } },   // the post model's own column
-  },
+  include: { posts: true, _count: { select: { posts: true } } },
 });
+u.posts.length === u._count.posts;   // true
 ```
 
-You must do this on every `include` of every soft-deleted model. There is
-no global setting that covers it. If a relation is included in more than
-one place, wrap the include shape in a shared constant so the filter
-cannot be forgotten in one of them.
+There is no `_withDeleted` opt-out on `_count`, and no filter of any kind
+(see [RELATIONS.md](./RELATIONS.md#_count-in-include)). If you need the
+count *including* deleted children, read them and take the length —
+`include: { posts: { where: { _withDeleted: true } } }` — or `groupBy`
+the child table with `_withDeleted: true` in its `where`.
+
+### Relation filters matched deleted children
+
+`where: { posts: { some: { … } } }` returned a parent whose only matching
+post was soft-deleted — with an empty `posts` array, from a filter that
+said it had some. The five modes (`is`, `isNot`, `some`, `every`, `none`)
+are all scoped now, and `_withDeleted: true` inside the relation filter
+opts out:
+
+```ts
+await db.author.findMany({ where: { posts: { some: { title: 'x' } } } });
+```
+
+```sql
+SELECT … FROM "authors" WHERE EXISTS (
+  SELECT 1 FROM "posts" "t1"
+   WHERE "t1"."author_id" = "authors"."id" AND "t1"."deleted_at" IS NULL
+     AND "t1"."title" = $1
+)
+```
+
+**Where the scope sits is the non-obvious part, and it is why `every` is
+correct.** The predicate goes on the subquery's **join condition** — next
+to `t1.author_id = authors.id` — and *not* into the nested condition the
+caller wrote. The reason is `every`: it compiles to `NOT EXISTS` of the
+**negated** inner condition, because "every child matches" is "no child
+violates".
+
+```sql
+-- every: { title: 'x' }
+NOT EXISTS (
+  SELECT 1 FROM "posts" "t1"
+   WHERE "t1"."author_id" = "authors"."id" AND "t1"."deleted_at" IS NULL
+     AND NOT ("t1"."title" = $1)
+)
+```
+
+Fold the scope into the nested condition instead and it gets negated along
+with it: `NOT (deleted_at IS NULL AND title = 'x')` is true for every
+deleted row, so the `NOT EXISTS` fails and `every` comes to mean "every
+child is live **and** matches" — which is false for any parent that has
+ever deleted a child. On the join condition the scope restricts which rows
+the subquery considers at all, which is the right meaning for all five
+modes: `some`/`is` look for a live match, `none`/`isNot` ignore deleted
+children rather than being blocked by them, and `every` quantifies over
+the live ones.
+
+This applies to the five SQL dialects (Postgres, MySQL, SQLite, DuckDB and
+MSSQL all share that compiler). Mongo throws on a relation filter;
+IndexedDB matches all.
+
+### IndexedDB ignored a nested `where` entirely
+
+On IndexedDB, relation rows were fetched by index and handed back
+**unfiltered**, so `include: { posts: { where: { … } } }` returned
+everything the parent had — and the new soft-delete predicate would have
+been ignored right along with it. There is no predicate to push down into
+an index scan, so the nested `where` is now evaluated in JS with the same
+predicate compiler the top-level residual filter uses. Relation `_count`
+on IndexedDB filters the fetched rows the same way.
 
 ---
 
@@ -316,7 +466,7 @@ const Post = model('posts', {
 
 If both `where:` and `partialFilterExpression:` are set, each dialect
 picks the one it understands. If only one is set, forge translates where
-it can; see [docs/INDEXES.md](./INDEXES.md#partial-filter-indexes) for
+it can; see [docs/INDEXES.md](./INDEXES.md#4-partial-filter-indexes) for
 the operator coverage of the object-form-to-SQL translator.
 
 ### Per-dialect emit
@@ -604,7 +754,7 @@ db.$on('query', async (e) => {
 
 For compliance use-cases that require the audit row to be in the same
 transaction as the write, the outbox pattern from
-[docs/MUTATIONS.md](./MUTATIONS.md#transactional-outbox) is the shape —
+[docs/MUTATIONS.md](./MUTATIONS.md#g-transactional-outbox) is the shape —
 write the audit row inside the same `$transaction` as the soft-delete
 verb.
 
@@ -947,7 +1097,7 @@ behavior?". If no, hard-delete. Soft-delete is a feature, not a default.
 * [docs/MUTATIONS.md](./MUTATIONS.md) — the verb-by-verb write reference,
   including the `update` shape that `softDelete` / `restore` compile down
   to and the `semanticOp` field on `QueryEvent`.
-* [docs/INDEXES.md](./INDEXES.md#partial-filter-indexes) — partial-filter
+* [docs/INDEXES.md](./INDEXES.md#4-partial-filter-indexes) — partial-filter
   index emit per dialect, including the MySQL `CASE`-functional rewrite
   and the object-form-to-SQL translator's operator coverage.
 * [docs/EVENTS.md](./EVENTS.md) — the event-system reference; `semanticOp`

@@ -22,7 +22,8 @@ import {
 } from './compile-from-ir';
 import { withMssqlErrors } from './errors';
 import type { MssqlQueryable } from './driver';
-import { hydrateManyRelation } from '../../ir/hydrate-many';
+import { hydrateManyRelation, hydrateOneRelation } from '../../ir/hydrate-many';
+import { softDeleteField } from '../../ir/build/soft-delete';
 
 export interface MssqlExecOpts {
   client?: MssqlQueryable;
@@ -149,23 +150,17 @@ async function hydrate(
 }
 
 async function hydrateOwningOne(exec: MssqlQueryable, rows: any[], rel: RelationPlan, targetModel: ModelDef<any>): Promise<void> {
-  const fks = unique(rows.map((r) => r[rel.on]).filter(notNull));
-  if (fks.length === 0) { for (const r of rows) r[rel.name] = null; return; }
-  const subNode: SelectNode = { kind: 'select', model: rel.target, cardinality: 'many', where: { kind: 'leaf', field: rel.refs, op: 'in', value: fks }, ...(rel.nested ?? {}) };
-  const found = await executeMssqlSelect(exec, subNode, targetModel);
-  const byRef = new Map<string, any>();
-  for (const t of found) byRef.set(stringKey(t[rel.refs]), t);
-  for (const r of rows) { const k = r[rel.on]; r[rel.name] = k == null ? null : (byRef.get(stringKey(k)) ?? null); }
+  await hydrateOneRelation({
+    rows, rel, parentField: rel.on, targetField: rel.refs, keyOf: stringKey,
+    runSelect: (node) => executeMssqlSelect(exec, node, targetModel),
+  });
 }
 
 async function hydrateInverseOne(exec: MssqlQueryable, rows: any[], rel: RelationPlan, targetModel: ModelDef<any>): Promise<void> {
-  const refs = unique(rows.map((r) => r[rel.refs]).filter(notNull));
-  if (refs.length === 0) { for (const r of rows) r[rel.name] = null; return; }
-  const subNode: SelectNode = { kind: 'select', model: rel.target, cardinality: 'many', where: { kind: 'leaf', field: rel.on, op: 'in', value: refs }, ...(rel.nested ?? {}) };
-  const found = await executeMssqlSelect(exec, subNode, targetModel);
-  const byFk = new Map<string, any>();
-  for (const t of found) byFk.set(stringKey(t[rel.on]), t);
-  for (const r of rows) { const k = r[rel.refs]; r[rel.name] = k == null ? null : (byFk.get(stringKey(k)) ?? null); }
+  await hydrateOneRelation({
+    rows, rel, parentField: rel.refs, targetField: rel.on, keyOf: stringKey,
+    runSelect: (node) => executeMssqlSelect(exec, node, targetModel),
+  });
 }
 
 async function hydrateMany(exec: MssqlQueryable, rows: any[], rel: RelationPlan, targetModel: ModelDef<any>): Promise<void> {
@@ -187,7 +182,14 @@ async function applyRelationCounts(exec: MssqlQueryable, rows: any[], parentMode
     if (refs.length === 0) { for (const row of rows) row._count[relName] = 0; continue; }
     // T-SQL doesn't have ANY(@p). Build an IN list with positional placeholders.
     const placeholders = refs.map((_, i) => `@p${i + 1}`).join(', ');
-    const sqlText = `SELECT [${rel.on}] AS fk, COUNT(*) AS c FROM [${targetModel.collection}] WHERE [${rel.on}] IN (${placeholders}) GROUP BY [${rel.on}]`;
+    // Soft-deleted children are excluded, so `_count` agrees with the rows
+    // `include` hands back. Without it `_count: { posts: true }` said 7 while
+    // `include: { posts: true }` returned 5.
+    const sd = softDeleteField(targetModel);
+    const sqlText = `SELECT [${rel.on}] AS fk, COUNT(*) AS c FROM [${targetModel.collection}] `
+      + `WHERE [${rel.on}] IN (${placeholders})`
+      + (sd ? ` AND [${sd}] IS NULL` : '')
+      + ` GROUP BY [${rel.on}]`;
     const { rows: groups } = await exec.query(sqlText, refs);
     const byFk = new Map<string, number>();
     for (const g of groups) byFk.set(stringKey(g.fk), Number(g.c));

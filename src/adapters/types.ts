@@ -106,6 +106,14 @@ export interface DbIntrospection {
 // …) without the IR layer learning driver types.
 export interface ExecOpts {
   session?: unknown;
+  /**
+   * The driver handle to run against — Mongo's `Db`, and unused elsewhere.
+   *
+   * Carried here for the same reason `session` is: the executors are free
+   * functions, and without it they reach for a module-level singleton, which
+   * is how a process with two databases ended up writing both to the first.
+   */
+  db?: unknown;
   // Executor emits query/error events when present.
   emitter?: import('../events').ForgeEmitter;
   // Schema-level semantic op passed through by the wrapper for soft-delete

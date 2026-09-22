@@ -1,4 +1,4 @@
-import { dbClient } from './client';
+import { clearDefaultClient, DatabaseClient, setDefaultClient } from './client';
 import type { Adapter, AdapterCapabilities, DoctorReport, ExecOpts } from '../types';
 import { ForgeEmitter } from '../../events';
 import { isDriverInstalled } from '../missing-driver';
@@ -32,21 +32,37 @@ export class MongoAdapter implements Adapter {
   readonly capabilities = CAPS;
   readonly emitter = new ForgeEmitter();
   private _url?: string;
+  // This adapter's OWN connection. Sharing one across every createDb() meant
+  // a second database silently reused the first one's connection.
+  private readonly _client = new DatabaseClient();
 
   constructor(private _injected?: import('./driver').MongoDriver) {}
 
+  /** The `Db` this adapter is connected to. Throws before connect() resolves. */
+  get db(): import('mongodb').Db {
+    return this._client.db;
+  }
+
+  get mongoClient(): import('mongodb').MongoClient {
+    return this._client.client;
+  }
+
   async connect(url: string): Promise<void> {
     this._url = url;
+    // The first adapter also becomes the process default, so the exported
+    // `dbClient` keeps working for the single-database case.
+    setDefaultClient(this._client);
     if (this._injected) {
-      await dbClient.adopt(this._injected.client, this._injected.dbName);
+      await this._client.adopt(this._injected.client, this._injected.dbName);
       return;
     }
     if (!process.env.DATABASE_URL) process.env.DATABASE_URL = url;
-    await dbClient.connect();
+    await this._client.connect(url);
   }
 
   async close(): Promise<void> {
-    await dbClient.close();
+    await this._client.close();
+    clearDefaultClient(this._client);
   }
 
   async doctor(): Promise<DoctorReport> {
@@ -65,8 +81,13 @@ export class MongoAdapter implements Adapter {
     };
   }
 
-  private mongoOpts(opts?: ExecOpts): { session?: ClientSession } {
-    return opts?.session ? { session: opts.session as ClientSession } : {};
+  // Every executor call goes through here, which is why `db` is threaded in
+  // at this one point rather than at nine call sites.
+  private mongoOpts(opts?: ExecOpts): { session?: ClientSession; db: import('mongodb').Db } {
+    return {
+      ...(opts?.session ? { session: opts.session as ClientSession } : {}),
+      db: this._client.db,
+    };
   }
 
   private _track<T>(
@@ -121,7 +142,7 @@ export class MongoAdapter implements Adapter {
   async *streamSelect(node: any, model: any, opts?: ExecOpts): AsyncIterable<any> {
     const { compileSelect } = await import('./compile-from-ir');
     const a: any = compileSelect(node, model);
-    const coll = dbClient.db.collection(model.collection);
+    const coll = this._client.db.collection(model.collection);
     const cursor = coll.find(a.args.filter, {
       ...a.args.options,
       session: this.mongoOpts(opts).session,
@@ -131,15 +152,13 @@ export class MongoAdapter implements Adapter {
     }
   }
   applyProjectionAndHydration(rows: any[], model: any, node: any, opts?: ExecOpts) {
-    return applyMongoProjectionAndHydration(
-      rows, model, node, opts?.session as ClientSession | undefined,
-    );
+    return applyMongoProjectionAndHydration(rows, model, node, this.mongoOpts(opts));
   }
 
   $transaction<T>(fn: (session: unknown) => Promise<T>): Promise<T> {
     // Mongo requires a replica set or mongos for $transaction. Throws there
     // are surfaced verbatim — matches Prisma's behaviour.
-    return dbClient.transaction(async (session) => fn(session));
+    return this._client.transaction(async (session) => fn(session));
   }
 
   coerceInbound(model: any, data: any, _opts?: { forCreate?: boolean }) {
@@ -155,7 +174,7 @@ export class MongoAdapter implements Adapter {
   }
 
   applyCascadesForDelete(model: any, docs: any[], _opts?: ExecOpts): Promise<void> {
-    return mongoCascade(model, docs);
+    return mongoCascade(model, docs, undefined, this._client.db);
   }
 
   // A Mongo "matview" is a normal collection populated by an aggregation
@@ -170,18 +189,18 @@ export class MongoAdapter implements Adapter {
     }
     const hasOutStage = pipeline.some((s) => s && (s.$merge || s.$out));
     const full = hasOutStage ? pipeline : [...pipeline, { $out: model.collection }];
-    await dbClient.db.collection(source).aggregate(full).toArray();
+    await this._client.db.collection(source).aggregate(full).toArray();
   }
 
   // Introspection: collections + their indexes. Mongo is schemaless, so there
   // are no columns/FKs to diff — collection + index level only.
   async introspect(): Promise<import('../types').DbIntrospection> {
-    const colls = await dbClient.db.listCollections().toArray();
+    const colls = await this._client.db.listCollections().toArray();
     const tables = [] as import('../types').IntrospectedTable[];
     const views = [] as { name: string; materialised?: boolean }[];
     for (const c of colls as any[]) {
       if (c.type === 'view') { views.push({ name: c.name, materialised: false }); continue; }
-      const idxs = await dbClient.db.collection(c.name).indexes().catch(() => [] as any[]);
+      const idxs = await this._client.db.collection(c.name).indexes().catch(() => [] as any[]);
       tables.push({
         name: c.name,
         columns: [],

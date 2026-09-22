@@ -15,10 +15,10 @@ walker).
 
 * [Relation surface vs FK emit](#relation-surface-vs-fk-emit) · [Per-dialect FK syntax](#per-dialect-fk-syntax)
 * [`onDelete` behaviors](#ondelete-behaviors) · [`onUpdate`](#onupdate-and-why-forge-doesnt-expose-it)
-* [Deferred constraint checking](#deferred-constraint-checking) · [SQLite PRAGMA](#sqlite-quirks-the-per-connection-pragma) · [MySQL InnoDB](#mysql-innodb-requirement)
-* [Mongo cascade walker](#mongo-no-native-fks-the-cascade-walker) · [Soft-delete](#fk-and-soft-delete)
+* [Deferred constraint checking](#deferred-constraint-checking) · [SQLite PRAGMA](#sqlite-quirks--the-per-connection-pragma) · [MySQL InnoDB](#mysql-innodb-requirement)
+* [Mongo cascade walker](#mongo--no-native-fks-the-cascade-walker) · [Soft-delete](#fk-and-soft-delete)
 * [Self-referential](#self-referential-fks) · [Composite](#composite-fks) · [Cross-schema](#cross-schema-fks)
-* [FK indexes](#fk-indexes-the-child-column-is-on-you) · [Online FK add](#online-fk-add) · [Dropping a FK](#dropping-a-fk) · [Cycles](#cycles-between-tables)
+* [FK indexes](#fk-indexes--the-child-column-is-on-you) · [Online FK add](#online-fk-add) · [Dropping a FK](#dropping-a-fk) · [Cycles](#cycles-between-tables)
 * [Worked examples](#worked-examples) · [Cross-links](#cross-links)
 
 ---
@@ -396,23 +396,27 @@ walker on DuckDB that runs on Mongo.
 
 ## FK and soft-delete
 
-`softDelete()` rewires the model so `db.x.delete` flips a `deleted_at`
-column rather than physically removing the row. Because the row stays
-in the table, **the FK constraint never fires** — and neither does
-the cascade walker.
+`softDelete()` is a **verb**, not a model modifier: `db.x.delete()` is
+always a hard delete, and `db.x.softDelete()` writes the timestamp. Since
+a soft delete leaves the row in the table, **the FK constraint never
+fires** — and neither does the cascade walker.
 
 ```ts
 const Order = model('orders', {
   id: f.id(), buyer_id: f.objectId().optional(),
-  deleted_at: f.dateTime().optional(),
-}).softDelete()
-  .relate(() => ({
-    buyer: rel.one('user', { on: 'buyer_id', refs: 'id', onDelete: 'Cascade' }),
-  }));
+  deleted_at: f.dateTime().softDeleteAt(),
+}).relate(() => ({
+  buyer: rel.one('user', { on: 'buyer_id', refs: 'id', onDelete: 'Cascade' }),
+}));
 
-await db.order.delete({ where: { id: 'o1' } });       // soft — sets deleted_at
-await db.order.deleteHard({ where: { id: 'o1' } });   // hard delete + cascade
+await db.order.softDelete({ where: { id: 'o1' } });   // soft — sets deleted_at
+await db.order.delete({ where: { id: 'o1' } });       // hard delete + cascade
 ```
+
+(An older revision of this page described a model-level `.softDelete()`
+and a `db.x.deleteHard()`. Neither exists — `.softDelete()` on a model
+and `deleteHard` were v1 shapes. v2 is the four verbs in
+[SOFT-DELETE.md](./SOFT-DELETE.md).)
 
 ### Cascading soft-deletes
 
@@ -421,17 +425,14 @@ to children manually:
 
 ```ts
 await db.$transaction(async (tx) => {
-  await tx.orderItem.updateMany({
-    where: { order_id: orderId },
-    data: { deleted_at: new Date() },
-  });
-  await tx.order.delete({ where: { id: orderId } });
+  await tx.orderItem.softDeleteMany({ where: { order_id: orderId } });
+  await tx.order.softDelete({ where: { id: orderId } });
 });
 ```
 
 `Restrict` on a soft-deleted parent is a no-op — the row never goes
 away. If you need "can't soft-delete this if children exist," check
-the count in application code before calling `delete`. See
+the count in application code before calling `softDelete`. See
 [docs/SOFT-DELETE.md](./SOFT-DELETE.md) for the soft-delete surface.
 
 ---
@@ -567,9 +568,11 @@ intra-database only. The workarounds:
 * Different cluster / region — FK doesn't fit; you're in
   eventual-consistency territory.
 
-Mongo's walker calls `dbClient.db.collection(name)` against the
-single database the connection points at; splitting schema across
-Mongo databases means cascade can't reach across. MSSQL allows
+Mongo's walker runs against the database its own `createDb()` handle is
+connected to — the `Db` is passed in from the adapter (2.19.0), so with
+two handles in one process a cascade can no longer resolve to the wrong
+database. It still cannot reach *across* databases, so splitting a schema
+over two Mongo databases means splitting the cascade too. MSSQL allows
 three-part names (`database.schema.table`) but the FK syntax doesn't
 support crossing databases.
 
@@ -613,9 +616,11 @@ doesn't index for OLTP-style point lookups anyway. **Mongo** — the
 walker uses `find({ <fk>: { $in: [...] } })`; declare via
 `.index({ keys: { <fk>: 1 } })` on any non-tiny child collection.
 
-The forge doctor surfaces missing FK indexes on Postgres and MySQL —
-a FK column with no covering index is flagged. See
-[docs/DOCTOR.md](./DOCTOR.md#fk-index-probe).
+There is no probe for this — `forge doctor` reports driver and
+capability state, not index coverage (see
+[docs/DOCTOR.md](./DOCTOR.md)). Checking that every FK column is indexed
+is on you; the per-dialect catalogue query is the practical way to audit
+it.
 
 ---
 

@@ -215,16 +215,18 @@ The adapter's `$transaction(fn)` opens per-op txns and reuses them within the fn
 * **Rollback on throw** (any thrown error propagates, subsequent writes don't happen).
 * **NOT strict serialisability** — a network request or timer between writes will let the earlier writes commit before the later ones start.
 
-For strict atomicity of interleaved reads + writes on the same store, use the `batch` form:
+The array form takes **functions** as of 2.19.0 (promises are refused), and it runs them in order:
 
 ```ts
 await db.$transaction([
-  db.user.create({ data: { ... } }),
-  db.post.create({ data: { ... } }),
+  () => db.user.create({ data: { ... } }),
+  () => db.post.create({ data: { ... } }),
 ]);
 ```
 
-That maps to one IDB `readwrite` txn spanning both stores, committed atomically.
+An older revision of this page said that mapped to one IDB `readwrite` txn spanning both stores, committed atomically. **It does not, and cannot.** `$transaction` on this adapter runs the callback with no session and every operation opens its own short-lived IDB txn, because an `IDBTransaction` auto-commits as soon as the microtask queue idles and so cannot survive an `await` on anything that is not an IDB request. Per-operation txns are the strongest atomicity IndexedDB offers here: a throw stops later writes from being issued, but the earlier ones are already committed.
+
+That is also why the ambient transaction session added in 2.19.0 is Node-only and costs nothing here — there is no open transaction for a nested call to join. If you need all-or-nothing across several writes in the browser, model them as one document, or write a compensating undo.
 
 For per-dialect transaction depth (savepoints, isolation levels, deadlock retry, Mongo replica-set rules), see **[docs/TRANSACTIONS.md](./TRANSACTIONS.md)**.
 
