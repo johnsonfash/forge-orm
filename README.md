@@ -156,6 +156,7 @@ npx degit johnsonfash/forge-orm/examples/01-sqlite-browser-todo my-app
   * [Choosing fields: `select` and `include`](#choosing-fields-select-and-include)
   * [Sorting and pagination](#sorting-and-pagination)
 * [Writing data](#writing-data)
+  * [One row back, or `null` — `updateFirst` / `deleteFirst`](#one-row-back-or-null--updatefirst--deletefirst)
   * [Atomic number ops](#atomic-number-ops)
   * [Writing related records in one call](#writing-related-records-in-one-call)
   * [Deletes and cascades](#deletes-and-cascades)
@@ -237,7 +238,7 @@ The README is the surface reference. For more depth — extra examples, edge cas
 | Topic | File |
 |---|---|
 | Queries — every operator with per-dialect SQL/Mongo emit, cursor pagination, distinct, streaming, common bugs, 8 worked queries | **[docs/QUERIES.md](docs/QUERIES.md)** |
-| Mutations — create/update/upsert/delete asymmetry, atomic ops, nested writes, idempotency, optimistic+pessimistic concurrency, 8 worked patterns | **[docs/MUTATIONS.md](docs/MUTATIONS.md)** |
+| Mutations — create/update/upsert/delete asymmetry, `updateFirst`/`deleteFirst` and the two-round-trip re-read they replace, atomic ops, nested writes, idempotency, optimistic+pessimistic concurrency, 8 worked patterns | **[docs/MUTATIONS.md](docs/MUTATIONS.md)** |
 | Transactions — the ambient session (a repository joins without `tx`), thunk array form, per-dialect mechanics, savepoints, isolation, deadlock retry, Mongo replica-set, outbox, 5 worked patterns | **[docs/TRANSACTIONS.md](docs/TRANSACTIONS.md)** |
 | Raw SQL — `forgeSql` composition, identifier-vs-value safety, per-dialect placeholders, `$runCommandRaw`, per-dialect worked patterns | **[docs/RAW-SQL.md](docs/RAW-SQL.md)** |
 | `$explain` — see a query without running it, both callback forms, the plan via `analyze`, why `EXPLAIN ANALYZE` is never emitted, per-dialect support | **[docs/EXPLAIN.md](docs/EXPLAIN.md)** |
@@ -381,6 +382,38 @@ this out.
 
 Full release history is in [CHANGELOG.md](./CHANGELOG.md). Recent highlights:
 
+- **2.20 — `updateFirst` / `deleteFirst`: one round trip instead of two.**
+  `update` and `delete` return the written row but **throw** when the
+  filter matched nothing, so "update it and hand it back, or tell me it
+  is not there" was written as `updateMany` plus a re-read of the same
+  row — two queries on essentially every write path (measured in one
+  consumer codebase: 330 `updateMany` call sites, 123 of them followed by
+  that re-read). The new verbs are the same write returning `null` on a
+  miss. On a model with a `.softDeleteAt()` column the old shape was
+  *three* trips and still wrong, because a read is soft-delete filtered
+  and cannot see a row the patch just soft-deleted; `updateFirst` is not
+  filtered and returns the row from the write itself. See
+  [CHANGELOG.md](./CHANGELOG.md#2200--updatefirst-and-deletefirst-the-doubled-round-trip-on-every-write-path).
+- **2.19 — four things forge only looked like it did.** Each ran without
+  complaint while doing something other than what it said.
+  [`$transaction` did not reach a repository layer](./CHANGELOG.md#transaction-did-not-reach-a-repository-layer) —
+  a callback that called a repository discarded the `tx`, so neither leg
+  was in the transaction and the throw meant to undo them undid nothing;
+  the session now lives in an `AsyncLocalStorage` and a repository joins
+  without being threaded a handle.
+  [The array form gave no atomicity at all](./CHANGELOG.md#behaviour-change-transaction-takes-thunks-now) —
+  it was `Promise.all` over writes that had already dispatched; it takes
+  **thunks** now and refuses already-running promises, which is the one
+  behaviour change in the release.
+  [The Mongo client was one per process, not one per `createDb()`](./CHANGELOG.md#the-mongo-client-was-one-per-process-not-one-per-createdb) —
+  a second `createDb({ url: B })` silently kept writing to **A**, and
+  `$disconnect()` on either closed the connection under both.
+  [Soft-deleted rows came back through every `include`](./CHANGELOG.md#soft-deleted-rows-came-back-through-every-include) —
+  the filter was applied at the top level only, so a "deleted" post still
+  listed under its author; relation sub-selects are now scoped at every
+  depth, along with `groupBy`, relation `_count` and relation filters,
+  which had all disagreed with it. See
+  [CHANGELOG.md](./CHANGELOG.md#2190--a-transaction-that-did-not-reach-your-repositories-and-three-more-things-forge-only-looked-like-it-did).
 - **2.18 — three things that silently returned or wrote wrong data.** A
   keyset cursor ignored the sort direction, so `orderBy: { createdAt:
   'desc' }` with a cursor asked for rows *greater* than the last row
@@ -1467,6 +1500,9 @@ await db.user.createMany({ data: [ /* … */ ] });
 
 await db.user.update({ where: { id: 'u1' }, data: { name: 'A2' } });
 
+// same write, but a miss is `null` instead of a throw (2.20)
+const user = await db.user.updateFirst({ where: { id: 'u1' }, data: { name: 'A2' } });
+
 await db.user.updateMany({ where: { active: false }, data: { active: true } });
 
 // update if found, otherwise create
@@ -1477,11 +1513,37 @@ await db.user.upsert({
 });
 
 await db.user.delete({ where: { id: 'u1' } });
+await db.user.deleteFirst({ where: { id: 'u1' } });          // `null` if already gone
 await db.user.deleteMany({ where: { active: false } });
 ```
 
 Create and update can also return only selected fields or include relations,
 the same way reads do, by passing `select` or `include` alongside `data`.
+
+### One row back, or `null` — `updateFirst` / `deleteFirst`
+
+`update` and `delete` write one row and hand it back, and **throw**
+`P2025` when the filter matched nothing. `updateFirst` and `deleteFirst`
+(new in 2.20) are the same write with the same arguments, returning
+`null` on a miss instead:
+
+```ts
+const user = await db.user.updateFirst({ where: { id }, data: { name } });
+if (!user) return res.status(404).end();
+```
+
+That one difference is what a repository wants — "update it and give it
+back, or tell me it is not there" — and without it the shape people wrote
+was `updateMany` followed by a `findFirst` of the same filter: two round
+trips on every write path, because `update`'s throw would have turned a
+404 into a 500. On a model with a `.softDeleteAt()` column it was three,
+since a **read** is soft-delete filtered and so cannot see a row the patch
+has just soft-deleted. `updateFirst` is not soft-delete filtered and
+returns the row from the write itself, so that case is one call too. Full
+comparison, and the migration, in
+[docs/MUTATIONS.md](docs/MUTATIONS.md#updatefirst-and-deletefirst--the-row-or-null).
+
+Keep `update` where the row must exist — the throw is the assertion.
 
 ### Atomic number ops
 

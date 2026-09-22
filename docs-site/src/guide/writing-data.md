@@ -11,6 +11,9 @@ await db.user.createMany({ data: [ /* … */ ] });
 
 await db.user.update({ where: { id: 'u1' }, data: { name: 'A2' } });
 
+// same write, but a miss is `null` instead of a throw (2.20)
+const user = await db.user.updateFirst({ where: { id: 'u1' }, data: { name: 'A2' } });
+
 await db.user.updateMany({ where: { active: false }, data: { active: true } });
 
 // update if found, otherwise create
@@ -21,11 +24,37 @@ await db.user.upsert({
 });
 
 await db.user.delete({ where: { id: 'u1' } });
+await db.user.deleteFirst({ where: { id: 'u1' } });          // `null` if already gone
 await db.user.deleteMany({ where: { active: false } });
 ```
 
 Create and update can also return only selected fields or include relations,
 the same way reads do, by passing `select` or `include` alongside `data`.
+
+### One row back, or `null` — `updateFirst` / `deleteFirst`
+
+`update` and `delete` write one row and hand it back, and **throw**
+`P2025` when the filter matched nothing. `updateFirst` and `deleteFirst`
+(new in 2.20) are the same write with the same arguments, returning
+`null` on a miss instead:
+
+```ts
+const user = await db.user.updateFirst({ where: { id }, data: { name } });
+if (!user) return res.status(404).end();
+```
+
+That one difference is what a repository wants — "update it and give it
+back, or tell me it is not there" — and without it the shape people wrote
+was `updateMany` followed by a `findFirst` of the same filter: two round
+trips on every write path, because `update`'s throw would have turned a
+404 into a 500. On a model with a `.softDeleteAt()` column it was three,
+since a **read** is soft-delete filtered and so cannot see a row the patch
+has just soft-deleted. `updateFirst` is not soft-delete filtered and
+returns the row from the write itself, so that case is one call too. Full
+comparison, and the migration, in
+[docs/MUTATIONS.md](/reference/mutations#updatefirst-and-deletefirst--the-row-or-null).
+
+Keep `update` where the row must exist — the throw is the assertion.
 
 ### Atomic number ops
 

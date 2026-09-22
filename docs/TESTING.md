@@ -557,15 +557,15 @@ test('audit middleware records every write', async () => {
 
   off();
 
-  const writes = events.filter((e) => ['create', 'update', 'delete'].includes(e.semanticOp ?? ''));
-  expect(writes.map((e) => e.semanticOp)).toEqual(['create', 'update', 'delete']);
+  const writes = events.filter((e) => ['insert', 'update', 'delete'].includes(e.op));
+  expect(writes.map((e) => e.op)).toEqual(['insert', 'update', 'delete']);
   expect(writes.every((e) => e.model === 'user')).toBe(true);
 });
 ```
 
-The `semanticOp` field is the model-level verb (`create`, `update`, `findFirst`, `findMany`, …) — distinct from `op`, which is the lower-level adapter call. See [EVENTS.md § semanticOp taxonomy](./EVENTS.md#semanticop-taxonomy) for the full list.
+Filter on **`op`**, not on `semanticOp`. `op` is the physical operation and carries the same six values on every adapter — `'select'`, `'count'`, `'groupBy'`, `'insert'`, `'update'`, `'delete'` — so a `create` shows up as `'insert'` and a `findFirst` as `'select'`. `semanticOp` is narrower than it looks: it is set **only** for `softDelete` / `softDeleteMany` / `restore` / `restoreMany`, and is `undefined` on a direct `create`, `update` or `delete`. A filter written against `semanticOp` with physical names in it matches nothing at all, and the test passes or fails for the wrong reason. See [EVENTS.md § semanticOp taxonomy](./EVENTS.md#semanticop-taxonomy) for the four values.
 
-Order matters for some tests — the event stream is emission-ordered, which matches the order of the awaits in your code, so `events.map((e) => \`${e.model}:${e.semanticOp}\`)` is the cleanest way to assert "this sequence in this order."
+Order matters for some tests — the event stream is emission-ordered, which matches the order of the awaits in your code, so `events.map((e) => \`${e.model}:${e.op}\`)` is the cleanest way to assert "this sequence in this order."
 
 For queries that throw, subscribe to `'error'` instead and inspect `e.cause?.constraint` / `e.cause?.code`:
 

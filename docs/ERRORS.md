@@ -193,6 +193,14 @@ Fired by the `*OrThrow` methods (`findFirstOrThrow`, `findUniqueOrThrow`,
 matches zero rows. Not a database-level code — synthesised by the wrapper in
 `src/adapters/mongo/errors.ts:35` and `src/builder/collection.ts`.
 
+If "no such row" is a 404 rather than a bug, don't catch this — use
+[`updateFirst` / `deleteFirst`](./MUTATIONS.md#updatefirst-and-deletefirst--the-row-or-null)
+(2.20.0), which return `null` on a miss and still return the written row
+otherwise. Catching `P2025` around an `update` is not equivalent: `update`
+runs nested writes after the row itself, and a nested `connect` to a
+missing row raises the same code, so the catch would report "not found"
+for a row that was updated.
+
 ```ts
 // notFoundError(model, where)
 new DbKnownError('P2025', `No ${model} found matching the given criteria`, {

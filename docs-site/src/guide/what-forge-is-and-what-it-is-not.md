@@ -24,6 +24,38 @@ this out.
 
 Full release history is in [CHANGELOG.md](/reference/changelog). Recent highlights:
 
+- **2.20 — `updateFirst` / `deleteFirst`: one round trip instead of two.**
+  `update` and `delete` return the written row but **throw** when the
+  filter matched nothing, so "update it and hand it back, or tell me it
+  is not there" was written as `updateMany` plus a re-read of the same
+  row — two queries on essentially every write path (measured in one
+  consumer codebase: 330 `updateMany` call sites, 123 of them followed by
+  that re-read). The new verbs are the same write returning `null` on a
+  miss. On a model with a `.softDeleteAt()` column the old shape was
+  *three* trips and still wrong, because a read is soft-delete filtered
+  and cannot see a row the patch just soft-deleted; `updateFirst` is not
+  filtered and returns the row from the write itself. See
+  [CHANGELOG.md](/reference/changelog#2200--updatefirst-and-deletefirst-the-doubled-round-trip-on-every-write-path).
+- **2.19 — four things forge only looked like it did.** Each ran without
+  complaint while doing something other than what it said.
+  [`$transaction` did not reach a repository layer](/reference/changelog#transaction-did-not-reach-a-repository-layer) —
+  a callback that called a repository discarded the `tx`, so neither leg
+  was in the transaction and the throw meant to undo them undid nothing;
+  the session now lives in an `AsyncLocalStorage` and a repository joins
+  without being threaded a handle.
+  [The array form gave no atomicity at all](/reference/changelog#behaviour-change-transaction-takes-thunks-now) —
+  it was `Promise.all` over writes that had already dispatched; it takes
+  **thunks** now and refuses already-running promises, which is the one
+  behaviour change in the release.
+  [The Mongo client was one per process, not one per `createDb()`](/reference/changelog#the-mongo-client-was-one-per-process-not-one-per-createdb) —
+  a second `createDb({ url: B })` silently kept writing to **A**, and
+  `$disconnect()` on either closed the connection under both.
+  [Soft-deleted rows came back through every `include`](/reference/changelog#soft-deleted-rows-came-back-through-every-include) —
+  the filter was applied at the top level only, so a "deleted" post still
+  listed under its author; relation sub-selects are now scoped at every
+  depth, along with `groupBy`, relation `_count` and relation filters,
+  which had all disagreed with it. See
+  [CHANGELOG.md](/reference/changelog#2190--a-transaction-that-did-not-reach-your-repositories-and-three-more-things-forge-only-looked-like-it-did).
 - **2.18 — three things that silently returned or wrote wrong data.** A
   keyset cursor ignored the sort direction, so `orderBy: { createdAt:
   'desc' }` with a cursor asked for rows *greater* than the last row

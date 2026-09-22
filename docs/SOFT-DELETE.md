@@ -178,6 +178,25 @@ make that impossible. So:
 If you need to know "was this row already soft-deleted?", do a
 `findFirst({ where: { id, _withDeleted: true } })` first.
 
+The same reach applies to `update` and to `updateFirst` (2.20.0), and it
+is what makes a soft-deleting patch returnable in one round trip. A
+**read** is filtered, so `updateMany` followed by `findFirst` of the same
+id returns `null` whenever the patch is what set the soft-delete column —
+the row it just wrote is now hidden from the read. `updateFirst` is not
+filtered and returns the post-update row from the write statement itself,
+so there is nothing to re-read and nothing to reconstruct:
+
+```ts
+// null. Every time — the read cannot see the row it just soft-deleted.
+await db.post.updateMany({ where: { id }, data: { deleted_at: new Date() } });
+const gone = await db.post.findFirst({ where: { id } });
+
+// the row, deleted_at set, one round trip
+const post = await db.post.updateFirst({ where: { id }, data: { deleted_at: new Date() } });
+```
+
+See [docs/MUTATIONS.md](./MUTATIONS.md#updatefirst-and-deletefirst--the-row-or-null).
+
 ---
 
 ## Query-time defaults

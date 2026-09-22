@@ -602,7 +602,7 @@ export class CollectionWrapper<
     // the emitted QueryEvent with `semanticOp`. Not part of the public API
     // (the `_` prefix is the convention); users should call softDelete()
     // / restore() directly rather than passing this themselves.
-    _internal?: { semanticOp?: 'softDelete' | 'restore' },
+    _internal?: { semanticOp?: 'softDelete' | 'restore'; tolerateMissing?: boolean },
   ): Promise<Find1<F, R, A, SM>> {
     this._assertWritable('update');
     this._assertStrictWhere(args.where);
@@ -624,9 +624,63 @@ export class CollectionWrapper<
       session: this.session,
       semanticOp: _internal?.semanticOp,
     });
-    if (!doc) throw notFoundError(this.model.collection, args.where);
+    if (!doc) {
+      if (_internal?.tolerateMissing) return null as never;
+      throw notFoundError(this.model.collection, args.where);
+    }
     if (nested.length > 0) await this._applyNestedWrites(doc, nested);
     return this._returnOne(doc, args);
+  }
+
+  /**
+   * Update ONE row by a filter that need not be unique, and hand back the
+   * row — or `null` when nothing matched.
+   *
+   * The difference from `update()` is only the miss: `update()` throws. That
+   * one difference is why a whole class of repository code was written as
+   *
+   *     await db.thing.updateMany({ where: { id }, data });
+   *     const fresh = await db.thing.findFirst({ where: { id } });
+   *     return fresh;
+   *
+   * which is TWO round trips, on essentially every write path, because a
+   * repository wants "update it and give it back, or tell me it is not there"
+   * and `update()` would 500 on the last part. This is that, in one.
+   *
+   * Like `update()` and unlike a read, it does NOT add the soft-delete
+   * filter — so it can update an already-soft-deleted row, and it returns the
+   * row even when the patch is what soft-deleted it. That last part matters:
+   * the re-read pattern above returns null in exactly that case (the read IS
+   * filtered), so callers had to take a third round trip to read the row
+   * BEFORE the write and reconstruct the result by hand.
+   */
+  async updateFirst<A extends {
+    where: WhereInput<F>;
+    data: IUpdate<F, R>;
+    select?: ISelect<F, R, SM>;
+    include?: IInclude<R, SM>;
+    omit?: { [K in keyof F]?: boolean };
+  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A, SM> | null> {
+    // A flag rather than a try/catch around update(): update() runs nested
+    // writes after the row itself, and one of those can raise the same
+    // not-found code. Catching it here would return null for a row that HAD
+    // been updated.
+    return this.update(args, { tolerateMissing: true }) as Promise<Find1<F, R, A, SM> | null>;
+  }
+
+  /**
+   * Delete ONE row by a filter that need not be unique, and hand back the
+   * deleted row — or `null` when nothing matched, where `delete()` throws.
+   *
+   * The idempotent shape: deleting something already gone is not an error.
+   */
+  async deleteFirst<A extends {
+    where: WhereInput<F>;
+    select?: ISelect<F, R, SM>;
+    include?: IInclude<R, SM>;
+    omit?: { [K in keyof F]?: boolean };
+  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A, SM> | null> {
+    return this.delete(args, { tolerateMissing: true }) as Promise<Find1<F, R, A, SM> | null>;
   }
 
   async updateMany(
@@ -741,7 +795,10 @@ export class CollectionWrapper<
     select?: ISelect<F, R, SM>;
     include?: IInclude<R, SM>;
     omit?: { [K in keyof F]?: boolean };
-  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A, SM>> {
+  }>(
+    args: A & NoBothSelectInclude<A>,
+    _internal?: { tolerateMissing?: boolean },
+  ): Promise<Find1<F, R, A, SM>> {
     this._assertWritable('delete');
     this._assertStrictWhere(args.where);
     const mk = this._modelKey();
@@ -754,7 +811,10 @@ export class CollectionWrapper<
       schema as any,
     );
     const { doc } = await this.adapter.executeDelete(node, this.model, { session: this.session });
-    if (!doc) throw notFoundError(this.model.collection, args.where);
+    if (!doc) {
+      if (_internal?.tolerateMissing) return null as never;
+      throw notFoundError(this.model.collection, args.where);
+    }
     return this._returnOne(doc, args);
   }
 

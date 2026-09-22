@@ -6,8 +6,8 @@ exposes, the dialect SQL each one compiles to, and the patterns that keep
 those writes correct under load.
 
 The shape is intentionally Prisma-flavoured: `create`, `createMany`,
-`update`, `updateMany`, `upsert`, `delete`, `deleteMany`, plus atomic
-number ops and nested writes. The mapping to driver-level statements is
+`update`, `updateFirst`, `updateMany`, `upsert`, `delete`, `deleteFirst`,
+`deleteMany`, plus atomic number ops and nested writes. The mapping to driver-level statements is
 adapter-specific and described below.
 
 ## Contents
@@ -17,6 +17,7 @@ adapter-specific and described below.
 * [`upsert`](#upsert)
 * [A filter whose values all vanished is refused](#a-filter-whose-values-all-vanished-is-refused)
 * [`delete` vs `deleteMany`](#delete-vs-deletemany)
+* [`updateFirst` and `deleteFirst` — the row, or `null`](#updatefirst-and-deletefirst--the-row-or-null)
 * [Atomic number ops](#atomic-number-ops)
 * [List column ops — `push`, `addToSet`, `pull`](#list-column-ops--push-addtoset-pull)
 * [`set` vs `unset`](#set-vs-unset)
@@ -102,10 +103,11 @@ for when to use which.
 
 ## `update` vs `updateMany`
 
-| Verb         | `where`                | Rows affected          | Returns               | Notes                                |
-|--------------|------------------------|------------------------|-----------------------|--------------------------------------|
-| `update`     | any filter             | exactly one            | the updated row       | throws if no row matched             |
-| `updateMany` | any filter             | every match            | `{ count: number }`   | zero matches is a no-op, not an error |
+| Verb          | `where`                | Rows affected          | Returns               | Notes                                |
+|---------------|------------------------|------------------------|-----------------------|--------------------------------------|
+| `update`      | any filter             | exactly one            | the updated row       | throws if no row matched             |
+| `updateFirst` | any filter             | exactly one            | the updated row or `null` | a miss is `null`, not a throw (2.20.0) |
+| `updateMany`  | any filter             | every match            | `{ count: number }`   | zero matches is a no-op, not an error |
 
 ```ts
 await db.user.update({
@@ -163,7 +165,13 @@ const user = await db.user.update({ where: { id }, data: { name } });
 ```
 
 Reach for `updateMany` when you genuinely want every match updated and
-the count is the answer. Reach for `update` when you want one row back.
+the count is the answer. Reach for `update` when you want one row back
+and the row must exist, and
+[`updateFirst`](#updatefirst-and-deletefirst--the-row-or-null) when you
+want one row back and "not found" is a legitimate answer — that last
+case is what the two-trip shape above was really working around, and on
+a soft-deleting patch the re-read returns `null` however many trips you
+spend.
 
 ### What each adapter compiles to
 
@@ -185,9 +193,12 @@ filter inside one `$transaction` — or, on Postgres only, drop to
 
 An `update` is asserting that a row to write exists. Letting
 that silently no-op masks application bugs: the handler thinks it wrote,
-the database disagrees, and the next read shows stale data. The
-`updateMany` path is the right verb when "match or not" is a valid
-outcome.
+the database disagrees, and the next read shows stale data.
+
+When "match or not" is a valid outcome, say so with the verb instead:
+[`updateFirst`](#updatefirst-and-deletefirst--the-row-or-null) returns
+the row or `null` in one round trip, and `updateMany` returns the count
+when "however many match" is what you mean.
 
 ---
 
@@ -330,10 +341,11 @@ all-`undefined` case and applies it to the whole table.
 
 Same asymmetry as `update`.
 
-| Verb         | `where`    | Rows affected | Returns         | Notes                              |
-|--------------|------------|---------------|-----------------|------------------------------------|
-| `delete`     | any filter | exactly one   | the deleted row | throws if no row matched           |
-| `deleteMany` | any filter | every match   | `{ count }`     | zero matches is a no-op            |
+| Verb          | `where`    | Rows affected | Returns         | Notes                              |
+|---------------|------------|---------------|-----------------|------------------------------------|
+| `delete`      | any filter | exactly one   | the deleted row | throws if no row matched           |
+| `deleteFirst` | any filter | exactly one   | the deleted row or `null` | deleting something already gone is not an error (2.20.0) |
+| `deleteMany`  | any filter | every match   | `{ count }`     | zero matches is a no-op            |
 
 `delete`'s `where` is a full filter too, with the same consequence: a
 selector matching many rows deletes one unspecified row rather than
@@ -364,6 +376,159 @@ same way: enforced by the database on SQL, simulated by forge on Mongo.
 
 See [docs/RELATIONS.md](./RELATIONS.md) for the full cascade matrix when
 the doc lands; until then the README section is the authoritative source.
+
+---
+
+## `updateFirst` and `deleteFirst` — the row, or `null`
+
+New in 2.20.0. Two verbs that do what `update` and `delete` do, and
+differ from them in exactly one place: the miss.
+
+```ts
+const user = await db.user.updateFirst({ where: { id }, data: { name } });
+if (!user) return res.status(404).end();       // nothing matched, nothing threw
+
+await db.session.deleteFirst({ where: { token } });   // already gone? fine.
+```
+
+`updateFirst` takes the same arguments as `update` — `where`, `data`, and
+optionally `select` / `include` / `omit` — writes **one** row, and returns
+it. When the filter matched nothing it returns `null` where `update`
+throws a `DbKnownError` with code `P2025`. `deleteFirst` stands in the
+same relation to `delete`. Neither narrows `where` to unique columns, for
+the same reason [`update` does not](#updates-where-is-a-full-filter-not-a-unique-selector):
+a filter that matches many rows writes one unspecified row.
+
+### The four ways to write one update
+
+| Call                                                    | Rows written | Returns             | Round trips |
+|---------------------------------------------------------|--------------|---------------------|-------------|
+| `update({ where, data })`                               | one          | the row, or throws `P2025` | 1 |
+| `updateFirst({ where, data })`                          | one          | the row, or `null`  | 1 |
+| `updateMany({ where, data })`                           | every match  | `{ count }`         | 1 |
+| `updateMany(…)` then `findFirst(…)`                     | every match  | the row, or `null`  | **2** — 3 on a soft-deleting patch |
+
+The last line is not a verb, it is the shape repository code was written
+in before these two existed:
+
+```ts
+// The old shape. Don't.
+await db.thing.updateMany({ where: { id }, data });          // round trip 1
+const fresh = await db.thing.findFirst({ where: { id } });   // round trip 2
+return fresh;
+```
+
+Nobody wrote that because they wanted two queries. They wrote it because
+a repository method wants *"update this row and hand it back, or tell me
+it is not there"*, and the only verb that handed the row back would turn
+"it is not there" into an exception — a 500 on a request that should be a
+404. `updateMany` gives the not-there case a `{ count: 0 }` instead of a
+throw, so the write went through `updateMany` and the row had to be
+fetched separately.
+
+The cost is not theoretical. Measured across one consumer codebase: 330
+`updateMany` call sites in 203 files, and 123 of them are immediately
+followed by a re-read of the row just written. That is a doubled round
+trip on essentially every write path in the application.
+
+It compounded with forge's own documentation, which until 2.18.0 said
+`update`'s `where` was type-narrowed to the model's unique fields and
+that a non-unique filter needed `updateMany` instead. It never was (see
+[`update`'s `where` is a full filter](#updates-where-is-a-full-filter-not-a-unique-selector)),
+and a reader who believed it had no single-round-trip option at all. These
+verbs close the gap that sentence opened.
+
+### The third round trip, on a soft-deleting patch
+
+On a model with a `.softDeleteAt()` column, the re-read pattern does not
+merely cost an extra trip — it returns the wrong answer. A **read** is
+soft-delete filtered, so when the patch is what soft-deletes the row, the
+follow-up `findFirst` cannot see the row it just wrote and comes back
+`null`:
+
+```ts
+await db.post.updateMany({ where: { id }, data: { deleted_at: new Date() } });
+const fresh = await db.post.findFirst({ where: { id } });   // → null. Always.
+```
+
+The workaround for that was a read placed *before* the write, and the
+returned object assembled by hand from the pre-write row plus the patch —
+three round trips, and a result that is a reconstruction rather than what
+is in the table.
+
+`updateFirst` does not have the problem. Like `update`, and unlike a
+read, it is **not** soft-delete filtered: it can update an
+already-soft-deleted row, and the row it returns is the post-update row
+as the driver handed it back, not a re-read. One trip, and the real row:
+
+```ts
+const post = await db.post.updateFirst({
+  where: { id },
+  data:  { deleted_at: new Date() },
+});
+// → the row, deleted_at set, from the UPDATE … RETURNING itself
+```
+
+(`softDelete` is still the verb to reach for when soft-deleting is the
+whole intent — see [docs/SOFT-DELETE.md](./SOFT-DELETE.md). It throws on
+a miss, as `update` does.)
+
+### Why they are not a `try`/`catch` around `update`
+
+`updateFirst` is not `update` wrapped in a catch for `P2025`, and that is
+a correctness point rather than a stylistic one. `update` applies
+[nested writes](#nested-writes) **after** the row itself, and a nested
+write can raise the same not-found code — a `connect` to a row that does
+not exist, for instance. A catch at the outside cannot tell the two apart,
+so it would return `null` for a row that had in fact been updated, and
+the caller would 404 a request that wrote to the database. The miss is
+handled at the one point where the row is found to be absent: the
+executor returned no document, before nested writes run.
+
+### What they compile to
+
+Exactly what `update` and `delete` compile to — the same
+`UPDATE … RETURNING` / `OUTPUT` / `findOneAndUpdate` per dialect, listed
+under [`update` vs `updateMany`](#update-vs-updatemany) and
+[`delete` vs `deleteMany`](#delete-vs-deletemany). Nothing extra is
+issued: on MySQL, which has no `RETURNING`, that is the same follow-up
+`SELECT` `update` already does, and on every other dialect it is one
+statement.
+
+### Migrating the re-read pattern
+
+Replace the pair with one call:
+
+```ts
+// before
+await db.thing.updateMany({ where: { id, tenant_id }, data });
+const fresh = await db.thing.findFirst({ where: { id, tenant_id } });
+return fresh!;
+
+// after
+const row = await db.thing.updateFirst({ where: { id, tenant_id }, data });
+if (!row) throw new NotFound();
+return row;
+```
+
+Two things to check as you go:
+
+* **The result is `null`-able, and `updateFirst` is honest about it.**
+  Any `!` assertion on the old `fresh` has to become a real null check —
+  a `return fresh!` becomes `if (!row) throw new NotFound()` or a 404, or
+  whatever the caller's contract says. The `!` was always a lie; the
+  re-read could return `null` both because the row did not exist and
+  because another writer deleted it in the gap between the two trips.
+* **`where` must still identify one row.** The re-read pattern updated
+  *every* match, so a filter that was loose on purpose changes meaning:
+  `updateFirst` writes one of the matches and which one is unspecified.
+  If "however many match" is what you meant, keep `updateMany` and keep
+  the count.
+
+Where the row genuinely must exist — an internal invariant rather than a
+user-supplied id — `update` is still the right verb. Its throw is the
+assertion. `updateFirst` is for the case where "not found" is a legitimate
+outcome the caller has to handle.
 
 ---
 
@@ -780,8 +945,10 @@ What you can read back after a write, per dialect:
 | `create`          | row      | row*  | row            | row    | row   | row                    |
 | `createMany`      | count    | count | count          | count  | count | count                  |
 | `update`          | row      | row*  | row            | row    | row   | row (`findOneAndUpdate`) |
+| `updateFirst`     | row / `null` | row* / `null` | row / `null` | row / `null` | row / `null` | row / `null` |
 | `updateMany`      | count    | count | count          | count  | count | count                  |
 | `delete`          | row      | row*  | row            | row    | row   | row (`findOneAndDelete`) |
+| `deleteFirst`     | row / `null` | row* / `null` | row / `null` | row / `null` | row / `null` | row / `null` |
 | `deleteMany`      | count    | count | count          | count  | count | count                  |
 | `upsert`          | row      | row*  | row            | row    | row   | row                    |
 
@@ -1113,25 +1280,44 @@ bulk path (see [Batched throughput](#batched-throughput)).
 
 ### (e) Soft delete + restore
 
-Declare a `deleted_at` column and use `softDelete` / `restore`:
+Declare the column with `.softDeleteAt()` and use `softDelete` /
+`restore`:
 
 ```ts
 const Post = model('posts', {
   id:         f.id(),
   title:      f.string(),
   body:       f.string(),
-  deleted_at: f.timestamp().nullable(),
+  deleted_at: f.dateTime().optional().softDeleteAt(),
 });
 
 await db.post.softDelete({ where: { id: 'p1' } });
 await db.post.restore({ where: { id: 'p1' } });
 ```
 
+`.softDeleteAt()` is the part that matters — it is what the four verbs
+look for. On a plain optional `dateTime` with no marker, `softDelete`
+throws synchronously and names the model.
+
 `softDelete` compiles to an `update` that sets `deleted_at = now()`, and
 emits a `QueryEvent` with `semanticOp: 'softDelete'` so listeners can
 treat it differently from a regular update (audit trail, replication
-filters, etc.). Reads filter `deleted_at IS NULL` by default unless you
-opt in with `withDeleted: true`. See
+filters, etc.). Reads filter `deleted_at IS NULL` by default; the opt-out
+is **`_withDeleted: true`** inside the `where`, underscore included, at
+the top level or inside an `include` at any depth:
+
+```ts
+await db.post.findMany({ where: { _withDeleted: true } });
+await db.user.findFirst({ include: { posts: { where: { _withDeleted: true } } } });
+```
+
+The underscore is not cosmetic. `_withDeleted` is one of four keys the
+where-builder recognises and strips before compiling; `withDeleted` is
+not one of them, so it is treated as a field name. Under `strict: true`
+that throws `[forge:strict] unknown where key 'withDeleted'`; without
+strict it compiles to a filter on a column no table has and the database
+errors. Either way you do not get the opt-out. See
+[docs/SOFT-DELETE.md](./SOFT-DELETE.md) and
 [Soft delete](../README.md#soft-delete) for the full surface.
 
 ### (f) Audit trail on every update

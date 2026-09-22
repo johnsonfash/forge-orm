@@ -4,6 +4,159 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.20.0 — `updateFirst` and `deleteFirst`: the doubled round trip on every write path
+
+**Minor, purely additive. No behaviour change to any existing API.**
+Two new verbs on the collection wrapper. They exist because of a count:
+in one consumer codebase there are **330 `updateMany` call sites across
+203 files, and 123 of them are immediately followed by a re-read of the
+row just written**. Nobody wanted two queries. That is what "update this
+row and hand it back, or tell me it is not there" cost, for as long as
+the only verb that handed the row back threw when the row was absent.
+
+```ts
+// The shape those 123 call sites are in.
+await db.thing.updateMany({ where: { id }, data });          // round trip 1
+const fresh = await db.thing.findFirst({ where: { id } });   // round trip 2
+return fresh;
+```
+
+`update()` already returns the row in one trip — but it throws
+`DbKnownError` `P2025` when the filter matched nothing, which turns a
+request that should be a 404 into a 500. So the write went through
+`updateMany`, whose `{ count: 0 }` is a value rather than an exception,
+and the row had to be fetched separately.
+
+### `updateFirst` and `deleteFirst`
+
+```ts
+const user = await db.user.updateFirst({ where: { id }, data: { name } });
+if (!user) return res.status(404).end();        // nothing matched, nothing threw
+
+await db.session.deleteFirst({ where: { token } });   // already gone? not an error.
+```
+
+`updateFirst({ where, data, select?, include?, omit? })` takes exactly
+what `update()` takes, writes one row by a filter that need not be
+unique, and returns the row. `deleteFirst({ where, … })` stands in the
+same relation to `delete()`. The **only** difference from the verbs they
+mirror is the miss: `null` instead of a throw. Same statement per
+dialect, same `RETURNING` / `OUTPUT` / `findOneAndUpdate`, no `SELECT`
+before or after.
+
+It compounded with forge's own documentation, which until 2.18.0 said
+`update()`'s `where` was type-narrowed to the model's unique fields and
+that a non-unique filter had to go through `updateMany` instead. It never
+was — but a reader who believed it had no single-round-trip option at
+all. These verbs close the gap that sentence opened.
+
+### The third round trip, on a soft-deleting patch
+
+On a model with a `.softDeleteAt()` column the re-read pattern does not
+just cost a trip, it returns the wrong answer. A **read** is soft-delete
+filtered, so when the patch is what soft-deletes the row, the follow-up
+`findFirst` cannot see the row that was just written and comes back
+`null` — every time. The workaround was a read placed *before* the write
+and the result assembled by hand from the pre-write row plus the patch:
+three round trips, and a reconstruction rather than what is in the table.
+
+`updateFirst` does not have the problem. Like `update()` and unlike a
+read it is **not** soft-delete filtered, so it can update an
+already-soft-deleted row, and the row it returns is the post-update row
+as the driver handed it back rather than a re-read. One trip, and the
+real row.
+
+### They are not a `try`/`catch` for `P2025`
+
+This is a correctness point rather than a style one. `update()` runs
+nested writes **after** the row itself, and a nested write can raise the
+same not-found code — a `connect` to a row that does not exist. A catch
+at the outside cannot tell the two apart, so it would return `null` for a
+row that had in fact been updated, and the caller would 404 a request
+that wrote to the database. The miss is handled at the one point where
+the row is known to be absent: the executor returned no document, before
+any nested write runs.
+
+### Docs
+
+- [MUTATIONS.md](docs/MUTATIONS.md#updatefirst-and-deletefirst--the-row-or-null)
+  gains a section for the two verbs: the four-way comparison (`update`
+  throws, `updateFirst` is `null`, `updateMany` counts, and the old
+  re-read pattern's two trips — three on a soft-deleting patch), what
+  they compile to, and the migration. Both verbs are in the verb tables
+  and in [Returning shape](docs/MUTATIONS.md#returning-shape).
+- [CONCURRENCY.md](docs/CONCURRENCY.md) said "forge's `update` requires a
+  unique where clause". It does not, and never did — the thing that ruled
+  it out of the optimistic pattern was only the throw. Corrected, and the
+  two examples that ended in a re-read now use `updateFirst`: the
+  version-with-current-state save, and the `If-Match` `PUT` handler,
+  which was also setting an `ETag` read back after the write — under a
+  concurrent write that is a version the request never produced, and the
+  client's next `If-Match` gets an unexplainable `412`.
+- [SOFT-DELETE.md](docs/SOFT-DELETE.md) states the third round trip where
+  the read filter is documented.
+- [ERRORS.md](docs/ERRORS.md)'s `P2025` section says which verb to reach
+  for when "no such row" is a 404 rather than a bug, and why catching
+  `P2025` around an `update()` is not the same thing.
+- [MULTI-TENANT.md](docs/MULTI-TENANT.md)'s hand-written `scopedDb`
+  recipe carries both verbs, so a tenant-scoped repository is not pushed
+  back onto the two-trip shape by a missing wrapper method.
+- [README](README.md#one-row-back-or-null--updatefirst--deletefirst) gains
+  the verbs in the write listing and a section of its own, and its
+  "What's new" list — which had stopped at 2.18 — now carries 2.19 and
+  2.20.
+- Retracted or corrected along the way, all found by checking the pages
+  above against the source:
+  - [EVENTS.md](docs/EVENTS.md) documented `op` as the driver-level verb,
+    listing `'find'` / `'insertOne'` / `'findOneAndUpdate'` /
+    `'updateMany'` / `'deleteOne'` for Mongo and a `'raw'` for SQL. Every
+    adapter emits the same six IR-level values —`'select'`, `'count'`,
+    `'groupBy'`, `'insert'`, `'update'`, `'delete'` — so a Mongo
+    `findOneAndUpdate` reports `'update'`, and `'raw'` is emitted by
+    nothing. Raw queries fire **no** event at all: `$queryRaw`,
+    `$executeRaw` and `$runCommandRaw` go straight to the driver, which
+    the page now says where it used to describe their `model` as `''`.
+    The `sql` field's Mongo example was `'users.findOne'`; the real shape
+    is `"<collection>.<op>"`, so `'users.select'`.
+  - [CACHING.md](docs/CACHING.md)'s three `query`-event listeners, and
+    [TESTING.md](docs/TESTING.md)'s "assert on the captured stream"
+    example, tested `event.semanticOp` against physical op names — and
+    CACHING.md's also read `event.args.where.id`. `semanticOp` is set only for the
+    `softDelete` / `restore` family and is absent on a direct write, so
+    all three fired on nothing — a cache that looks wired and never
+    invalidates — and there is no `args` field on the event to fall back
+    to. All three now gate on `op`, skip a `rowCount` of 0, and derive
+    per-row and per-category keys at the call site, which is the only
+    place the `where` exists. The page also claimed the event "runs after
+    `commit`"; it fires when the statement resolves, which inside
+    `$transaction` is before `COMMIT`, so a rolled-back transaction has
+    already purged. That is the safe direction, and the page now says so
+    rather than implying durability. `db.$raw`, named there as the raw
+    escape hatch, is not an API — the methods are `$queryRaw` /
+    `$executeRaw`. TESTING.md additionally described `semanticOp` as "the
+    model-level verb (`create`, `update`, `findFirst`, `findMany`, …)",
+    which is what produced the broken filter; it has four possible values
+    and none of them is any of those.
+  - MUTATIONS.md's soft-delete worked pattern declared its column as
+    `f.timestamp().nullable()` — neither of which exists — with no
+    `.softDeleteAt()`, so `softDelete()` would have thrown on the schema
+    the example hands you, and gave the read opt-out as
+    `withDeleted: true`. The flag is `_withDeleted`, underscore included;
+    without it the key is treated as a field name and either trips strict
+    mode or reaches the database as a column no table has.
+
+### Tests
+
+`src/__tests__/update-first.spec.ts` (11) — the row in ONE call, `null`
+on a miss, a miss still being one call, `update()` / `delete()` still
+throwing, a non-unique filter accepted, the row returned when the patch
+is what soft-deleted it, and a `P2002` / `P2003` still propagating rather
+than being swallowed as a miss.
+
+Suite totals for the release: **982 jest tests across 67 suites**, plus
+the 8 `regression-transactions.ts` checks against a real Postgres.
+`npm run forge:check` exits 0.
+
 ## 2.19.0 — a transaction that did not reach your repositories, and three more things forge only looked like it did
 
 **Minor, with one deliberate behaviour change. Upgrade.** Four fixes with

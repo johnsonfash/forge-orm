@@ -85,24 +85,30 @@ Field by field:
   family for backwards compatibility with the published type union; future
   versions may widen the union.)
 - **`model`** — the schema key (`'user'`, `'order'`, …) of the model the
-  query targets. Empty string `''` for raw SQL (`$queryRaw` / `$executeRaw`)
-  and `$runCommandRaw`.
-- **`op`** — the driver-level operation name:
-  - SQL adapters: `'select'`, `'count'`, `'groupBy'`, `'insert'`, `'update'`,
-    `'delete'`, or `'raw'`.
-  - Mongo: the driver verb the wire produces — `'find'`, `'count'`,
-    `'insertOne'`, `'findOneAndUpdate'`, `'updateMany'`, `'deleteOne'`, etc.
+  query targets. Empty string `''` when the IR node carries no model. Raw
+  queries do not appear here at all: `$queryRaw`, `$executeRaw` and
+  `$runCommandRaw` go straight to the driver and emit **no** event, so a
+  listener is not an audit of every statement your process runs.
+- **`op`** — the physical operation, and the **same six values on every
+  adapter including Mongo**: `'select'`, `'count'`, `'groupBy'`,
+  `'insert'`, `'update'`, `'delete'`. It is the IR-level op, not the driver
+  verb — a Mongo `findOneAndUpdate` reports `'update'`, and a
+  `db.x.findFirst()` reports `'select'`, not `'findOne'`.
 
-  Treat `op` as the *physical* op. If you need to distinguish a `softDelete`
-  from a plain `update`, branch on `semanticOp`.
+  So `op` is what to branch on to answer "was this a write?" — see the
+  table below, and
+  [CACHING.md](./CACHING.md#forge-events-as-invalidation-triggers) for an
+  invalidator built on it. If you need to distinguish a `softDelete` from a
+  plain `update`, branch on `semanticOp` *in addition* — never instead, as
+  it is absent on a direct write.
 - **`semanticOp`** — schema-level intent when the runtime caller was one of
   the higher-level verbs that compiles to a plain `update` or `delete`. Set
   by the collection wrapper for `softDelete`, `softDeleteMany`, `restore`,
   and `restoreMany`. Absent for direct `update` / `updateMany` / `delete` /
   `deleteMany` calls. Introduced in 2.2 — see the [taxonomy section](#semanticop-taxonomy)
   for the full list.
-- **`sql`** — SQL text on SQL adapters; a human description like
-  `'users.findOne'` on Mongo. Truncate before logging — production statements
+- **`sql`** — SQL text on SQL adapters; a `"<collection>.<op>"`
+  description on Mongo, such as `'users.select'` or `'posts.update'`. Truncate before logging — production statements
   can be kilobytes long.
 - **`params`** — parameter array on SQL (positional, in declaration order); a
   Mongo args object (`{ node }`) on Mongo. Treat as opaque — both the
@@ -177,12 +183,13 @@ The full taxonomy in 2.5.x:
 
 When `semanticOp` is absent:
 
-- A direct `model.update()` or `model.updateMany()` — physical update, no
-  schema-level rename.
-- `create`, `createMany`, `upsert`, `delete`, `deleteMany`, `findFirst`,
-  `findMany`, `count`, `groupBy`, `aggregate`, `$queryRaw`, `$executeRaw`,
-  `$runCommandRaw` — these all map 1:1 to a physical op and don't need a
-  semantic tag.
+- A direct `model.update()`, `model.updateFirst()` or `model.updateMany()` —
+  physical update, no schema-level rename.
+- `create`, `createMany`, `upsert`, `delete`, `deleteFirst`, `deleteMany`,
+  `findFirst`, `findMany`, `count`, `groupBy`, `aggregate` — these all map
+  1:1 to a physical op and don't need a semantic tag. (`$queryRaw`,
+  `$executeRaw` and `$runCommandRaw` emit no event at all, so the question
+  does not arise for them.)
 
 Forward compatibility: the taxonomy is open-ended. New tags may appear in
 future minors (e.g. a future `archive` verb). Always switch with a

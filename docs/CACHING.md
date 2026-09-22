@@ -661,27 +661,34 @@ writes, and most of your read traffic never touches your origin.
 
 ## forge events as invalidation triggers
 
-forge emits a `query` event on every successful query (see
-[EVENTS.md](EVENTS.md)). The event includes `model`, `op`, `semanticOp`,
-and the arguments. This is exactly the surface a cache invalidator wants —
-one place to wire "when a write happens, invalidate."
+forge emits a `query` event on every executed statement (see
+[EVENTS.md](EVENTS.md)). The fields an invalidator needs are `model`
+(the schema key), `op` (the physical operation) and `rowCount`. This is
+exactly the surface a cache invalidator wants — one place to wire "when a
+write happens, invalidate."
+
+**Branch on `op`, not on `semanticOp`.** `op` is the physical operation
+and it is the same six values on every adapter, Mongo included:
+`'select'`, `'count'`, `'groupBy'`, `'insert'`, `'update'`, `'delete'`.
+`semanticOp` is only set for the `softDelete` / `softDeleteMany` /
+`restore` / `restoreMany` family and is **absent on a direct `update` or
+`delete`** — so an invalidator gated on `semanticOp` never fires for an
+ordinary write, which is a cache that appears to work and silently never
+invalidates.
 
 ```ts
 import { db } from './db';
 import { cache } from './lib/redis-cache';
 import { purgeTag } from './lib/cdn';
 
-const WRITE_SEMANTIC_OPS = new Set([
-  'insert',
-  'update',
-  'upsert',
-  'delete',
-  'updateMany',
-  'deleteMany',
-]);
+// The three physical write ops. A soft-delete or a restore arrives here
+// as `op: 'update'` (with `semanticOp` set), so it is covered too.
+const WRITE_OPS = new Set(['insert', 'update', 'delete']);
 
 db.$on('query', async (event) => {
-  if (!WRITE_SEMANTIC_OPS.has(event.semanticOp)) return;
+  if (!WRITE_OPS.has(event.op)) return;
+  if (event.rowCount === 0) return;   // matched nothing — nothing to bust
+  if (!event.model) return;           // '' — not a model query
 
   const { model } = event;
 
@@ -690,36 +697,55 @@ db.$on('query', async (event) => {
 
   // CDN — surrogate-key purge.
   await purgeTag(`${model}-list`);
-
-  // Per-row, when the args carry an id.
-  const id =
-    (event.args as any)?.where?.id ??
-    (event.args as any)?.data?.id ??
-    undefined;
-  if (typeof id === 'string') {
-    await cache.del(cacheKey(model, 'findUnique', { where: { id } }));
-  }
 });
+```
+
+`rowCount` is the driver's affected-row count on a write, or `-1` when
+the driver does not expose one — so `=== 0` is the right test, and it
+skips the no-op writes (an `updateMany` that matched nothing, an
+`updateFirst` that returned `null`) rather than purging a tag for them.
+
+**Per-row keys have to come from the call site.** The event carries `sql`
+and `params`, not the `where` you passed — `params` is a positional value
+array on SQL and the IR node on Mongo, both documented as opaque and free
+to change shape in a patch release. There is no reliable `event.args.where.id`
+to read. So invalidate the row key where the id is known, and leave the
+subscriber to do the model-wide work:
+
+```ts
+async function updatePost(id: string, data: PostPatch) {
+  const row = await db.post.updateFirst({ where: { id }, data });
+  if (row) await cache.del(cacheKey('post', 'findUnique', { where: { id } }));
+  return row;
+}
 ```
 
 Three things to notice:
 
-1. **Centralised.** Every mutation in the codebase, every repository, every
-   migration that writes through the ORM — they all flow through this one
-   subscriber. No risk of a new endpoint forgetting to bust the cache.
-2. **Best-effort.** The invalidator is async and fire-and-forget. If it
-   throws, the request that triggered it still succeeds (the write
-   already committed). Pair with a TTL so a dropped invalidation
+1. **Centralised.** Every mutation that goes through a collection
+   wrapper — every endpoint, every repository, every seed script — flows
+   through this one subscriber. No risk of a new endpoint forgetting to
+   bust the cache. (Migrations and raw SQL do not; see the caveat below.)
+2. **Best-effort.** The invalidator is fire-and-forget: the emitter calls
+   listeners without awaiting them and swallows anything they throw, so a
+   failed invalidation never breaks the query that triggered it. It also
+   means nothing retries. Pair with a TTL so a dropped invalidation
    eventually self-heals.
-3. **Out of band.** This runs after `commit`, so a tx that rolls back
-   never busts the cache for a write that never happened. The `query`
-   event fires on resolve, not on dispatch.
+3. **It fires on statement resolve, not on commit.** Inside
+   `db.$transaction(…)` each statement emits as it resolves, which is
+   before `COMMIT` — so a transaction that later rolls back has already
+   busted the cache. That is the safe direction (a cold cache re-reads the
+   real row) but do not read the event as proof the write is durable, and
+   do not repopulate a cache entry from inside the subscriber: on a
+   rollback you would be caching a row that no longer exists. Purge only.
 
-Caveat: writes that bypass the ORM — raw SQL via `db.$raw`, migrations,
-DB-side triggers — do not fire this event. Either route them through
-forge, or expose a separate "invalidate" RPC and call it from wherever
-the write happens. See [RAW-SQL.md](RAW-SQL.md) for the raw-SQL escape
-hatch and its trade-offs.
+Caveat: writes that bypass the ORM do not fire this event. Raw SQL is the
+one to watch — `db.$queryRaw` and `db.$executeRaw` go straight to the
+driver and emit **nothing**, and neither do migrations or DB-side
+triggers. Either route those writes through forge, or expose a separate
+"invalidate" RPC and call it from wherever the write happens. See
+[RAW-SQL.md](RAW-SQL.md) for the raw-SQL escape hatch and its
+trade-offs.
 
 ---
 
@@ -874,13 +900,22 @@ export async function getHomeFeed(userId: string) {
   });
 }
 
-// invalidate on follow/unfollow
-db.$on('query', async (event) => {
-  if (event.model !== 'follow') return;
-  if (!['insert', 'delete'].includes(event.semanticOp)) return;
-  const follower = (event.args as any)?.data?.follower_id ?? (event.args as any)?.where?.follower_id;
-  if (follower) await cache.del(`feed:home:${follower}:v2`);
-});
+// Invalidate on follow/unfollow at the call site. The key needs the
+// follower id, and the `query` event does not carry the `where` you
+// passed — see "forge events as invalidation triggers" above.
+async function follow(followerId: string, followeeId: string) {
+  await db.follow.create({
+    data: { follower_id: followerId, followee_id: followeeId },
+  });
+  await cache.del(`feed:home:${followerId}:v2`);
+}
+
+async function unfollow(followerId: string, followeeId: string) {
+  const removed = await db.follow.deleteFirst({
+    where: { follower_id: followerId, followee_id: followeeId },
+  });
+  if (removed) await cache.del(`feed:home:${followerId}:v2`);
+}
 ```
 
 Note the version (`v2`) — when we change the `select` shape, bump it.
@@ -969,15 +1004,37 @@ app.get('/v1/products', async (req, res) => {
   });
 });
 
-// In the write path:
+// The coarse tag can come off the event — `op`, not `semanticOp`.
 db.$on('query', async (event) => {
   if (event.model !== 'product') return;
-  if (!['insert', 'update', 'upsert', 'delete'].includes(event.semanticOp)) return;
+  if (!['insert', 'update', 'delete'].includes(event.op)) return;
+  if (event.rowCount === 0) return;
   await purgeTag('products');
-  const category = (event.args as any)?.data?.category;
-  if (category) await purgeTag(`products:category:${category}`);
 });
+
+// The per-category tag cannot: the event has no `where` and no `data`.
+// `updateFirst` hands back the saved row, so the category purged is the
+// one now stored rather than whatever the patch happened to mention.
+async function saveProduct(id: string, data: ProductPatch) {
+  const before = await db.product.findFirst({
+    where: { id }, select: { category: true },
+  });
+  const row = await db.product.updateFirst({ where: { id }, data });
+  if (!row) return null;
+  await purgeTag(`products:category:${row.category}`);
+  // A category move invalidates the tag it left, too.
+  if (before && before.category !== row.category) {
+    await purgeTag(`products:category:${before.category}`);
+  }
+  return row;
+}
 ```
+
+There is no `upsert` in that `op` list because there is no `upsert` op.
+An upsert routes through the update executor carrying its create payload,
+so it reports `op: 'update'` whichever branch it took; the one exception
+is Mongo's seed-conflict fallback, which can emit an `insert` when it
+creates. `'insert'`, `'update'` and `'delete'` cover every case.
 
 The cursor in the URL is intentional — keyset pagination means every
 cursor maps to a stable response that the CDN can cache indefinitely

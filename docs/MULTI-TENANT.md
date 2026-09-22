@@ -165,6 +165,13 @@ export function scopedDb(tenantId: string) {
           ...a,
           where: { ...a.where, tenant_id: tenantId },
         }),
+      // `null` rather than a throw when the id belongs to another tenant —
+      // which is the same answer as "no such row", and the right one to give.
+      updateFirst: (a: any) =>
+        db.user.updateFirst({
+          ...a,
+          where: { ...a.where, tenant_id: tenantId },
+        }),
       updateMany: (a: any) =>
         db.user.updateMany({
           ...a,
@@ -179,6 +186,11 @@ export function scopedDb(tenantId: string) {
         }),
       delete: (a: any) =>
         db.user.delete({
+          ...a,
+          where: { ...a.where, tenant_id: tenantId },
+        }),
+      deleteFirst: (a: any) =>
+        db.user.deleteFirst({
           ...a,
           where: { ...a.where, tenant_id: tenantId },
         }),

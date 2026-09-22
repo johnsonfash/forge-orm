@@ -193,11 +193,15 @@ async function saveDoc(id: string, body: string, expected: number) {
 
 Three things to know.
 
-**`updateMany`, not `update`.** Forge's `update` requires a unique
-where clause and throws `P2025` on zero matches. The optimistic
-pattern depends on a zero-count *result*, not an exception —
-`updateMany` returns `{ count }` and lets the where carry the version
-gate alongside the id, which is what you want.
+**Not `update`.** Forge's `update` takes a full filter like every
+other verb — it is not narrowed to unique columns — so the version gate
+fits in its `where` fine. What rules it out is that it **throws**
+`P2025` on zero matches, and the optimistic pattern depends on a
+stale-version *result*, not an exception. `updateMany` returns
+`{ count }`; since 2.20.0
+[`updateFirst`](./MUTATIONS.md#updatefirst-and-deletefirst--the-row-or-null)
+returns the updated row or `null`, which is the same signal and saves
+you the follow-up read when you need the new row back.
 
 **`version: { increment: 1 }` is atomic relative to the where.** The
 SQL is `UPDATE … SET version = version + 1 WHERE id = X AND version
@@ -211,23 +215,31 @@ version gate turns it into a conditional update that matches only
 when the row hasn't moved.
 
 The version that returns the current state on conflict — so the
-caller can show the user what changed or feed it into a merge:
+caller can show the user what changed or feed it into a merge — and the
+saved row on success. `updateFirst` (2.20.0) gives you both in one
+round trip on the happy path: `null` *is* the stale-version signal, and
+the row it returns is the one the `UPDATE` wrote.
 
 ```ts
 async function saveDoc(id: string, body: string, expected: number) {
-  const { count } = await db.doc.updateMany({
+  const saved = await db.doc.updateFirst({
     where: { id, version: expected },
     data:  { body, version: { increment: 1 }, updated_at: new Date() },
   });
-  if (count === 0) {
+  if (!saved) {
     const current = await db.doc.findFirst({
       where: { id }, select: { version: true, updated_at: true },
     });
     throw new ConflictError('stale version', { current });
   }
-  return db.doc.findFirst({ where: { id } });
+  return saved;
 }
 ```
+
+On `{ count }` and a re-read this was two round trips on every
+successful save, and the re-read could return a *later* writer's row —
+so the version handed back to the caller was not always the one this
+call wrote. The returned row closes both.
 
 **One column, not two.** Version is monotonic, integer, exclusive to
 the optimistic pattern. `updated_at` is timestamp metadata. Teams who
@@ -346,17 +358,23 @@ app.put('/docs/:id', async (req, res) => {
   if (!ifMatch) return res.status(428).end();   // Precondition Required
   const expected = Number(ifMatch.replace(/"/g, ''));
 
-  const { count } = await db.doc.updateMany({
+  const updated = await db.doc.updateFirst({
     where: { id: req.params.id, version: expected },
     data:  { ...req.body, version: { increment: 1 } },
   });
-  if (count === 0) return res.status(412).end();   // Precondition Failed
+  if (!updated) return res.status(412).end();   // Precondition Failed
 
-  const updated = await db.doc.findFirst({ where: { id: req.params.id } });
   res.setHeader('ETag', `"${updated.version}"`);
   res.json(updated);
 });
 ```
+
+The `PUT` is one round trip because `updateFirst` returns the row it
+wrote. Written as `updateMany` + a `findFirst` — which is what it had to
+be before 2.20.0 — it is two, and the `ETag` it sets is whatever the
+re-read saw, which on a concurrent write is a version this request never
+produced. The client would then send that version back in `If-Match` and
+get a `412` it cannot explain.
 
 Three status codes carry the protocol:
 
@@ -590,6 +608,9 @@ Forge emits
 The `findOneAndUpdate` variant returns the document for free —
 forge's `update` accepts the version field alongside `_id` because
 Mongo matches by predicate natively, and zero matches throw `P2025`.
+`updateFirst` (2.20.0) is that same `findOneAndUpdate` with the document
+returned and `null` instead of the throw, which is the shape this pattern
+wants.
 
 **`$isolated` is gone** — removed in Mongo 4.2. The replacement is
 multi-document transactions on a replica set. For single-document
