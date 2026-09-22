@@ -24,6 +24,7 @@ point at related models (so cycles don't collapse the inference graph to
 * [Self-referential relations](#self-referential-relations)
 * [Polymorphic relations (two patterns)](#polymorphic-relations-two-patterns)
 * [Deep includes](#deep-includes)
+* [Nested `take` and `skip` are per parent](#nested-take-and-skip-are-per-parent)
 * [`select` inside `include`](#select-inside-include)
 * [Filtering by a relation](#filtering-by-a-relation)
 * [Counting and aggregating relations](#counting-and-aggregating-relations)
@@ -572,9 +573,15 @@ A three-level include like the one above runs:
 5. Find comments where `post_id IN (post.id, ...)`.
 6. Find authors-of-comments where `id IN (comment.author_id, ...)`.
 
-Six queries, regardless of how many users matched the first one. On
-Mongo, forge uses `$lookup` for the immediate join and unwinds the result
-into the same nested shape.
+Six queries, regardless of how many users matched the first one. Mongo
+runs the same plan — a batched `find` per relation level, joined
+client-side. It does **not** emit `$lookup` for hydration; see
+[MONGO](./MONGO.md#relations-via-lookup-vs-application-side-hydration)
+for why.
+
+That constant count holds as long as no level pages its own list. Add a
+nested `take` or `skip` and that level becomes one query per parent — see
+[Nested `take` and `skip` are per parent](#nested-take-and-skip-are-per-parent).
 
 ### N+1 risk
 
@@ -598,7 +605,9 @@ manual JOIN via `$queryRaw` is when you need to **filter the parent by
 an aggregate over the children** in a single round trip (see
 [Performance and the `.compile` escape hatch](#performance-and-the-compile-escape-hatch)).
 
-### Bounded children per parent
+---
+
+## Nested `take` and `skip` are per parent
 
 You can cap the included children with `take` and order them with
 `orderBy`:
@@ -611,9 +620,75 @@ await db.user.findMany({
 });
 ```
 
-The cap is applied **per parent**, which compiles on SQL to a windowed
-subquery (`ROW_NUMBER() OVER (PARTITION BY author_id ORDER BY ...)`) and
-on Mongo to a `$slice` inside the `$lookup` pipeline.
+The cap is applied **per parent** — five posts for each user, not five
+posts across the whole result. That is what you would expect, and it is
+what 2.18.0 does. Earlier versions did not.
+
+### What it does not compile to
+
+Older revisions of this page claimed the per-parent cap compiles to a
+windowed subquery — `ROW_NUMBER() OVER (PARTITION BY author_id …)` — on
+SQL and to a `$slice` inside a `$lookup` pipeline on Mongo. **Neither
+exists.** There is no window function and no `$slice` anywhere in the
+adapters. If you sized a query or an index around that claim, re-read
+what follows.
+
+### What it actually does
+
+Relation hydration is one shared step, `hydrateManyRelation` in
+`src/ir/hydrate-many.ts`, used by all six adapters. It picks one of two
+plans by looking at whether the nested `include` pages its own list:
+
+| Nested `take` / `skip` | Plan | Queries for N parents |
+|---|---|---|
+| absent | one batched `IN` query for every parent's children | 1 |
+| present | one query per parent, each carrying that parent's own `LIMIT` / `OFFSET` | N |
+
+With no inner paging, nothing changes from earlier versions — it is
+still the single batched fetch, and still not N+1:
+
+```sql
+SELECT * FROM posts WHERE author_id IN (…10 authors…)
+```
+
+With inner paging, forge issues one query per parent so each parent gets
+its own page. N queries for N parents, bounded above by the outer `take`.
+
+### The bug this fixes
+
+Before 2.18.0 the batched query carried the inner `LIMIT` too:
+
+```ts
+await db.user.findMany({ take: 10, include: { posts: { take: 3 } } });
+```
+
+```sql
+SELECT * FROM posts WHERE author_id IN (…10 authors…) LIMIT 3
+```
+
+Three posts **total**. Whichever author those three rows happened to
+belong to got them; the other nine users came back with `posts: []`. Not
+an error, not a warning — nine empty arrays that look exactly like nine
+users with no posts. `skip` was wrong the same way: it skipped rows of
+the combined result rather than rows of each parent's list.
+
+### What it costs
+
+One query per parent is a real cost, and it is a deliberate trade. The
+obvious alternative is to fetch every child row in one batched query and
+slice each parent's list in memory. That is one round trip, but it is
+**unbounded**: `take: 3` over ten authors with a hundred thousand posts
+each would pull a million rows across the wire to return thirty. One
+query per parent is bounded by the outer `take`, so the cost is something
+you can reason about from the call site.
+
+If N queries is too many for your fan-out, page the parents harder (a
+smaller outer `take`), or drop the nested paging and slice in your own
+code once you know the child lists are small.
+
+In both plans the nested `where` you passed is ANDed with the foreign-key
+filter, so a nested `where` and a nested `take` compose the way you would
+expect.
 
 ---
 

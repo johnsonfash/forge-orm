@@ -40,6 +40,14 @@ import {
   compileUpdate as pgCompileUpdate,
 } from '../postgres/compile-from-ir';
 
+// Every identifier goes through the dialect's quoteIdent, which REFUSES a name
+// containing `]` or a NUL byte. Interpolating `[${k}]` by hand — as this file
+// did at a dozen sites — bypassed that check, and update/upsert take their
+// column names straight from the caller's `data` object without requiring them
+// to exist in the model. So `update({ data: { "role] = 'admin', [x": 1 } })`
+// wrote a column the endpoint never exposed.
+const q = (name: string): string => MssqlDialect.quoteIdent(name);
+
 function modelDef(modelKey: string, override?: ModelDef<any>): ModelDef<any> {
   if (override) return override;
   const m = (schema as any)[modelKey] as ModelDef<any> | undefined;
@@ -100,7 +108,7 @@ function rewriteCtidSingleRow(sql: string, table: string, pk: string): string {
   );
   return sql.replace(re, (_match, whereExpr) => {
     const whereClause = whereExpr ? `WHERE ${whereExpr}` : '';
-    return `WHERE [${pk}] IN (SELECT TOP 1 [${pk}] FROM ${table} ${whereClause})`.trim();
+    return `WHERE ${q(pk)} IN (SELECT TOP 1 ${q(pk)} FROM ${table} ${whereClause})`.trim();
   });
 }
 
@@ -185,7 +193,7 @@ export function compileUpdate(node: UpdateNode, modelOverride?: ModelDef<any>): 
   const pk = primaryKeyOf(m);
   const a = pgCompileUpdate(node, modelOverride, MssqlDialect);
   let sql = a.sql;
-  const tableQ = `[${m.collection}]`;
+  const tableQ = q(m.collection);
   sql = rewriteCtidSingleRow(sql, tableQ, pk);
   sql = rewriteReturningForUpdate(sql);
   return post({ ...a, sql });
@@ -206,7 +214,7 @@ export function compileUpdate(node: UpdateNode, modelOverride?: ModelDef<any>): 
 //   • The OUTPUT clause returns inserted.*, matching PG's RETURNING.
 //   • No `skipDuplicates` flag — MERGE always either updates or inserts.
 function compileMergeUpsert(node: UpdateNode, m: ModelDef<any>): SQLArtifact {
-  const table = `[${m.collection.replace(/]/g, ']]')}]`;
+  const table = q(m.collection);
   const params: unknown[] = [];
   const ph = (v: unknown) => MssqlDialect.placeholder(params, v);
 
@@ -223,21 +231,36 @@ function compileMergeUpsert(node: UpdateNode, m: ModelDef<any>): SQLArtifact {
   const updateParts: string[] = [];
   if (node.set) {
     for (const [k, v] of Object.entries(node.set)) {
-      updateParts.push(`[${k}] = ${ph(v)}`);
+      updateParts.push(`${q(k)} = ${ph(v)}`);
     }
   }
   if (node.increment) {
     for (const [k, v] of Object.entries(node.increment)) {
-      updateParts.push(`[${k}] = COALESCE(tgt.[${k}], 0) + ${ph(v)}`);
+      updateParts.push(`${q(k)} = COALESCE(tgt.${q(k)}, 0) + ${ph(v)}`);
     }
   }
   if (node.multiply) {
     for (const [k, v] of Object.entries(node.multiply)) {
-      updateParts.push(`[${k}] = COALESCE(tgt.[${k}], 0) * ${ph(v)}`);
+      updateParts.push(`${q(k)} = COALESCE(tgt.${q(k)}, 0) * ${ph(v)}`);
+    }
+  }
+  if (node.divide) {
+    for (const [k, v] of Object.entries(node.divide)) {
+      updateParts.push(`${q(k)} = COALESCE(tgt.${q(k)}, 0) / ${ph(v)}`);
+    }
+  }
+  if (node.max) {
+    for (const [k, v] of Object.entries(node.max)) {
+      updateParts.push(`${q(k)} = CASE WHEN tgt.${q(k)} IS NULL OR tgt.${q(k)} < ${ph(v)} THEN ${ph(v)} ELSE tgt.${q(k)} END`);
+    }
+  }
+  if (node.min) {
+    for (const [k, v] of Object.entries(node.min)) {
+      updateParts.push(`${q(k)} = CASE WHEN tgt.${q(k)} IS NULL OR tgt.${q(k)} > ${ph(v)} THEN ${ph(v)} ELSE tgt.${q(k)} END`);
     }
   }
   if (node.unset?.length) {
-    for (const k of node.unset) updateParts.push(`[${k}] = NULL`);
+    for (const k of node.unset) updateParts.push(`${q(k)} = NULL`);
   }
   // If the caller only passed `create` and no update payload, MERGE still
   // needs WHEN MATCHED — fall back to a self-assignment of the conflict
@@ -250,11 +273,11 @@ function compileMergeUpsert(node: UpdateNode, m: ModelDef<any>): SQLArtifact {
     );
   }
   if (updateParts.length === 0) {
-    updateParts.push(`[${conflictCols[0]}] = tgt.[${conflictCols[0]}]`);
+    updateParts.push(`${q(conflictCols[0])} = tgt.${q(conflictCols[0])}`);
   }
 
   // ON clause — every conflict column matches between tgt and src.
-  const onClause = conflictCols.map((c) => `tgt.[${c}] = src.[${c}]`).join(' AND ');
+  const onClause = conflictCols.map((c) => `tgt.${q(c)} = src.${q(c)}`).join(' AND ');
 
   // Build the source row. Every conflict column MUST be in the VALUES list —
   // pull from the where leaf for any column the caller omitted from create.
@@ -271,14 +294,14 @@ function compileMergeUpsert(node: UpdateNode, m: ModelDef<any>): SQLArtifact {
     }
   }
 
-  const finalCols = insertCols.map((c) => `[${c}]`).join(', ');
+  const finalCols = insertCols.map((c) => q(c)).join(', ');
   const finalVals = insertCols.map((c) => {
     if (c in node.upsertCreate!) return ph(node.upsertCreate![c]);
     return ph(whereLeafEqValue(node.where, c));
   }).join(', ');
 
   // INSERT branch values come from src.<col> after USING (VALUES ...) AS src(<cols>).
-  const srcInsertValues = insertCols.map((c) => `src.[${c}]`).join(', ');
+  const srcInsertValues = insertCols.map((c) => `src.${q(c)}`).join(', ');
 
   const sql =
     `MERGE INTO ${table} AS tgt ` +
@@ -315,7 +338,7 @@ export function compileDelete(node: DeleteNode, modelOverride?: ModelDef<any>): 
   const pk = primaryKeyOf(m);
   const a = pgCompileDelete(node, modelOverride, MssqlDialect);
   let sql = a.sql;
-  const tableQ = `[${m.collection}]`;
+  const tableQ = q(m.collection);
   sql = rewriteCtidSingleRow(sql, tableQ, pk);
   sql = rewriteReturningForDelete(sql);
   return post({ ...a, sql });

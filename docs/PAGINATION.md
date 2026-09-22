@@ -17,7 +17,7 @@ boundaries.
 * [Keyset — the raw SQL form](#keyset--the-raw-sql-form)
 * [Numbered pages — when you actually need them](#numbered-pages--when-you-actually-need-them)
 * [Total count strategies](#total-count-strategies)
-* [Bidirectional cursors — `take: -N`](#bidirectional-cursors--take--n)
+* [Bidirectional cursors — `take: -N` is not supported](#bidirectional-cursors--take--n-is-not-supported)
 * [Sort + cursor — stable keys and tie-breakers](#sort--cursor--stable-keys-and-tie-breakers)
 * [`cursorAll` vs `cursorSnapshot` — consistency under writes](#cursorall-vs-cursorsnapshot--consistency-under-writes)
 * [GraphQL Relay connection mapping](#graphql-relay-connection-mapping)
@@ -108,7 +108,7 @@ const page1 = await db.post.findMany({
 });
 const page2 = await db.post.findMany({
   where: { status: 'PUBLISHED' }, orderBy: { id: 'asc' }, take: 20,
-  cursor: { id: page1.at(-1)!.id }, skip: 1,    // skip the cursor row itself
+  cursor: { id: page1.at(-1)!.id },             // exclusive — no skip needed
 });
 ```
 
@@ -125,18 +125,48 @@ That `"id" > $2` is sargable on the primary key index. The page is
 `O(pageSize)` regardless of how deep the user has scrolled — no skipped
 rows, no boundary drift under writes, no `COUNT(*)` round-trip.
 
-`cursor` accepts a unique-by selector — `{ id }`, anything declared
-`.unique()`, or a compound-unique key. Forge validates this at build
-time the same way `findUnique` does; passing a non-unique field throws.
-
-`skip: 1` is the usual partner. Forge uses the inclusive form under the
-hood (so you can resume from a cursor that no longer exists) and
-`skip: 1` peels the duplicate off when you have the cursor row in
-hand.
-
 The trade-off is no random access — no "page 47" because there is no
 notion of position. The UI either pages forward / back from a known
 cursor, or it gives up the requirement.
+
+### The cursor is exclusive — do not add `skip: 1`
+
+This is the one divergence from Prisma that will bite you, because the
+habit transfers silently.
+
+Forge emits a **strict** inequality: `>` for an ascending key, `<` for
+a descending one, never `>=`. The cursor row is therefore already
+excluded from the next page. Prisma's cursor is *inclusive*, which is
+why Prisma code pairs `cursor` with `skip: 1` — and on forge that
+`skip: 1` throws away the first row you asked for:
+
+```ts
+// rows p0 … p5 ordered ascending, cursor on p2
+cursor: { created_at: p2.created_at }              // → p3, p4, p5
+cursor: { created_at: p2.created_at }, skip: 1     // → p4, p5     ← p3 is gone
+```
+
+Nothing errors. The row simply never appears on any page, in either
+direction, and the bug shows up much later as "a record is missing from
+the list". Do not claim or assume Prisma parity here: port the query,
+drop the `skip`.
+
+The flip side of an exclusive cursor is that you must hold a real
+boundary value. You cannot resume from a cursor whose row has been
+deleted unless the cursor carries the *values* rather than just the id —
+see [Sort + cursor](#sort--cursor--stable-keys-and-tie-breakers).
+
+### Nothing checks that the cursor key is unique
+
+`cursor` is typed as `{ id?: string }` or any `{ [key]: value }`, and
+the builder simply flattens whatever you pass into a set of
+field/value pairs. There is no compile-time narrowing to unique fields
+and no runtime validation — a cursor on a non-unique column compiles
+and runs, and duplicates or skips rows at every tie.
+
+Uniqueness is your responsibility. The rule is in
+[Sort + cursor](#sort--cursor--stable-keys-and-tie-breakers), and it is
+worth reading before you ship a feed.
 
 ---
 
@@ -301,7 +331,7 @@ const rows = await db.post.findMany({
   where,
   orderBy: { id: 'asc' },
   take:    PAGE_SIZE + 1,              // ask for one extra
-  ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+  ...(cursor ? { cursor: { id: cursor } } : {}),
 });
 
 const hasNextPage = rows.length > PAGE_SIZE;
@@ -314,33 +344,37 @@ potentially every index read.
 
 ---
 
-## Bidirectional cursors — `take: -N`
+## Bidirectional cursors — `take: -N` is not supported
 
-`take` accepts a negative value. The result is the previous page
-relative to the cursor — same boundary, opposite direction. The
-compiler flips the predicate (`< $cursor`), flips the `ORDER BY`, and
-re-reverses the result array so the caller sees rows in the original
-sort order.
+**Retracted.** This page used to describe a negative `take` as "the
+previous page relative to the cursor", implemented by flipping the
+predicate, flipping the `ORDER BY` and re-reversing the result array.
+None of that exists. The value is passed straight through as the limit,
+so `take: -20` becomes `LIMIT -20` — which SQLite reads as *no limit at
+all*, Postgres and MySQL reject, and Mongo reads as "one batch of at
+most 20". Do not use it.
+
+Page backwards by reversing the sort yourself and reversing the array
+after, which is what the flip would have done:
 
 ```ts
-await db.post.findMany({
-  orderBy: { id: 'asc' },
-  take:    -20,
-  cursor:  { id: lastSeenId },
-  skip:    1,
+// "previous page", ending just before firstCursor
+const rows = await db.post.findMany({
+  orderBy: { created_at: 'desc' },        // opposite of the forward sort
+  take:    PAGE_SIZE + 1,                 // the extra row answers hasPrevPage
+  cursor:  { created_at: firstCursor },   // exclusive, so no skip
 });
+const hasPrev = rows.length > PAGE_SIZE;
+const page    = rows.slice(0, PAGE_SIZE).reverse();   // back into display order
 ```
 
-For a feed with up and down arrows, carry two cursors —
-`firstCursor` and `lastCursor`. "Next page" is
-`cursor: { id: lastCursor }, skip: 1, take: PAGE_SIZE + 1`; "previous"
-is `cursor: { id: firstCursor }, skip: 1, take: -(PAGE_SIZE + 1)`.
-`hasNextPage` and `hasPrevPage` come from the extra-row trick in both
-directions.
+For a feed with up and down arrows, carry two cursors — `firstCursor`
+and `lastCursor`. "Next page" keeps the forward `orderBy` and anchors on
+`lastCursor`; "previous page" is the block above. `hasNextPage` and
+`hasPrevPage` both come from the extra-row trick.
 
-Mongo does not support negative `take` natively — the adapter reverses
-the sort and re-reverses the result in code. Cost on a covered sort is
-identical, but the cursor stage reads in the opposite direction.
+The cursor keys must match the `orderBy` you use in each direction —
+see [Sort + cursor](#sort--cursor--stable-keys-and-tie-breakers).
 
 ---
 
@@ -351,38 +385,100 @@ the cursor is not stable". A cursor on `created_at` alone duplicates or
 skips rows whenever two rows share a timestamp — and on a busy table
 they will.
 
-**The rule.** The cursor key must be unique. If the visible sort key is
-not unique, pair it with a unique tie-breaker (almost always `id`) and
-use a **single-column** cursor on `id` with a **multi-column**
-`orderBy`:
+**The rule: the cursor keys are the `orderBy` keys, in the same order.**
+Every cursor key is compared against the column of the same name, and
+the direction for that comparison is read from the matching `orderBy`
+entry. So the cursor has to describe the same ordered position the sort
+does. If the visible sort key is not unique, add a unique tie-breaker
+(almost always `id`) to **both**:
 
 ```ts
+const last = page1.at(-1)!;
+
 await db.post.findMany({
   orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
   take:    20,
-  cursor:  { id: lastSeenId },
-  skip:    1,
+  cursor:  { created_at: last.created_at, id: last.id },
 });
 ```
 
-Forge translates this on PG/SQLite/DuckDB/MySQL to the tuple form;
-on MSSQL/Mongo to the expanded OR-of-AND form. Either way the compound
-index on `(created_at, id)` makes the range scan covered.
+Carry the last row's *values*, not just its id. A cursor on `id` alone
+while sorting by `created_at` is the trap this section exists for: it
+compiles, it runs, and it compares ids while the rows come back ordered
+by timestamp — so it drops and repeats rows more or less at random. A
+cursor key with no matching `orderBy` entry is treated as ascending,
+which is the same assumption the `ORDER BY` builder makes for a bare
+field.
 
-**Compound cursor.** When the unique key is itself compound —
-`(user_id, video_id)` on a `watched` table — pass the whole key:
+### How a composite cursor compiles
+
+**Uniform direction** — every key sorts the same way — becomes a
+row-value comparison, one predicate an index on those columns satisfies
+with a single range scan:
+
+```sql
+-- orderBy: [{ created_at: 'desc' }, { id: 'desc' }]
+WHERE ("posts"."created_at", "posts"."id") < ($1, $2)
+```
+
+**Mixed directions** cannot be a row comparison at all —
+`(a, b) > (x, y)` applies one operator to the whole tuple, and
+"score descending, id ascending" needs two. It expands
+lexicographically instead:
+
+```sql
+-- orderBy: [{ score: 'desc' }, { id: 'asc' }]
+WHERE (("posts"."score" < $1)
+    OR ("posts"."score" = $2 AND "posts"."id" > $3))
+```
+
+Each occurrence of a cursor value gets its own placeholder — the
+compiler pushes a parameter per use rather than reusing one — so a
+three-key mixed cursor is six parameters, not three.
+
+**MSSQL always takes the expansion**, uniform or not: T-SQL has no
+row-value comparison, so there is no tuple form to emit. This is the
+`Dialect.rowValueComparison` capability flag, which is `false` only
+there. The same uniform-descending cursor as above becomes
+
+```sql
+WHERE (([posts].[created_at] < @p1)
+    OR ([posts].[created_at] = @p2 AND [posts].[id] < @p3))
+```
+
+The expansion is correct either way; it is just more predicates for the
+planner, and it needs the compound index to stay sargable.
+
+**Mongo** uses the same lexicographic expansion with `$or`:
+
+```js
+{ $or: [
+  { score: { $lt: 5 } },
+  { $and: [ { score: 5 }, { _id: { $gt: 'abc' } } ] },
+] }
+```
+
+Before 2.18.0 Mongo built `{ $and: [ { a: { $gt: x } }, { b: { $gt: y } } ] }`,
+which is not a tuple comparison: after `(5, 9)` the next row is
+`(5, 10)`, and that row has `b > 9` but `a = 5`, which is not `> 5`, so
+the `$and` rejected it. Every row sharing the cursor's leading value was
+skipped.
+
+**Compound-unique keys.** When the key is itself compound —
+`(user_id, video_id)` on a `watched` table — you can pass the synthetic
+`@@unique` name and forge flattens it, or pass the fields directly.
+These are the same cursor:
 
 ```ts
-await db.watched.findMany({
-  orderBy: [{ watched_at: 'desc' }, { user_id: 'asc' }, { video_id: 'asc' }],
-  take:    50,
-  cursor:  { user_id_video_id: { user_id: 'u1', video_id: 'v9' } },
-  skip:    1,
-});
+cursor: { user_id_video_id: { user_id: 'u1', video_id: 'v9' } }
+cursor: { user_id: 'u1', video_id: 'v9' }
 ```
 
-The compound-unique selector must match a `unique` constraint declared
-on the model — same rule as `findUnique`.
+Nothing checks the name against a declared `unique` — the flattening is
+purely mechanical. And note that the synthetic-name form works **only**
+for `cursor`. In a `where` it is not supported and throws
+`[forge] unknown operator 'user_id' on '<model>.user_id_video_id'`;
+write the fields out instead (`where: { user_id: 'u1', video_id: 'v9' }`).
 
 **Sorting on a relation field.** `orderBy: { author: { name: 'asc' } }`
 is documented at the README surface but the IR builder silently drops
@@ -417,7 +513,7 @@ const where = { created_at: { lte: snapshotAt } };
 const p1 = await db.post.findMany({ where, orderBy, take: 20 });
 const p2 = await db.post.findMany({
   where, orderBy, take: 20,
-  cursor: { id: p1.at(-1)!.id }, skip: 1,
+  cursor: { id: p1.at(-1)!.id },
 });
 ```
 
@@ -450,7 +546,7 @@ async function postsResolver(_: unknown, args: {
   const rows = await db.post.findMany({
     orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
     take:    forward ? PAGE_SIZE + 1 : -(PAGE_SIZE + 1),
-    ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    ...(cursor ? { cursor: { id: cursor } } : {}),
   });
 
   const hasMore = rows.length > PAGE_SIZE;
@@ -499,7 +595,7 @@ async function listPosts(req: Request, res: Response) {
     where:   { status: 'PUBLISHED' },
     orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
     take:    PAGE_SIZE + 1,
-    ...(after ? { cursor: { id: after }, skip: 1 } : {}),
+    ...(after ? { cursor: { id: after } } : {}),
   });
 
   const hasNext = rows.length > PAGE_SIZE;
@@ -553,7 +649,7 @@ export function PostFeed({ orgId }: { orgId: string }) {
         where:   { org_id: orgId, status: 'PUBLISHED', deleted_at: null },
         orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
         take:    21,                     // 20 + 1 for hasNext
-        ...(pageParam ? { cursor: { id: pageParam }, skip: 1 } : {}),
+        ...(pageParam ? { cursor: { id: pageParam } } : {}),
       });
       const hasNext = rows.length > 20;
       const visible = rows.slice(0, 20);
@@ -670,8 +766,11 @@ compound form. `ROW_NUMBER()` over a window is sometimes proposed as an
 offset workaround — it is not faster, the planner still materialises
 every row up to the offset.
 
-**MySQL.** Same `LIMIT … OFFSET …` shape. 5.7+ supports row-value
-tuples; 5.6 does not and forge expands to the OR-of-AND form. The
+**MySQL.** Same `LIMIT … OFFSET …` shape, and the same row-value tuple
+as Postgres for a uniform-direction compound cursor — forge has no
+MySQL version detection, so it always emits the tuple. MySQL has
+supported row-value comparison since 5.7; on 5.6 the tuple form is a
+syntax error and there is no fallback. The
 deep-offset problem is worse than on PG — InnoDB secondary indexes
 carry the primary key as the leaf value, and `OFFSET` over a secondary
 index walks both. Switch to cursor sooner.
@@ -687,13 +786,17 @@ chunk directly. Cursor still wins for stable boundaries under writes,
 but the deep-offset concern is less severe.
 
 **MSSQL.** `OFFSET 40 ROWS FETCH NEXT 20 ROWS ONLY` — `ORDER BY` is
-mandatory; MSSQL refuses without it. Tuple compare is not supported;
-forge expands cursors to the OR-of-AND form. The planner handles it
-well when the compound index is declared.
+mandatory; MSSQL refuses without it. T-SQL has no row-value comparison
+at all, which is what the `Dialect.rowValueComparison: false` flag
+records, so forge expands every compound cursor to the OR-of-AND form —
+including the uniform-direction case that every other SQL dialect gets
+as a tuple. The planner handles it well when the compound index is
+declared, and badly when it is not.
 
 **Mongo.** `.find(filter).sort(...).skip(40).limit(20)` for offset;
-`{ _id: { $gt: lastId } }` filter for cursor; OR-of-AND expansion for
-compound cursor. `.skip()` has the same trap as SQL OFFSET — and slower
+`{ _id: { $gt: lastId } }` filter for a single-key cursor; `$or`
+lexicographic expansion for a compound cursor (`$lt` on descending
+keys, `$gt` on ascending). `.skip()` has the same trap as SQL OFFSET — and slower
 per row because of BSON deserialisation. `hint()` is sometimes
 necessary to force the index (the planner occasionally picks a covered
 sort over the cursor index); the forge adapter accepts a `hint` option
@@ -716,7 +819,7 @@ async function postTimeline(input: { orgId: string; cursor?: string; limit?: num
     where:   { org_id: input.orgId, status: 'PUBLISHED', deleted_at: null },
     orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
     take:    PAGE_SIZE + 1,
-    ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),
+    ...(input.cursor ? { cursor: { id: input.cursor } } : {}),
     select: { id: true, title: true, created_at: true, author_id: true },
   });
 
@@ -811,7 +914,7 @@ posts: async (_, args: {
     where:   { org_id: args.orgId, status: 'PUBLISHED', deleted_at: null },
     orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
     take:    forward ? PAGE_SIZE + 1 : -(PAGE_SIZE + 1),
-    ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    ...(cursor ? { cursor: { id: cursor } } : {}),
   });
 
   const hasMore = rows.length > PAGE_SIZE;
@@ -836,8 +939,14 @@ you need a compound cursor — clients see the same opaque string.
 ## Common bugs
 
 **Cursor on a non-unique column.** `cursor: { created_at: lastSeen }`
-on a non-unique `created_at` throws at build time. Fix: sort by
-`(created_at, id)`, cursor by `id`.
+on a non-unique `created_at` does **not** throw — nothing validates the
+cursor key. It runs, and duplicates or skips rows at every tie. Fix:
+sort by `(created_at, id)` and cursor on both.
+
+**Cursor keys that are not the `orderBy` keys.** `cursor: { id }` with
+`orderBy: { created_at: 'desc' }` compares ids while the rows come back
+ordered by timestamp. It compiles and runs, and the pages are wrong.
+Cursor on the same columns you sort on, in the same order.
 
 **`take` + `skip` for "jump to page 1000".** By page 50 the response
 triples; by page 1000 it is unusable. There is no fix for jump-to-page
@@ -860,10 +969,16 @@ document, slower per row than SQL OFFSET because of BSON
 deserialisation. `skip: 10000` on a few-million-doc collection is
 hundreds of milliseconds. Cursor is the only workable answer at scale.
 
-**Forgetting `skip: 1` on the cursor row.** Without it, the inclusive
-boundary includes the cursor row at the top of the next page and the
-user sees a duplicate. Always pair `cursor` with `skip: 1` unless you
-specifically want the cursor row included.
+**Adding `skip: 1` to a cursor.** Forge's cursor is exclusive, so the
+cursor row is already gone. `skip: 1` on top of it silently drops the
+first row of every page — a row that then appears on no page at all.
+Prisma's cursor is inclusive and needs the `skip`; forge's does not.
+See [The cursor is exclusive](#the-cursor-is-exclusive--do-not-add-skip-1).
+
+**A backwards page with `take: -N`.** Not implemented. `take: -20`
+becomes `LIMIT -20`, which SQLite reads as no limit at all. Reverse the
+`orderBy` and reverse the array instead — see
+[Bidirectional cursors](#bidirectional-cursors--take--n-is-not-supported).
 
 **Tuple compare on MSSQL/Mongo without the compound index.** The
 expanded OR-of-AND form runs without a compound index, but the planner

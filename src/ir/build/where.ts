@@ -498,3 +498,42 @@ function parseJsonPath(s: string): string[] {
   }
   return out;
 }
+
+
+/**
+ * Did the caller pass a filter that compiled to nothing?
+ *
+ * `undefined` values are skipped everywhere in the query surface — that is
+ * what lets `where: { status: maybeStatus }` mean "don't filter on status".
+ * But when EVERY value in the filter is undefined, the filter disappears
+ * entirely, and the statement then applies to the whole table:
+ *
+ *   deleteMany({ where: { tenant_id: req.user?.tenantId } })
+ *     → DELETE FROM "accounts"            (no WHERE at all)
+ *   delete({ where: { id: maybeId } })
+ *     → DELETE ... WHERE ctid = (SELECT ctid FROM "accounts" LIMIT 1)
+ *        i.e. an arbitrary row
+ *
+ * One optional-chain that returned undefined empties a table. So a filter
+ * whose keys all evaporated is treated as a mistake and refused.
+ *
+ * An OMITTED `where`, and an explicitly empty `where: {}`, both still mean
+ * "every row" — that is how you say it on purpose. The test is specifically
+ * "keys were written, and none of them survived".
+ */
+export function whereVanished(where: unknown, built: WhereTree | undefined): boolean {
+  if (built !== undefined) return false;
+  if (where == null || typeof where !== 'object' || Array.isArray(where)) return false;
+  return Object.keys(where as Record<string, unknown>).length > 0;
+}
+
+export function vanishedWhereError(op: string, collection: string, where: unknown): Error {
+  const keys = Object.keys((where ?? {}) as Record<string, unknown>);
+  return new Error(
+    `[forge] ${op} on '${collection}' was given a filter whose every value is ` +
+    `undefined (${keys.join(', ')}), so it would apply to EVERY row.\n` +
+    '  This is almost always an optional value that came back undefined — ' +
+    'check the source of ' + (keys[0] ? `'${keys[0]}'` : 'the filter') + '.\n' +
+    `  To act on every row on purpose, omit \`where\` entirely.`,
+  );
+}

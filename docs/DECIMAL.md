@@ -790,6 +790,24 @@ const grand = new Decimal(result._sum.total!)
   .toFixed(2);
 ```
 
+`aggregate` returns that payload object directly on every dialect —
+it is `groupBy({ by: [] })` with the single-element array unwrapped.
+Add a `where` and the non-null assertions above become a live bug: a
+filter that matches no rows returns `{ _sum: { total: null, tax: null } }`,
+and `new Decimal(null)` throws `[DecimalError] Invalid argument: null`.
+The `!` silences the type-checker and changes nothing at runtime.
+Reach for the string zero, which keeps the decimal path intact:
+
+```ts
+const grand = new Decimal(result._sum.total ?? '0')
+  .add(result._sum.tax ?? '0')
+  .toFixed(2);
+```
+
+`?? 0` works too — `decimal.js` takes a number — but `'0'` keeps
+every value on this path a string, which is the rule the rest of this
+page is built on.
+
 For SQLite money workloads where `_sum` precision matters, do the
 aggregation in app code via cursor iteration, or store cents and
 aggregate `BIGINT`:
@@ -814,6 +832,7 @@ const db = await createDb({ url: 'mongodb://localhost/shop', schema });
 await db.order.create({ data: { total: '0.1' } });
 await db.order.create({ data: { total: '0.2' } });
 
+// `aggregate` hands back the payload object itself — no array to index.
 const all = await db.order.aggregate({ _sum: { total: true } });
 all._sum.total;
 //   '0.3'   — exact, because Mongo's $sum on Decimal128 stays Decimal128.

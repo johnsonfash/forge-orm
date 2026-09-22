@@ -13,6 +13,7 @@ import {
 import { withSqliteErrors } from './errors';
 import { SqliteDialect } from './dialect';
 import { betterSqlite3Driver, type SqliteDriver } from './driver';
+import { bytesForDriver } from '../../bytes';
 
 // SQLiteAdapter — drives a SqliteDriver port (driver.ts). By default it opens
 // better-sqlite3 from the connection URL; a pre-wrapped driver (expo-sqlite,
@@ -208,6 +209,9 @@ export class SqliteAdapter implements Adapter {
       const field = model?.fields?.[k];
       if (!field || v == null) { out[k] = v; continue; }
       switch (field.kind) {
+        case 'bytes':
+          out[k] = bytesForDriver(model?.collection ?? '?', k, field.maxBytes, v);
+          break;
         case 'bool':       out[k] = v ? 1 : 0; break;
         case 'dateTime':   out[k] = v instanceof Date ? v.toISOString() : v; break;
         case 'json':

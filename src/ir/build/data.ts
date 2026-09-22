@@ -1,5 +1,6 @@
 import type { ModelDef } from '../../schema/types';
 import type { UpdateNode } from '../types';
+import { isBytesInput } from '../../bytes';
 
 // Build the UPDATE half of an UpdateNode IR (set/increment/multiply/push/unset
 // fragments) from a Prisma-shape `data` object.
@@ -12,19 +13,34 @@ export interface UpdateDataFragment {
   set?: Record<string, any>;
   increment?: Record<string, number>;
   multiply?: Record<string, number>;
+  divide?: Record<string, number>;
+  /** Clamp upwards: write the value only when it exceeds what is stored. */
+  max?: Record<string, number>;
+  /** Clamp downwards. */
+  min?: Record<string, number>;
   push?: Record<string, any>;
+  /** Append only when the value is not already in the array. */
+  addToSet?: Record<string, any>;
+  /** Remove every occurrence of the value from the array. */
+  pull?: Record<string, any>;
   unset?: string[];
 }
 
-const UPDATE_OPS = ['set', 'increment', 'decrement', 'multiply', 'divide', 'push', 'unset'] as const;
-const NUMERIC_OPS = new Set(['increment', 'decrement', 'multiply', 'divide']);
+const UPDATE_OPS = [
+  'set', 'increment', 'decrement', 'multiply', 'divide', 'max', 'min',
+  'push', 'addToSet', 'pull', 'unset',
+] as const;
+const NUMERIC_OPS = new Set(['increment', 'decrement', 'multiply', 'divide', 'max', 'min']);
+// Ops that only mean something on a list column.
+const ARRAY_OPS = new Set(['push', 'addToSet', 'pull']);
+const ARRAY_KINDS = new Set(['stringArray', 'intArray', 'embedMany', 'json']);
 
 // Kinds whose values are never plain objects, so an object in update data
 // must be an operator object. json / embed / arrays / geoPoint / vector take
 // object (or array) values directly and are exempt.
 const SCALAR_KINDS = new Set([
   'id', 'objectId', 'string', 'text', 'int', 'float', 'decimal',
-  'uuid', 'bigint', 'bool', 'dateTime', 'enum',
+  'uuid', 'bigint', 'bool', 'dateTime', 'enum', 'bytes',
 ]);
 const NUMERIC_KINDS = new Set(['int', 'float', 'decimal', 'bigint']);
 
@@ -38,6 +54,13 @@ export function buildUpdateData(model: ModelDef<any>, data: any): UpdateDataFrag
     // Atomic op forms: { x: { set | increment | decrement | multiply | divide | push | unset } }
     if (
       v && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Date) &&
+      // A typed array is an object, and `Uint8Array.prototype.set` EXISTS —
+      // so `'set' in v` was true for every `f.bytes()` value and the IR took
+      // the operator branch, storing the `set` METHOD as the column value.
+      // The driver then rejected it ("can only bind numbers, strings,
+      // bigints, buffers, and null"), so a plain bytes assignment through
+      // `update` could not work at all.
+      !isBytesInput(v) &&
       (v as any)._bsontype === undefined && (v as any).__forge === undefined
     ) {
       const kind = (model.fields?.[key] as any)?.kind;
@@ -72,6 +95,17 @@ export function buildUpdateData(model: ModelDef<any>, data: any): UpdateDataFrag
         }
       }
 
+      // An array op on a scalar column is always a mistake, and the scalar
+      // guard above cannot catch it (push/addToSet/pull ARE valid operators,
+      // just not for this column).
+      const arrayOpUsed = (Array.from(ARRAY_OPS) as string[]).find((op) => op in v);
+      if (arrayOpUsed && kind !== undefined && !ARRAY_KINDS.has(kind)) {
+        throw new Error(
+          `[forge] '${arrayOpUsed}' is only valid on list columns — ` +
+          `'${model.collection}.${key}' is ${kind}.`,
+        );
+      }
+
       if ('set' in v) {
         (out.set ??= {})[key] = v.set;
         continue;
@@ -89,12 +123,37 @@ export function buildUpdateData(model: ModelDef<any>, data: any): UpdateDataFrag
         continue;
       }
       if ('divide' in v) {
-        // 1 / x — SQL adapters native-divide; Mongo $mul with reciprocal.
-        (out.multiply ??= {})[key] = 1 / Number(v.divide);
+        // Carried as its own op. Folding it into `multiply: 1/x` here — as
+        // this did before 2.18.0 — threw the division away before any
+        // adapter could see it: `divide: 3` became `* 0.3333333333333333`,
+        // so an exact `decimal` money column drifted on every update and an
+        // `int` column rounded. Every SQL dialect divides natively; Mongo
+        // gets a real $divide via a pipeline update.
+        const by = Number(v.divide);
+        if (by === 0) {
+          throw new Error(`[forge] update.${key}.divide: cannot divide by zero`);
+        }
+        (out.divide ??= {})[key] = by;
+        continue;
+      }
+      if ('max' in v) {
+        (out.max ??= {})[key] = Number(v.max);
+        continue;
+      }
+      if ('min' in v) {
+        (out.min ??= {})[key] = Number(v.min);
         continue;
       }
       if ('push' in v) {
         (out.push ??= {})[key] = v.push;
+        continue;
+      }
+      if ('addToSet' in v) {
+        (out.addToSet ??= {})[key] = v.addToSet;
+        continue;
+      }
+      if ('pull' in v) {
+        (out.pull ??= {})[key] = v.pull;
         continue;
       }
       if ('unset' in v && v.unset === true) {

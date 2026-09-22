@@ -6,6 +6,7 @@ forge-orm targets SQL Server 2017+, Azure SQL Database, and Azure SQL Managed In
 
 * [Supported versions and editions](#supported-versions-and-editions)
 * [Driver and connection string](#driver-and-connection-string)
+* [Identifier quoting — a security fix in 2.18.0](#identifier-quoting--a-security-fix-in-2180)
 * [DDL emit table](#ddl-emit-table)
 * [IDENTITY columns and sequences](#identity-columns-and-sequences)
 * [Upsert via MERGE](#upsert-via-merge)
@@ -121,6 +122,42 @@ The dialect emits T-SQL named-parameter placeholders, never `?` or
 `request.input('p${i+1}', value)`. A custom driver must mirror that —
 see [DRIVERS](./DRIVERS.md#mssqldriver) for the contract and the
 "`Must declare the scalar variable "@p1"`" symptom when it's wrong.
+
+---
+
+## Identifier quoting — a security fix in 2.18.0
+
+T-SQL quotes identifiers with brackets, and the only character that can
+break out of `[...]` is a `]`. So `MssqlDialect.quoteIdent` refuses a
+`]` and a NUL byte, and doubles nothing else. That check is what makes
+a bracket-quoted identifier safe.
+
+Until 2.18.0 the MSSQL compiler bypassed it at around fourteen sites,
+building `` `[${name}]` `` by hand instead of calling `quoteIdent`. And
+`update` / `upsert` take their column names straight from the caller's
+`data` object without requiring them to exist in the model — so a
+handler that spread a request body into `data` handed the caller the
+`SET` clause:
+
+```ts
+// Before 2.18.0, on MSSQL:
+await db.user.update({ where: { id }, data: { "role] = 'admin', [x": 1 } });
+// →  UPDATE [users] SET [role] = 'admin', [x] = @p1 WHERE …
+```
+
+The bracket closed early and the rest became SQL, writing a column the
+endpoint never exposed. That is a mass-assignment escalation, not just
+an injection. Every identifier in the MSSQL compiler now routes through
+a single `q()` helper that calls `quoteIdent`.
+
+Two things worth doing on your side regardless of version, because they
+are the real defence:
+
+- Never spread a request body into `data`. Pick the fields you mean:
+  `data: { name: body.name, bio: body.bio }`.
+- Turn on strict mode (`createDb({ strict: true })`). It rejects a
+  `where` key that is not a real field, which closes the same class of
+  hole on the read side.
 
 ---
 

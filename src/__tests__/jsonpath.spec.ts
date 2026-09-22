@@ -37,28 +37,38 @@ describe('JSON path per dialect', () => {
       where: { meta: { path: 'profile.age', gte: 18 } },
     });
     expect(art.sql).toMatch(/JSON_UNQUOTE\(JSON_EXTRACT\(/);
-    expect(art.sql).toMatch(/\$\.profile\.age/);
+    // The path is a BOUND PARAMETER, not SQL text. It used to be escaped by
+    // hand and MySQL's escaping was wrong in a way that let a path segment
+    // close the string literal and run as SQL.
+    expect(art.sql).not.toMatch(/\$\.profile\.age/);
+    expect(art.params).toContain('$.profile.age');
   });
 
   it('SQLite emits json_extract(...)', () => {
     const art = buildSqliteCompileApi(M).findMany({
       where: { meta: { path: 'profile.age', gte: 18 } },
     });
-    expect(art.sql).toMatch(/json_extract\([^,]+, '\$\.profile\.age'\)/);
+    expect(art.sql).toMatch(/json_extract\(/);
+    expect(art.sql).not.toContain('$.profile.age');
+    expect(art.params).toContain('$.profile.age');
   });
 
   it('DuckDB emits json_extract(...)', () => {
     const art = buildDuckdbCompileApi(M).findMany({
       where: { meta: { path: 'profile.age', gte: 18 } },
     });
-    expect(art.sql).toMatch(/json_extract\([^,]+, '\$\.profile\.age'\)/);
+    expect(art.sql).toMatch(/json_extract\(/);
+    expect(art.sql).not.toContain('$.profile.age');
+    expect(art.params).toContain('$.profile.age');
   });
 
   it('MSSQL emits JSON_VALUE(...)', () => {
     const art = buildMssqlCompileApi(M).findMany({
       where: { meta: { path: 'profile.age', gte: 18 } },
     });
-    expect(art.sql).toMatch(/JSON_VALUE\([^,]+, '\$\.profile\.age'\)/);
+    expect(art.sql).toMatch(/JSON_VALUE\(/);
+    expect(art.sql).not.toContain('$.profile.age');
+    expect(art.params).toContain('$.profile.age');
   });
 
   it('supports the `in` sub-op', () => {

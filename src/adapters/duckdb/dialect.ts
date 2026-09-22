@@ -11,6 +11,7 @@
 import type { FieldDef } from '../../schema/types';
 import type { Dialect } from '../postgres/dialect';
 import { toGeoWKT } from '../shared/wkt';
+import { jsonPathSpec } from '../json-path-spec';
 
 export const DuckdbDialect: Dialect = {
   name: 'duckdb',
@@ -27,6 +28,37 @@ export const DuckdbDialect: Dialect = {
     return `$${params.length}`;
   },
 
+  trueLiteral: 'TRUE',
+  falseLiteral: 'FALSE',
+
+  caseInsensitiveLike(quotedColumn, patternExpr) {
+    return `${quotedColumn} ILIKE ${patternExpr}`;
+  },
+
+  arrayFilter(op, quotedColumn, values, params) {
+    const ph = (v: unknown) => this.placeholder(params, v);
+    switch (op) {
+      case 'has':      return `list_contains(${quotedColumn}, ${ph(values[0])})`;
+      case 'hasSome':  return `list_has_any(${quotedColumn}, [${values.map(ph).join(', ')}])`;
+      case 'hasEvery': return `list_has_all(${quotedColumn}, [${values.map(ph).join(', ')}])`;
+      case 'isEmpty':  return `coalesce(len(${quotedColumn}), 0) = 0`;
+    }
+  },
+
+  arrayOp(op, quotedColumn, params, value) {
+    const p = () => this.placeholder(params, value);
+    switch (op) {
+      case 'push':     return `list_append(${quotedColumn}, ${p()})`;
+      case 'addToSet': {
+        const a = p(), b = p();
+        return `CASE WHEN list_contains(${quotedColumn}, ${a}) THEN ${quotedColumn} ELSE list_append(${quotedColumn}, ${b}) END`;
+      }
+      case 'pull': {
+        const a = p();
+        return `list_filter(${quotedColumn}, x -> x <> ${a})`;
+      }
+    }
+  },
   columnType(field) {
     switch (field.kind) {
       case 'id':
@@ -48,6 +80,7 @@ export const DuckdbDialect: Dialect = {
       case 'dateTime':   return 'TIMESTAMPTZ';
       // Native JSON type. DuckDB's JSON extension is autoloaded since v0.9.
       case 'json':       return 'JSON';
+      case 'bytes':      return 'BLOB';
       case 'enum':       return 'VARCHAR'; // + CHECK constraint applied at DDL time
       case 'embed':      return 'JSON';
       case 'embedMany':  return 'JSON';
@@ -141,9 +174,8 @@ export const DuckdbDialect: Dialect = {
     return `${fn}(${quotedCol}, [${vector.join(',')}]::FLOAT[${dims}])`;
   },
 
-  jsonPathExpr(quotedCol, path) {
-    const pathSpec = '$' + path.map((s) => /^\d+$/.test(s) ? `[${s}]` : `.${s}`).join('');
-    return `json_extract(${quotedCol}, '${pathSpec.replace(/'/g, "''")}')`;
+  jsonPathExpr(quotedCol, path, _operand, params) {
+    return `json_extract(${quotedCol}, ${this.placeholder(params, jsonPathSpec(path))})`;
   },
 
   geoWithinPolygonClause(quotedCol, _field, multiPolygon, params) {

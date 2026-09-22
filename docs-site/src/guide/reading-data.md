@@ -40,6 +40,22 @@ await db.post.findMany({
 });
 ```
 
+`undefined` is skipped, so `where: { status: maybeStatus }` means "don't
+filter on status when I don't have one". But a filter whose values are
+**all** `undefined` is refused, because that used to mean "every row":
+
+```ts
+await db.account.deleteMany({ where: { tenant_id: req.user?.tenantId } });
+// [forge] deleteMany on 'accounts' was given a filter whose every value is
+// undefined (tenant_id), so it would apply to EVERY row.
+```
+
+Before 2.18 that compiled to `DELETE FROM "accounts"` — one optional
+chain emptied a tenant table. Omitting `where`, or passing `where: {}`,
+still means every row; that is how you say it on purpose. A partly
+undefined filter (`{ a: 'x', b: undefined }`) is unaffected. See
+[docs/MUTATIONS.md](/reference/mutations#a-filter-whose-values-all-vanished-is-refused).
+
 ### Operator reference
 
 All operators, with the field kinds they apply to.
@@ -49,13 +65,13 @@ All operators, with the field kinds they apply to.
 | `equals` / `=`  | every field                             | exact match (same as passing a value directly)                          |
 | `not`           | every field                             | inverse of `equals` (accepts a value or a nested filter)                |
 | `in`            | every field                             | value is one of an array                                                |
-| `notIn`         | every field                             | value is not in an array                                                |
+| `notIn`         | every field                             | value is not in an array. An empty list is a constant — `in: []` matches nothing, `notIn: []` matches everything — which is what an empty `.map()` produces. Correct on every dialect since 2.18; it used to emit a bare `TRUE`/`FALSE`, a syntax error on MSSQL |
 | `lt` / `lte` / `gt` / `gte` | numbers, dates, strings    | range comparisons                                                       |
 | `contains`      | strings                                 | substring match (`LIKE %x%`)                                            |
 | `startsWith`    | strings                                 | prefix match (`LIKE x%`)                                                |
 | `endsWith`      | strings                                 | suffix match (`LIKE %x`)                                                |
-| `mode: 'insensitive'` | strings                           | case-insensitive variant of the text operators                          |
-| `has`           | `stringArray` / `intArray` / `embedMany` | the list contains the given value                                       |
+| `mode: 'insensitive'` | strings                           | case-insensitive variant of the text operators. Works on every dialect since 2.18 — before that the shared compiler emitted Postgres's `ILIKE` everywhere, so it was a syntax error on MySQL, SQLite and MSSQL |
+| `has`           | `stringArray` / `intArray` / `embedMany` | the list contains the given value. `has` / `hasEvery` / `hasSome` / `isEmpty` work on every dialect since 2.18 — before that they emitted Postgres array operators, so a list column was writable and readable but not *filterable* on MySQL, SQLite or MSSQL |
 | `hasEvery`      | array fields                             | the list contains all of the given values                               |
 | `hasSome`       | array fields                             | the list contains at least one of the given values                      |
 | `isEmpty`       | array fields                             | `length === 0`                                                          |
@@ -115,7 +131,9 @@ const full = await db.user.findFirst({
   include: { posts: { include: { comments: true } } },
 });
 
-// you can filter and limit an included relation
+// you can filter and limit an included relation. `take` is PER PARENT
+// (fixed in 2.18 — it used to cap the whole batch), which costs one query
+// per parent; without inner paging the include stays a single batched query.
 await db.user.findFirst({
   include: { posts: { where: { status: 'PUBLISHED' }, orderBy: { created_at: 'desc' }, take: 5 } },
 });
@@ -135,8 +153,9 @@ await db.post.findMany({
   skip:    40,                          // offset
 });
 
-// cursor pagination, for stable paging over large sets
-await db.post.findMany({ take: 20, cursor: { id: lastSeenId }, skip: 1 });
+// cursor pagination, for stable paging over large sets.
+// The cursor is EXCLUSIVE — the cursor row is not returned, so no `skip: 1`.
+await db.post.findMany({ orderBy: { id: 'asc' }, take: 20, cursor: { id: lastSeenId } });
 ```
 
 See more — **[docs/QUERIES.md](/reference/queries)** for every operator with per-dialect SQL/Mongo emit, cursor pagination, distinct, streaming internals, common bugs, and eight worked queries. **[docs/AGGREGATIONS.md](/reference/aggregations)** for count/sum/avg/groupBy/having dashboards. **[docs/WINDOWS.md](/reference/windows)** for ROW_NUMBER / LAG / LEAD / moving averages / sessionization. **[docs/PAGINATION.md](/reference/pagination)** for cursor vs offset vs keyset and Relay/REST response shapes. **[docs/STREAMING.md](/reference/streaming)** for `findManyStream` internals per driver. **[docs/N-PLUS-ONE.md](/reference/n-plus-one)** for the canonical query-explosion prevention patterns.

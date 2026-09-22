@@ -59,6 +59,21 @@ async function main() {
       try { await rawExec(db, s); applied++; }
       catch (e: any) { console.error(`  ✗ failed: ${s}\n    ${e.message}`); throw e; }
     }
+    if (applied === 0) {
+      // The mirror of the rollback case: recording a migration as applied when
+      // nothing ran makes the ledger lie. It happens for real — a diff whose
+      // only entries are the SQLite "cannot ALTER ADD FOREIGN KEY" comment
+      // notes splits to zero executable statements.
+      console.error(
+        `[forge:diff:apply] '${name}' contains no executable SQL — ${pairs.length} ` +
+        'change(s) were written to the migration file as comments only.\n' +
+        '  NOT recording it as applied: the schema is unchanged, and marking it ' +
+        'applied would hide that.\n' +
+        '  Edit the generated file to add the real SQL, then re-run.',
+      );
+      process.exitCode = 1;
+      return;
+    }
     await recordMigration(db, name);
     console.log(`[forge:diff:apply] applied ${applied} statement(s); recorded migration '${name}'.`);
   } finally {

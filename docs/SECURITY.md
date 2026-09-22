@@ -7,6 +7,7 @@ It is the companion read to [RAW-SQL.md](./RAW-SQL.md) (which covers the templat
 ## Contents
 
 - [The security surface forge owns](#the-security-surface-forge-owns)
+- [Fixed in 2.18.0 — upgrade if you are below it](#fixed-in-2180--upgrade-if-you-are-below-it)
 - [Raw SQL safety](#raw-sql-safety)
 - [SQL injection auditing — the CI rule](#sql-injection-auditing--the-ci-rule)
 - [Row-level security (Postgres)](#row-level-security-postgres)
@@ -45,6 +46,64 @@ Three things forge guarantees by construction, and three things it deliberately 
 3. **Transport and at-rest encryption.** That's the driver's and the database operator's job — TLS config on the connection string, FDE on the disk, KMS for the keys. forge sits on top.
 
 The rest of this document is the operational shape of those three guarantees and the patterns that backfill the three non-guarantees.
+
+---
+
+## Fixed in 2.18.0 — upgrade if you are below it
+
+Three holes in the typed surface, all of them reachable from ordinary
+request handling. The full write-ups are in
+[CHANGELOG.md](../CHANGELOG.md); what matters here is whether your code
+is exposed and what to do besides upgrading.
+
+**A JSON path was spliced into the SQL on MySQL, and the escaping was
+wrong.** `where: { meta: { path: [...] } }` interpolated the path after
+escaping it, and MySQL's escaping applied two passes in the wrong
+order — `'` became `` `\'` ``, which the second pass turned into
+`` `\''` ``. MySQL reads `` `\'` `` as an escaped quote, so the next
+quote closed the string literal and the rest of the path ran as SQL.
+Path segments are entirely caller-controlled, so any endpoint that let
+a user name a key inside a JSON column was a full injection: a filter
+builder, a saved-view feature, a generic search API. The path is now
+bound as a parameter on MySQL, SQLite, DuckDB and MSSQL, so there is
+nothing left to escape. Postgres was never affected. See
+[JSON-PATH](./JSON-PATH.md#the-path-is-a-bound-parameter-not-sql-text).
+
+**MSSQL built bracket-quoted identifiers by hand.** The compiler
+bypassed `quoteIdent` — the check that refuses a `]` — at about fourteen
+sites, and `update` / `upsert` never required a column name in `data` to
+exist in the model. A handler that spread a request body into `data`
+therefore handed the caller the `SET` clause, which is a
+mass-assignment escalation rather than only an injection. Fixed by
+routing every identifier through `quoteIdent`. See
+[MSSQL](./MSSQL.md#identifier-quoting--a-security-fix-in-2180).
+
+**An all-`undefined` `where` applied to every row.** This one needs no
+attacker:
+
+```ts
+await db.account.deleteMany({ where: { tenant_id: req.user?.tenantId } });
+// Before 2.18.0: DELETE FROM "accounts"   — the whole table
+```
+
+`undefined` is skipped everywhere in the filter surface, which is what
+makes an optional filter work. When *every* value evaporated, the filter
+disappeared with it. The single-row verbs were worse: `delete({ where: { id: maybeId } })`
+deleted an arbitrary row. It now throws. See
+[MUTATIONS](./MUTATIONS.md#a-filter-whose-values-all-vanished-is-refused)
+for the exact rule and the deliberate escape hatch.
+
+Two application-side habits that would have contained all three, and
+are worth adopting whatever version you are on:
+
+- **Never spread a request body into `data` or `where`.** Name the
+  fields you mean. This is the same rule as the mass-assignment
+  guidance in [Common vulnerabilities](#common-vulnerabilities), and it
+  is the only one of these that is fully in your hands.
+- **Turn on strict mode** — `createDb({ strict: true })`. It rejects a
+  `where` key that is not a real field on the model, recursing through
+  `AND` / `OR` / `NOT` and relation filters, so a key that arrived from
+  a request body fails loudly instead of matching something unintended.
 
 ---
 

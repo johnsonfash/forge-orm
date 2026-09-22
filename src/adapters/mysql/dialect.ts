@@ -1,6 +1,7 @@
 import type { FieldDef } from '../../schema/types';
 import type { Dialect } from '../postgres/dialect';
 import { toGeoWKT } from '../shared/wkt';
+import { jsonPathSpec } from '../json-path-spec';
 
 // MySQL dialect. Diverges from PG/SQLite:
 //   • Backtick identifier quoting; `?` positional placeholders.
@@ -23,6 +24,46 @@ export const MysqlDialect: Dialect = {
     return '?';
   },
 
+  trueLiteral: 'TRUE',
+  falseLiteral: 'FALSE',
+
+  // No ILIKE. A `_ci` collation makes plain LIKE case-insensitive already on
+  // most MySQL installs, but that is a property of the column, not of the
+  // query — LOWER() on both sides is insensitive whatever the collation is.
+  caseInsensitiveLike(quotedColumn, patternExpr) {
+    return `LOWER(${quotedColumn}) LIKE LOWER(${patternExpr})`;
+  },
+
+  // Arrays are JSON here, so the Postgres array operators do not exist. The
+  // candidate is bound as JSON TEXT, which is what JSON_CONTAINS/JSON_OVERLAPS
+  // accept, and it works for numbers and strings alike without a per-type cast.
+  arrayFilter(op, quotedColumn, values, params) {
+    const json = (v: unknown) => this.placeholder(params, JSON.stringify(v));
+    switch (op) {
+      case 'has':      return `JSON_CONTAINS(${quotedColumn}, ${json(values[0])}, '$')`;
+      case 'hasSome':  return `JSON_OVERLAPS(${quotedColumn}, ${json(values)})`;
+      // A JSON array candidate means "every element is present".
+      case 'hasEvery': return `JSON_CONTAINS(${quotedColumn}, ${json(values)}, '$')`;
+      case 'isEmpty':  return `COALESCE(JSON_LENGTH(${quotedColumn}), 0) = 0`;
+    }
+  },
+
+  // stringArray / intArray are JSON columns on MySQL, so `array_append` (which
+  // the shared compiler used to emit for every dialect) does not exist here.
+  arrayOp(op, quotedColumn, params, value) {
+    const p = () => this.placeholder(params, value);
+    switch (op) {
+      case 'push':     return `JSON_ARRAY_APPEND(${quotedColumn}, '$', ${p()})`;
+      case 'addToSet': {
+        const a = p(), b = p();
+        return `IF(JSON_CONTAINS(${quotedColumn}, JSON_QUOTE(${a}), '$'), ${quotedColumn}, JSON_ARRAY_APPEND(${quotedColumn}, '$', ${b}))`;
+      }
+      // Removing by VALUE needs the element's index first, and JSON_SEARCH
+      // returns a path only for strings. Rather than emit something that
+      // quietly works for text arrays and not numeric ones, refuse.
+      case 'pull':     return null;
+    }
+  },
   columnType(field: FieldDef) {
     switch (field.kind) {
       case 'id':
@@ -49,6 +90,18 @@ export const MysqlDialect: Dialect = {
       case 'bool':       return 'TINYINT(1)';
       case 'dateTime':   return 'DATETIME(3)';   // millisecond precision
       case 'json':       return 'JSON';
+      // Size classes matter here in a way they don't on Postgres: a row's
+      // inline portion is capped at 65,535 bytes, so declaring every blob
+      // LONGBLOB costs an off-page pointer read on columns that never
+      // needed one. `maxBytes` picks the smallest class that fits.
+      case 'bytes': {
+        const max = field.maxBytes;
+        if (max == null) return 'LONGBLOB';
+        if (max <= 255) return 'TINYBLOB';
+        if (max <= 65_535) return 'BLOB';
+        if (max <= 16_777_215) return 'MEDIUMBLOB';
+        return 'LONGBLOB';
+      }
       case 'enum':       return 'VARCHAR(64)';   // + CHECK
       case 'embed':      return 'JSON';
       case 'embedMany':  return 'JSON';
@@ -139,12 +192,19 @@ export const MysqlDialect: Dialect = {
     return `DISTANCE(${quotedCol}, STRING_TO_VECTOR(${ph}), '${metric}')`;
   },
 
-  jsonPathExpr(quotedCol, path) {
+  jsonPathExpr(quotedCol, path, _operand, params) {
     // MySQL JSON_EXTRACT returns JSON-encoded values; for strings that means
     // a wrapping `"…"`. Wrap with JSON_UNQUOTE so equality against a plain
     // string param works.
-    const pathSpec = '$' + path.map((s) => /^\d+$/.test(s) ? `[${s}]` : `.${s.replace(/[`'"\\]/g, '\\$&')}`).join('');
-    return `JSON_UNQUOTE(JSON_EXTRACT(${quotedCol}, '${pathSpec.replace(/'/g, "''")}'))`;
+    //
+    // The path is BOUND, not interpolated. It used to be escaped by hand and
+    // the two escapes ran in the wrong order: `'` became `\'` and then the
+    // second pass turned that into `\''`. MySQL reads `\'` as an escaped
+    // quote, so the next `'` CLOSED the string and the rest of the path was
+    // executed as SQL — a `where: { meta: { path: [...], eq: 1 } }` with a
+    // user-supplied key was a full injection. A bound parameter cannot be
+    // mis-escaped.
+    return `JSON_UNQUOTE(JSON_EXTRACT(${quotedCol}, ${this.placeholder(params, jsonPathSpec(path))}))`;
   },
 
   geoWithinPolygonClause(quotedCol, field, multiPolygon, params) {

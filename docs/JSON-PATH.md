@@ -14,6 +14,7 @@ assumes you know the call shape.
 ## Contents
 
 * [Dialect translation table](#dialect-translation-table)
+* [The path is a bound parameter, not SQL text](#the-path-is-a-bound-parameter-not-sql-text)
 * [Per-dialect SQL emit, worked examples](#per-dialect-sql-emit-worked-examples)
 * [Indexing JSON paths](#indexing-json-paths)
 * [Schema patterns: JSON vs columns](#schema-patterns-json-vs-columns)
@@ -39,10 +40,10 @@ reads.
 | Dialect    | Path read                                                | Example: `meta.profile.age`                                 |
 |------------|----------------------------------------------------------|-------------------------------------------------------------|
 | Postgres   | `(col->'a'->'b'->>'c')::<cast>` — cast picked by operand | `("meta"->'profile'->>'age')::numeric = $1`                  |
-| MySQL 8 / MariaDB 10.7+ | `JSON_UNQUOTE(JSON_EXTRACT(col, '$.a.b.c'))` | ``JSON_UNQUOTE(JSON_EXTRACT(`meta`, '$.profile.age'))`` `>= ?` |
-| SQLite     | `json_extract(col, '$.a.b.c')` — JSON1, always built-in  | `json_extract("meta", '$.profile.age') >= ?`                |
-| DuckDB     | `json_extract(col, '$.a.b.c')`                           | `json_extract("meta", '$.profile.age') >= ?`                |
-| MSSQL 2016+| `JSON_VALUE(col, '$.a.b.c')` — scalars only              | `JSON_VALUE([meta], '$.profile.age') >= @p1`                |
+| MySQL 8 / MariaDB 10.7+ | `JSON_UNQUOTE(JSON_EXTRACT(col, ?))`        | ``JSON_UNQUOTE(JSON_EXTRACT(`meta`, ?))`` `>= ?` — params `'$.profile.age'`, `18` |
+| SQLite     | `json_extract(col, ?)` — JSON1, always built-in          | `json_extract("meta", ?) >= ?`                              |
+| DuckDB     | `json_extract(col, ?)`                                   | `json_extract("meta", ?) >= ?`                              |
+| MSSQL 2016+| `JSON_VALUE(col, @p)` — scalars only                     | `JSON_VALUE([meta], @p1) >= @p2`                            |
 | Mongo      | Dotted key — `{ 'col.a.b.c': … }`                        | `{ 'meta.profile.age': { $gte: 18 } }`                      |
 
 Numeric path segments emit native array indexing per dialect:
@@ -50,6 +51,33 @@ Numeric path segments emit native array indexing per dialect:
 `$.addresses[0].city` on every JSON-extract dialect, and the dotted
 `meta.addresses.0.city` form on Mongo (which Mongo resolves through
 array elements correctly).
+
+---
+
+## The path is a bound parameter, not SQL text
+
+On every dialect that reads a path as a string — MySQL, SQLite, DuckDB
+and MSSQL — the path is **bound as a parameter**. It is built by a
+shared `jsonPathSpec()` helper and handed to the driver as a value. It
+does not appear in the SQL text, which also means it will not show up in
+a slow-query log or in `$explain` output; look in the parameter list
+instead.
+
+This is a security fix in 2.18.0, and the reason to upgrade if you
+accept a path from a request. Before 2.18.0 the path was escaped by hand
+and spliced into the statement, and MySQL's escaping ran two passes in
+the wrong order: `'` became `\'`, and the second pass turned that into
+`\''`. MySQL reads `\'` as an escaped quote, so the *next* quote closed
+the string literal and the rest of the path was executed as SQL.
+
+Path segments are entirely caller-controlled — that is the point of a
+path filter — so any endpoint that let a user name a key inside a JSON
+column was a full injection. A filter builder, a saved-view feature or
+a generic search API all qualify. There is nothing left to escape now
+that the path is a parameter.
+
+Postgres was never affected: it uses operator syntax (`->`, `->>`) with
+each segment as its own bound value rather than a path string.
 
 ---
 
@@ -107,7 +135,8 @@ text-side equality with a plain string parameter works without surprise.
 await db.doc.findMany({
   where: { meta: { path: 'profile.role', eq: 'admin' } },
 });
-// → SELECT … FROM `doc` WHERE JSON_UNQUOTE(JSON_EXTRACT(`doc`.`meta`, '$.profile.role')) = ?
+// → SELECT … FROM `doc` WHERE JSON_UNQUOTE(JSON_EXTRACT(`doc`.`meta`, ?)) = ?
+//   params: ['$.profile.role', 'admin']   -- the path is BOUND, not spliced
 ```
 
 Numeric comparisons work even though the unquoted left-hand side is a
@@ -130,7 +159,8 @@ adapter — see **[Browser](../README.md#browser-sqlite-wasm--opfs)**).
 await db.doc.findMany({
   where: { meta: { path: 'tags[0]', eq: 'urgent' } },
 });
-// → SELECT … FROM "doc" WHERE json_extract("doc"."meta", '$.tags[0]') = ?
+// → SELECT … FROM "doc" WHERE json_extract("doc"."meta", ?) = ?
+//   params: ['$.tags[0]', 'urgent']
 ```
 
 `json_extract` returns the JSON-decoded value directly (text for
@@ -149,7 +179,8 @@ restructure with `STRUCT` types ahead of time and skip JSON entirely.
 await db.event.findMany({
   where: { payload: { path: 'order.state', eq: 'paid' } },
 });
-// → SELECT … FROM "event" WHERE json_extract("event"."payload", '$.order.state') = ?
+// → SELECT … FROM "event" WHERE json_extract("event"."payload", ?) = ?
+//   params: ['$.order.state', 'paid']
 ```
 
 ### MSSQL 2016+
@@ -162,7 +193,8 @@ querying array values use `OPENJSON` through `db.$queryRaw`.
 await db.doc.findMany({
   where: { meta: { path: 'profile.dept', eq: 'eng' } },
 });
-// → SELECT … FROM [doc] WHERE JSON_VALUE([doc].[meta], '$.profile.dept') = @p1
+// → SELECT … FROM [doc] WHERE JSON_VALUE([doc].[meta], @p1) = @p2
+//   params: ['$.profile.dept', 'eng']
 ```
 
 MSSQL stores JSON in an `nvarchar(max)` column. There is no `jsonb`-

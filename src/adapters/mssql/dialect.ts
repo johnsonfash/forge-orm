@@ -4,9 +4,12 @@
 import type { FieldDef } from '../../schema/types';
 import type { Dialect } from '../postgres/dialect';
 import { toGeoWKT } from '../shared/wkt';
+import { jsonPathSpec } from '../json-path-spec';
 
 export const MssqlDialect: Dialect = {
   name: 'mssql',
+  // T-SQL has no `(a, b) > (x, y)`; the cursor compiler expands instead.
+  rowValueComparison: false,
 
   quoteIdent(name) {
     if (/[\]\0]/.test(name)) {
@@ -22,6 +25,38 @@ export const MssqlDialect: Dialect = {
     return `@p${params.length}`;
   },
 
+  // T-SQL has no boolean literal and no boolean expression outside a predicate.
+  trueLiteral: '1=1',
+  falseLiteral: '1=0',
+
+  caseInsensitiveLike(quotedColumn, patternExpr) {
+    return `LOWER(${quotedColumn}) LIKE LOWER(${patternExpr})`;
+  },
+
+  // Arrays are JSON in NVARCHAR(MAX); OPENJSON is T-SQL's json_each.
+  arrayFilter(op, quotedColumn, values, params) {
+    const ph = (v: unknown) => this.placeholder(params, v);
+    const each = `SELECT 1 FROM OPENJSON(${quotedColumn}) WHERE value`;
+    switch (op) {
+      case 'has':      return `EXISTS (${each} = ${ph(values[0])})`;
+      case 'hasSome':  return `EXISTS (${each} IN (${values.map(ph).join(', ')}))`;
+      case 'hasEvery':
+        return `(SELECT COUNT(DISTINCT value) FROM OPENJSON(${quotedColumn}) ` +
+               `WHERE value IN (${values.map(ph).join(', ')})) = ${values.length}`;
+      case 'isEmpty':  return `(SELECT COUNT(*) FROM OPENJSON(${quotedColumn})) = 0`;
+    }
+  },
+
+  // Arrays are JSON in NVARCHAR(MAX). JSON_MODIFY's 'append' lax path adds an
+  // element; there is no value-based contains or remove.
+  arrayOp(op, quotedColumn, params, value) {
+    const p = () => this.placeholder(params, value);
+    switch (op) {
+      case 'push':     return `JSON_MODIFY(${quotedColumn}, 'append $', ${p()})`;
+      case 'addToSet': return null;
+      case 'pull':     return null;
+    }
+  },
   columnType(field) {
     switch (field.kind) {
       case 'id':
@@ -46,6 +81,12 @@ export const MssqlDialect: Dialect = {
       // JSON lives in NVARCHAR(MAX); SQL Server 2025 adds a real JSON type,
       // but NVARCHAR(MAX) is the portable choice for now.
       case 'json':       return 'NVARCHAR(MAX)';
+      // VARBINARY(MAX) is stored off-row and cannot be indexed; an inline
+      // VARBINARY(n) can. 8000 is the in-row ceiling for the type.
+      case 'bytes':
+        return field.maxBytes != null && field.maxBytes <= 8000
+          ? `VARBINARY(${field.maxBytes})`
+          : 'VARBINARY(MAX)';
       case 'enum':       return 'NVARCHAR(255)'; // + CHECK constraint applied at DDL time
       case 'embed':      return 'NVARCHAR(MAX)';
       case 'embedMany':  return 'NVARCHAR(MAX)';
@@ -110,7 +151,7 @@ export const MssqlDialect: Dialect = {
     const wkt = `POINT(${point.lng} ${point.lat})`;
     const pp = this.placeholder(params, wkt);
     const ref = `geography::STGeomFromText(${pp}, ${srid})`;
-    if (point.withinMeters === undefined) return 'TRUE';
+    if (point.withinMeters === undefined) return this.trueLiteral;
     const wm = this.placeholder(params, point.withinMeters);
     return `${quotedCol}.STDistance(${ref}) < ${wm}`;
   },
@@ -127,7 +168,7 @@ export const MssqlDialect: Dialect = {
     const dims = field.vector?.dims;
     const ph = this.placeholder(params, `[${query.vector.join(',')}]`);
     const ref = `CAST(${ph} AS VECTOR(${dims}))`;
-    if (query.withinDistance === undefined) return 'TRUE';
+    if (query.withinDistance === undefined) return this.trueLiteral;
     const wd = this.placeholder(params, query.withinDistance);
     return `VECTOR_DISTANCE('${metric}', ${quotedCol}, ${ref}) < ${wd}`;
   },
@@ -139,9 +180,9 @@ export const MssqlDialect: Dialect = {
     return `VECTOR_DISTANCE('${metric}', ${quotedCol}, CAST(${ph} AS VECTOR(${dims})))`;
   },
 
-  jsonPathExpr(quotedCol, path) {
-    const pathSpec = '$' + path.map((s) => /^\d+$/.test(s) ? `[${s}]` : `.${s}`).join('');
-    return `JSON_VALUE(${quotedCol}, '${pathSpec.replace(/'/g, "''")}')`;
+  jsonPathExpr(quotedCol, path, _operand, params) {
+    // T-SQL accepts a variable for the path, and a bound parameter is one.
+    return `JSON_VALUE(${quotedCol}, ${this.placeholder(params, jsonPathSpec(path))})`;
   },
 
   geoWithinPolygonClause(quotedCol, field, multiPolygon, params) {

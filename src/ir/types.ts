@@ -47,7 +47,12 @@ export interface UpdateNode {
   set?: Record<string, any>;
   increment?: Record<string, number>;
   multiply?: Record<string, number>;
+  divide?: Record<string, number>;
+  max?: Record<string, number>;
+  min?: Record<string, number>;
   push?: Record<string, any>;
+  addToSet?: Record<string, any>;
+  pull?: Record<string, any>;
   unset?: string[];
   many: boolean;                  // updateMany when true, updateOne when false
   // Present when this is an upsert. Adapters do the right thing per dialect
@@ -225,6 +230,17 @@ export interface OrderByEntry {
   // synthetic `_distance` column. On Mongo, geo uses $geoNear (first stage),
   // vector uses $vectorSearch (first stage); the executor routes either.
   nearTo?: { lng: number; lat: number } | { vector: number[] };
+  /**
+   * Set when the entry orders on an AGGREGATE rather than a column —
+   * `orderBy: { _sum: { total: 'desc' } }` on a groupBy.
+   *
+   * Before 2.18.0 `buildOrderBy` had no branch for this shape, so the entry
+   * was silently dropped. A "top 10 customers by lifetime value" query kept
+   * its secondary column sort and lost the one that mattered, returning an
+   * arbitrary ten rows — an order, just not the one asked for, which is why
+   * it went unnoticed.
+   */
+  agg?: { bucket: '_count' | '_avg' | '_sum' | '_min' | '_max'; field: string };
 }
 
 export interface CursorSpec {

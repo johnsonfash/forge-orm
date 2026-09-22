@@ -55,6 +55,12 @@ export {
 
 // ─── Column references — field-to-field comparison in `where` ───────────────
 export { col, isColRef, FORGE_COL } from './col';
+
+// Binary helpers, exported because an app that stores blobs needs the same
+// normalisation at its own edges (an upload handler, a cache) and should not
+// have to reimplement it.
+export { toBytes, isBytesInput, fromDriverBytes } from './bytes';
+export type { BytesInput } from './bytes';
 export type { ColRef } from './col';
 
 // ─── JSON-null markers ──────────────────────────────────────────────────────

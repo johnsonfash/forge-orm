@@ -6,9 +6,12 @@ import type { OrderByEntry } from '../types';
 //   • { field: 'asc' | 'desc' }                          — single
 //   • [{ a: 'asc' }, { b: 'desc' }]                      — multi-sort
 //   • { field: { sort: 'asc', nulls: 'first' | 'last' } } — SQL-style (Mongo ignores nulls)
+//   • { _sum: { total: 'desc' } }                         — aggregate order (groupBy only)
 //
 // Relation-scoped order (`{ profile: { name: 'asc' } }`) is not yet supported;
 // those entries are silently dropped.
+
+const AGG_BUCKETS = new Set(['_count', '_avg', '_sum', '_min', '_max'] as const);
 
 export function buildOrderBy(orderBy: any): OrderByEntry[] | undefined {
   if (orderBy == null) return undefined;
@@ -21,6 +24,19 @@ export function buildOrderBy(orderBy: any): OrderByEntry[] | undefined {
       if (v == null) continue;
       if (typeof v === 'string') {
         out.push({ field: key, direction: v === 'desc' ? 'desc' : 'asc' });
+        continue;
+      }
+      // Aggregate order on a groupBy: `{ _sum: { total: 'desc' } }`. One
+      // entry per field inside the bucket.
+      if (AGG_BUCKETS.has(key as never) && typeof v === 'object' && !Array.isArray(v)) {
+        for (const [field, dir] of Object.entries(v as Record<string, unknown>)) {
+          if (typeof dir !== 'string') continue;
+          out.push({
+            field,
+            direction: dir === 'desc' ? 'desc' : 'asc',
+            agg: { bucket: key as never, field },
+          });
+        }
         continue;
       }
       // Object form: { sort, nulls } — or geo nearTo — or relation order.

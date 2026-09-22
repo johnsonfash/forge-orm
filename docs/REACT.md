@@ -1355,24 +1355,24 @@ export const revalidate = 60; // ISR — regenerate at most every 60s.
 export default async function Dashboard() {
   const db = await getServerDb();
   const [totals, byRegion] = await Promise.all([
-    db.order.aggregate({ _sum: { total_cents: true }, _count: true }),
+    db.order.aggregate({ _sum: { total_cents: true }, _count: { _all: true } }),
     db.order.groupBy({
       by: ['region'],
       _sum: { total_cents: true },
-      _count: true,
+      _count: { _all: true },
       orderBy: { _sum: { total_cents: 'desc' } },
     }),
   ]);
   return (
     <main>
       <h1>Last quarter</h1>
-      <p>{totals._count} orders, ${totals._sum.total_cents! / 100}</p>
+      <p>{totals._count._all} orders, ${(totals._sum.total_cents ?? 0) / 100}</p>
       <table>
         {byRegion.map((r) => (
           <tr key={r.region}>
             <td>{r.region}</td>
-            <td>{r._count}</td>
-            <td>${r._sum.total_cents! / 100}</td>
+            <td>{r._count._all}</td>
+            <td>${(r._sum.total_cents ?? 0) / 100}</td>
           </tr>
         ))}
       </table>
@@ -1380,6 +1380,20 @@ export default async function Dashboard() {
   );
 }
 ```
+
+`aggregate` hands back the payload object directly — no array to
+index — and `_count` is an object, so the row count reads
+`_count._all`. A bare `_count: true` throws when the query is built
+(2.18.0); before that it emitted no `COUNT` at all and the key went
+missing.
+
+The `?? 0` is not decoration. On a quarter with no orders `_sum`
+comes back `{ total_cents: null }`. Drop the coerce and `null / 100`
+happens to render `0`; format the same cell as
+`total_cents!.toFixed(2)` instead and the empty quarter throws
+`Cannot read properties of null`. In a server component an uncaught
+render throw is a 500 on the whole route, not a blank tile — so
+coerce at the read, not at the display.
 
 Runs on the server, hits PG once per minute, streams HTML to the client.
 No client-side JS for the page; no API endpoint to write.

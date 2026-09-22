@@ -68,13 +68,31 @@ export function pgliteDriver(pg: {
 }
 
 /**
+ * The package name, held in a variable rather than written inline.
+ *
+ * A bundler resolves a LITERAL import specifier at build time even inside a
+ * try/catch, and even behind `@vite-ignore` — that comment steers Vite's
+ * dynamic-import analysis, not esbuild's resolver. So a consumer that had
+ * never heard of PGlite still failed to build:
+ *
+ *   node_modules/forge-orm/dist/adapters/postgres/pglite-driver.js:112:89:
+ *   ERROR: Could not resolve "@electric-sql/pglite"
+ *
+ * which broke every bundled app on upgrade, with no way to opt out short of
+ * adding a package it does not use. A non-literal specifier cannot be
+ * resolved statically, so the import stays a runtime one — which is the whole
+ * point of an optional peer.
+ */
+const PGLITE_PKG = '@electric-sql/pglite';
+
+/**
  * Build a PGlite-backed driver from a `pglite:` URL, importing the package
  * lazily so it is never a hard dependency of forge.
  */
 export async function pgliteDriverFromUrl(url: string): Promise<PostgresDriver> {
   let mod: any;
   try {
-    mod = await import(/* @vite-ignore */ '@electric-sql/pglite');
+    mod = await import(/* @vite-ignore */ /* webpackIgnore: true */ PGLITE_PKG);
   } catch {
     throw new Error(
       `[forge] '${url}' needs the PGlite package, which is not installed.\n` +

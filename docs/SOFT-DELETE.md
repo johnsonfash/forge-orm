@@ -13,6 +13,7 @@ the operational patterns that keep soft-delete from rotting over time.
 * [Declaring the column](#declaring-the-column)
 * [`softDelete` and `restore`](#softdelete-and-restore)
 * [Query-time defaults](#query-time-defaults)
+* [Known gap — `include` does not hide soft-deleted rows](#known-gap--include-does-not-hide-soft-deleted-rows)
 * [Partial-filter indexes](#partial-filter-indexes)
 * [Cascading soft deletes](#cascading-soft-deletes)
 * [Restore semantics](#restore-semantics)
@@ -106,13 +107,26 @@ Four verbs on every collection wrapper:
 
 | Verb              | `where`         | Returns           | Notes                                  |
 |-------------------|-----------------|-------------------|----------------------------------------|
-| `softDelete`      | unique selector | the updated row   | throws if no row matched               |
+| `softDelete`      | any filter      | the updated row   | affects ONE matching row; throws if none matched |
 | `softDeleteMany`  | any filter      | `{ count }`       | zero matches is a no-op                |
-| `restore`         | unique selector | the updated row   | throws if no row matched               |
+| `restore`         | any filter      | the updated row   | affects ONE matching row; throws if none matched |
 | `restoreMany`     | any filter      | `{ count }`       | zero matches is a no-op                |
 
 Same asymmetry as `update` vs `updateMany` — see
 [docs/MUTATIONS.md](./MUTATIONS.md#update-vs-updatemany).
+
+`softDelete` and `restore` do **not** narrow `where` to unique columns.
+They take the same full filter type as everything else, and nothing
+checks it — not the compiler, not the wrapper. Hand `softDelete` a filter
+that matches forty rows and exactly one of them gets stamped; *which* one
+is unspecified. On Postgres the emitted SQL is
+`WHERE ctid = (SELECT ctid FROM … WHERE … LIMIT 1)` with no `ORDER BY`;
+on Mongo it is `findOneAndUpdate`. Either way the call succeeds, reports
+one row, and leaves the other thirty-nine live — a "we deleted that"
+bug that no error ever surfaces.
+
+Use the plural verbs (`softDeleteMany`, `restoreMany`, and likewise
+`updateMany` / `deleteMany`) when you mean "however many rows match".
 
 ```ts
 await db.post.softDelete({ where: { id: 'p1' } });
@@ -176,9 +190,12 @@ Affected verbs:
 * `findFirst`, `findFirstOrThrow`
 * `findUnique`, `findUniqueOrThrow`
 * `findMany`
-* `findManyStream` (see [docs/QUERIES.md](./QUERIES.md#findmanystream))
+* `findManyStream` (see [docs/QUERIES.md](./QUERIES.md#findmanystream--cursor-backed-streaming))
 * `count`
-* `aggregate` (Mongo only — pipeline `$match` is augmented)
+
+`aggregate` (Mongo) is **not** on that list: it hands your pipeline
+straight to the driver, so a `$match` you did not write yourself is never
+added. Filter the soft-delete column in the pipeline yourself.
 
 The augmentation is suppressed in three cases:
 
@@ -198,8 +215,10 @@ The augmentation is suppressed in three cases:
    soft-deleted row still hits the row.
 
 `_withDeleted` is a real key on `WhereInput` (declared in the strict-mode
-allow-list alongside `AND`, `OR`, `NOT`). Pass it on any read; the
-wrapper strips it before IR build.
+allow-list alongside `AND`, `OR`, `NOT`). Pass it at the **top level** of
+any read; the wrapper strips it before IR build. Nested inside an
+`include` it is not recognised — see
+[Known gap](#known-gap--include-does-not-hide-soft-deleted-rows).
 
 ### Strict mode and `_withDeleted`
 
@@ -209,29 +228,64 @@ passes — you can use it on any model. (On a model with no
 `.softDeleteAt()` column it's a no-op — the wrapper has nothing to
 filter.)
 
-### Including soft-deleted via relations
+---
 
-`include` and nested `select` traverse relations, and the soft-delete
-filter applies recursively:
+## Known gap — `include` does not hide soft-deleted rows
+
+The auto-filter is applied by one helper, `_withSoftDeleteFilter` in
+`src/builder/collection.ts`, and that helper is called from exactly three
+places: `findManyStream`, `count`, and the private `_find` that backs
+`findMany` / `findFirst` / `findUnique`. It rewrites the **top-level**
+`where` of the query you called and nothing else.
+
+Relation subqueries are built in the IR and run by the adapters, and
+neither has any soft-delete awareness. So soft-deleted children come back
+through **every** `include`:
 
 ```ts
-// User's *active* posts only — soft-deleted posts are hidden.
+// Returns ALL of u1's posts — the soft-deleted ones included.
 const user = await db.user.findUnique({
   where:   { id: 'u1' },
   include: { posts: true },
 });
+```
 
-// User's *all* posts, including soft-deleted.
+The parent is filtered. The children are not. A "soft delete" that the
+user can still see listed under their account is the failure this
+produces, and it is silent — the rows simply appear.
+
+`_withDeleted` is no help here, and using it inside an `include` is worse
+than doing nothing. The wrapper only recognises and strips `_withDeleted`
+at the **top level** of a `where`. Anywhere else it is treated as an
+ordinary field name, so
+
+```ts
+// DO NOT — this is not an opt-in, it is a query against a column
+// that does not exist.
+include: { posts: { where: { _withDeleted: true } } }
+```
+
+compiles to `WHERE "posts"."_withDeleted" = $1` and the database errors
+out. (`_withDeleted` *is* valid and *does* work at the top level of
+`findMany`, `findFirst`, `findUnique`, `count` and `findManyStream` — see
+[Query-time defaults](#query-time-defaults).)
+
+**This is not fixed in 2.18.0.** Until it is, filter the child list
+yourself, naming the model's own soft-delete column:
+
+```ts
 const user = await db.user.findUnique({
   where:   { id: 'u1' },
   include: {
-    posts: { where: { _withDeleted: true } },
+    posts: { where: { deleted_at: null } },   // the post model's own column
   },
 });
 ```
 
-Each `include` level is treated as its own read for the purpose of
-auto-filtering.
+You must do this on every `include` of every soft-deleted model. There is
+no global setting that covers it. If a relation is included in more than
+one place, wrap the include shape in a shared constant so the filter
+cannot be forgotten in one of them.
 
 ---
 

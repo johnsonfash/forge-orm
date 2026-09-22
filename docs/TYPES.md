@@ -23,6 +23,7 @@ the recommended single-import bundle.
 * [Per-helper reference: `InferCreate` / `InferUpdate` / `InferWhere` / …](#per-helper-reference-infercreate--inferupdate--inferwhere--)
 * [`ForgeOf<'modelKey'>`](#forgeofmodelkey)
 * [`ForgeModels` and `Forge`](#forgemodels-and-forge)
+* [Reaching a model by name at runtime](#reaching-a-model-by-name-at-runtime)
 * [Optional vs nullable](#optional-vs-nullable)
 * [Defaults, `.updatedAt()`, generated columns](#defaults-updatedat-generated-columns)
 * [Relations in inference](#relations-in-inference)
@@ -136,7 +137,9 @@ The mapping per field builder, with the JS-side type that lands on
 | `f.uuid()`                                     | `string`                                  |
 | `f.bool()`                                     | `boolean`                                 |
 | `f.dateTime()`                                 | `Date`                                    |
-| `f.json()`                                     | `any` (carry-anything escape)             |
+| `f.json()`                                     | `unknown` — narrow before reading         |
+| `f.json<Shape>()`                              | `Shape`                                   |
+| `f.bytes()` / `f.bytes({ maxBytes })`          | `Uint8Array`                              |
 | `f.enumOf(['A', 'B'] as const)`               | `'A' \| 'B'`                              |
 | `f.embed(() => Type)`                          | the embed's row shape                     |
 | `f.embedMany(() => Type)`                      | `Type[]`                                  |
@@ -146,13 +149,26 @@ The mapping per field builder, with the JS-side type that lands on
 | `f.vector(N)`                                  | `number[]`                                |
 | any of the above `.optional()`                | `T \| null`                               |
 
-Two non-obvious ones:
+Three non-obvious ones:
 
-* **`f.json()` is `any`, not `unknown`.** This is a deliberate trade-off.
-  forge has no idea what shape lives inside a JSON column, and `unknown`
-  would force every consumer to narrow before reading. `any` keeps
-  reads ergonomic; pair with `f.embed(() => Type)` when you do know
-  the shape and want to keep type safety.
+* **`f.json()` takes a type parameter.** `f.json<{ tags: string[] }>()`
+  carries that shape into the row type, the `create` input and the
+  `update` input — one declaration, typed on both sides. This has been
+  true since 2.6.4 and is easy to miss, so it is worth saying plainly:
+  you do not have to choose between a JSON column and type safety, and
+  you do not need `f.embed()` just to get a shape.
+
+  A bare `f.json()` is `unknown`, not `any`, so it forces the consumer
+  to narrow rather than handing back something that silently accepts
+  every property access. `f.json<any>()` opts back into the old
+  behaviour if you want it.
+* **`f.bytes()` is `Uint8Array`, and a string is not accepted.** Writes
+  take a `Uint8Array`, a Node `Buffer`, an `ArrayBuffer` or any
+  `ArrayBufferView`; a base64 string throws at runtime with the decode
+  call in the message. Reads always hand back something that *is* a
+  `Uint8Array` — on Node usually the driver's `Buffer`, a subclass — so
+  write against the `Uint8Array` surface and the same code runs in the
+  browser. See [BINARY](./BINARY.md).
 * **`f.decimal()` is `string`, not `number`.** JavaScript numbers can't
   represent every decimal (money is the standard example), so forge
   surfaces decimals as strings on both sides. The DB driver does the
@@ -262,8 +278,35 @@ side: every field is present, with `optional()` fields surfacing as
 `T | null`.
 
 The same logic applies to `InferUpdate`: every field is optional (you're
-patching, not replacing), and numeric fields gain the atomic-op shape
-(`{ increment: 1 }` etc.) on top of the plain value.
+patching, not replacing), and a field gains the operator shape on top of
+its plain value.
+
+**The operator shape is derived from the column**, so autocomplete
+offers only what applies:
+
+| Column kind                                   | Operators offered                                                        |
+|-----------------------------------------------|--------------------------------------------------------------------------|
+| numeric (`int` / `float` / `decimal` / `bigint`) | `increment`, `decrement`, `multiply`, `divide`, `max`, `min`, `set`, `unset` |
+| list (`stringArray` / `intArray`)             | `push`, `addToSet`, `pull`, `set`, `unset`                               |
+| everything else                               | `set`, `unset`                                                           |
+
+```ts
+type PostUpdate = InferUpdate<typeof Post>;
+// views: number | { increment?: number; max?: number; … } | null | …
+// tags:  string[] | { push?: string | string[]; addToSet?: …; pull?: string } | …
+```
+
+`max` / `min` / `addToSet` / `pull` are new in 2.18.0, and `push` and
+`unset: true` are only *typed* from 2.18.0 — `push` had existed in the
+IR since 2.2 but was never on the update type, so it was a documented
+operator that would not typecheck. If you wrote `data: { tags: { push: x } as any }`
+to get around that, the cast is no longer needed.
+
+The typed shape does not know which dialect you are on, and `addToSet`
+and `pull` are genuinely unavailable on some — they typecheck and then
+throw with a named error. See
+[MUTATIONS](./MUTATIONS.md#list-column-ops--push-addtoset-pull) for the
+support matrix.
 
 ---
 
@@ -358,6 +401,75 @@ the file where `User` is defined.
 
 ---
 
+## Reaching a model by name at runtime
+
+`db` is a Proxy, not a plain object, so a model can be reached with a
+name computed at runtime. This works and is supported; it is easy to
+miss because nothing in the type surface advertises it.
+
+```ts
+const name = req.params.model;          // a string, only known at runtime
+
+if (!(name in db)) return notFound();   // never throws
+const rows = await db[name].findMany({ where: { org_id: orgId } });
+```
+
+Three pieces:
+
+| Expression         | Behaviour                                                                 |
+|--------------------|---------------------------------------------------------------------------|
+| `db[someString]`   | resolves the model wrapper, or **throws** if the schema has no such model |
+| `'Name' in db`     | an honest, non-throwing probe — the Proxy implements the `has` trap       |
+| `db.$models`       | the full sorted list of registered model names                            |
+
+Reading an unknown model throws on purpose: a typo'd name should fail at
+the property access, with a message naming the schema's real models,
+rather than surfacing as `Cannot read properties of undefined` a few
+frames later in someone else's code.
+
+That is also why `?.` and `??` do not help here — the throw happens
+*during* the property read, so neither operator ever runs. `in` is the
+only safe probe. It is exact and case-sensitive (`'user' in db` is
+`false` when the model is registered as `User`) and it reports the `$`
+helpers too, so `'$transaction' in db` is `true`.
+
+Both work inside `$transaction`, where the handle reports only what it
+serves — `'$migrate' in tx` is `false`.
+
+```ts
+db.$models                  // ['Gadget', 'Widget']
+Object.keys(db)             // [] — by design
+```
+
+`Object.keys(db)` is empty deliberately. Making the model keys
+enumerable would mean `JSON.stringify(db)` walked every collection
+wrapper. Use `$models`.
+
+**Typing the indexed access.** `db[name]` where `name: string` gives
+you the union of every model's wrapper, which is usually not what you
+want to hand onwards. Narrow it first:
+
+```ts
+function modelKey(s: string): keyof ForgeModels | null {
+  return (s in db ? (s as keyof ForgeModels) : null);
+}
+```
+
+### Return types that are less mysterious than they look
+
+Two that get mistaken for `unknown` often enough to be worth stating:
+
+- `count()` returns `Promise<number>`. Not a wrapper object, not
+  `unknown` — the number itself. `count({ where })` and
+  `count({ distinct: ['col'] })` are the same.
+- `update()`, `upsert()`, `delete()`, `softDelete()` and `restore()`
+  all return the affected **row**, not a count. The `*Many` verbs
+  return `{ count: number }`. This is the asymmetry described in
+  [MUTATIONS](./MUTATIONS.md) — and the reason `updateMany` followed by
+  a re-read is a round trip you do not need to pay for.
+
+---
+
 ## Optional vs nullable
 
 TypeScript has two ways to say "this field might not be there":
@@ -400,6 +512,44 @@ DB, there's no "absent" — the column has *some* value, which might be
 For json/jsonb columns there's a third axis: SQL NULL vs JSON null. See
 [the null-markers section](#defaults-updatedat-generated-columns) below
 and **[docs/JSON-PATH.md](./JSON-PATH.md)** for the full story.
+
+### An `.optional()` column keeps its full operator set
+
+This one has cost real query performance, so it gets its own heading:
+**`.optional()` does not take the range operators away.** An optional
+`f.dateTime()` gets `lt`, `lte`, `gt`, `gte`, `equals`, `not`, `in` and
+`notIn`, exactly like a required one:
+
+```ts
+const Invoice = model('invoices', {
+  id:        f.id(),
+  posted_at: f.dateTime().optional(),   // nullable column
+});
+
+// This typechecks. It always has.
+await db.invoice.findMany({ where: { posted_at: { gte: from, lt: to } } });
+```
+
+`ScalarFilterFor` builds the operator set from `NonNullable<T>`, which
+is there precisely to handle this case — the `| null` is stripped before
+the operators are derived, so the filter for `Date | null` is the filter
+for `Date`.
+
+Two workarounds get reached for when people believe otherwise, and both
+are worse than the thing they are working around:
+
+- widening `where` to `Record<string, unknown>` or `as any`, which turns
+  off the checking on the whole filter, including the parts that were
+  right;
+- fetching the collection and filtering in JS, which turns an index
+  range scan into a full scan. On a table of any size that is the
+  difference between milliseconds and seconds, and it gets worse every
+  week the table grows.
+
+If you hit a type error on a range filter, the cause is something else —
+a typo in the field name, a `mode` key on a non-string, or strict mode
+rejecting an unknown operator (the message names it). Read the error
+before widening the type.
 
 ---
 
@@ -1159,10 +1309,21 @@ forge does and does not catch:
   `User.id`. The `.relate()` declaration ties them together at runtime
   (cascade, nested writes), but a typo in the FK column value at create
   time will fail with a DB-side FK violation, not at compile time.
-* **No type-level unique-combo check beyond `WhereUnique`.** The
-  composite-unique synthetic-key form (`orgId_slug: { … }`) is
-  recognised, but `where: { orgId_slug: { orgId } }` (missing `slug`)
-  typechecks and only fails at runtime.
+* **No unique-combo check, and no narrowing to unique fields at all.**
+  `WhereUnique` is not a narrowed type: `InferWhereUnique` is
+  `Partial<WhereInput>`, so every verb — `findUnique`, `update`,
+  `upsert`, `delete` — accepts the full filter. A non-unique selector
+  is not a compile error and is not a runtime error either; the
+  single-row verbs simply affect one unspecified matching row. See
+  [MUTATIONS](./MUTATIONS.md#updates-where-is-a-full-filter-not-a-unique-selector).
+
+  The composite-unique synthetic-key form (`orgId_slug: { … }`)
+  typechecks in a `where` because of the loose index signature, but it
+  is **not** supported there: it reaches the runtime as a field named
+  `orgId_slug` carrying an operator object, and throws
+  `[forge] unknown operator 'orgId'`. Write the fields out —
+  `where: { orgId, slug }`. `cursor` is the one place the synthetic key
+  does work, because the cursor builder flattens it.
 * **Required fields aren't surfaced on `Create`.** Every scalar is
   marked optional; required-vs-defaulted is enforced at the DB layer
   (NOT NULL → driver error). See section B2 of `typesafety-demo.ts`.
@@ -1174,9 +1335,10 @@ forge does and does not catch:
   `include` / `select` args fall back to `LooseRelationArgs` (loose).
   This is a TS-perf cap (`Decrement<N>` only counts to 10); deep
   cycles still resolve, they just type loosely past depth 10.
-* **`f.json()` is `any`, not `unknown`.** Convenience win at the cost
-  of type-checking inside the JSON. Use `f.embed(() => Type)` when you
-  know the shape.
+* **A bare `f.json()` is `unknown`.** Not a limitation so much as a
+  prompt: pass the shape — `f.json<Shape>()` — and it flows through row,
+  create and update. `f.embed(() => Type)` is the other option, and the
+  one to reach for when you also want the fields indexable.
 * **`f.string()` doesn't take a TypeScript generic.** Narrow string
   columns to a literal set via `f.enumOf([...] as const)`; cast at the
   call site if you have a wider domain type you want to thread through.

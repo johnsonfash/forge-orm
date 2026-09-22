@@ -219,6 +219,7 @@ The README is the surface reference. For more depth — extra examples, edge cas
 |---|---|
 | Model definition — full field catalogue, id strategies, enums, views, generated columns, schema namespacing, 5 worked schemas | **[docs/MODEL.md](docs/MODEL.md)** |
 | Embeds — `f.embed`/`f.embedMany`/`f.json`, indexing into embeds, Mongo `$elemMatch`, JSON-null markers, shape migration, 5 worked patterns | **[docs/EMBED.md](docs/EMBED.md)** |
+| Binary columns — `f.bytes()`, per-dialect storage, `maxBytes` enforced everywhere, why base64 is refused, the typed-array view window, driver unwrapping, drift detection | **[docs/BINARY.md](docs/BINARY.md)** |
 | Relations — one/many/inverse/cascade, join tables, polymorphic, self-ref, deep includes, 6 worked patterns | **[docs/RELATIONS.md](docs/RELATIONS.md)** |
 | Indexes — every `IndexDef` field, partial-filter, expression, INCLUDE, method matrix, drift detection, 6 worked patterns | **[docs/INDEXES.md](docs/INDEXES.md)** |
 | Type safety — `Row`, every `Infer*` helper, `ForgeOf` / `ForgeModels`, autocomplete tricks, generics, 5 worked patterns | **[docs/TYPES.md](docs/TYPES.md)** |
@@ -380,6 +381,20 @@ this out.
 
 Full release history is in [CHANGELOG.md](./CHANGELOG.md). Recent highlights:
 
+- **2.18 — three things that silently returned or wrote wrong data.** A
+  keyset cursor ignored the sort direction, so `orderBy: { createdAt:
+  'desc' }` with a cursor asked for rows *greater* than the last row
+  seen and page 2 re-served page 1. Mongo `update` never coerced its
+  values, so an id string written through `update` was stored as a
+  BSON `String` where `create` would have stored an `ObjectId` — and
+  because `where` does coerce, those rows became invisible to every
+  later query. Nested `take` / `skip` applied to the whole batch
+  instead of per parent, so `include: { posts: { take: 3 } }` over ten
+  users returned three posts *in total*. Also: `divide` is an exact
+  division rather than a multiply-by-reciprocal, a Mongo relation
+  filter throws instead of matching every row in the collection, and
+  `f.bytes()` is a real binary field kind — see
+  [docs/BINARY.md](docs/BINARY.md).
 - **2.7 — malformed queries throw instead of silently doing something
   else.** Unknown `where` operators (`$gte`, `contians`) used to be
   dropped from the tree, so the filter matched **every row**; typoed
@@ -1053,7 +1068,8 @@ of them.
 | `f.uuid({ default? })`               | `string`                         | UUID. Pass `{ default: 'gen_random_uuid' }` for a server-side default on PG / MySQL.        |
 | `f.bool()`                           | `boolean`                        | Stored as 0/1 on MySQL and SQLite, decoded back to a boolean.                               |
 | `f.dateTime()`                       | `Date`                           | Timestamp. Accepts a `Date` or an ISO string on input.                                      |
-| `f.json()`                           | `any`                            | Arbitrary JSON. `jsonb` on Postgres, `JSON` on MySQL / MSSQL, `TEXT` on SQLite.             |
+| `f.json<T>()`                        | `T` (default `unknown`)          | Arbitrary JSON, optionally typed. `f.json<{ tags: string[] }>()` carries the shape into the row, create and update types; bare `f.json()` is `unknown`, so callers must narrow. `jsonb` on Postgres, `JSON` on MySQL / MSSQL, `TEXT` on SQLite. |
+| **`f.bytes({ maxBytes? })`**         | **`Uint8Array`**                 | **Raw binary — a file, a thumbnail, a hash, an encrypted blob. PG `bytea` / SQLite + DuckDB `BLOB` / MySQL smallest blob class that fits `maxBytes` / MSSQL `VARBINARY(n)` or `(MAX)` / Mongo `BinData` / IndexedDB the typed array. Never base64 — a base64 string is refused with the decode call in the message. `maxBytes` is enforced on write on every dialect. See [docs/BINARY.md](docs/BINARY.md).** |
 | `f.enumOf(['A','B'] as const)`       | `'A' \| 'B'`                     | A fixed set of string values, checked by the database where supported.                     |
 | `f.embed(Shape)`                     | `Shape`                          | One nested object. Stored as JSON on SQL, sub-document on Mongo.                            |
 | `f.embedMany(Shape)`                 | `Shape[]`                        | A list of nested objects. Defaults to `[]`.                                                 |
@@ -1320,6 +1336,22 @@ await db.post.findMany({
 });
 ```
 
+`undefined` is skipped, so `where: { status: maybeStatus }` means "don't
+filter on status when I don't have one". But a filter whose values are
+**all** `undefined` is refused, because that used to mean "every row":
+
+```ts
+await db.account.deleteMany({ where: { tenant_id: req.user?.tenantId } });
+// [forge] deleteMany on 'accounts' was given a filter whose every value is
+// undefined (tenant_id), so it would apply to EVERY row.
+```
+
+Before 2.18 that compiled to `DELETE FROM "accounts"` — one optional
+chain emptied a tenant table. Omitting `where`, or passing `where: {}`,
+still means every row; that is how you say it on purpose. A partly
+undefined filter (`{ a: 'x', b: undefined }`) is unaffected. See
+[docs/MUTATIONS.md](docs/MUTATIONS.md#a-filter-whose-values-all-vanished-is-refused).
+
 ### Operator reference
 
 All operators, with the field kinds they apply to.
@@ -1329,13 +1361,13 @@ All operators, with the field kinds they apply to.
 | `equals` / `=`  | every field                             | exact match (same as passing a value directly)                          |
 | `not`           | every field                             | inverse of `equals` (accepts a value or a nested filter)                |
 | `in`            | every field                             | value is one of an array                                                |
-| `notIn`         | every field                             | value is not in an array                                                |
+| `notIn`         | every field                             | value is not in an array. An empty list is a constant — `in: []` matches nothing, `notIn: []` matches everything — which is what an empty `.map()` produces. Correct on every dialect since 2.18; it used to emit a bare `TRUE`/`FALSE`, a syntax error on MSSQL |
 | `lt` / `lte` / `gt` / `gte` | numbers, dates, strings    | range comparisons                                                       |
 | `contains`      | strings                                 | substring match (`LIKE %x%`)                                            |
 | `startsWith`    | strings                                 | prefix match (`LIKE x%`)                                                |
 | `endsWith`      | strings                                 | suffix match (`LIKE %x`)                                                |
-| `mode: 'insensitive'` | strings                           | case-insensitive variant of the text operators                          |
-| `has`           | `stringArray` / `intArray` / `embedMany` | the list contains the given value                                       |
+| `mode: 'insensitive'` | strings                           | case-insensitive variant of the text operators. Works on every dialect since 2.18 — before that the shared compiler emitted Postgres's `ILIKE` everywhere, so it was a syntax error on MySQL, SQLite and MSSQL |
+| `has`           | `stringArray` / `intArray` / `embedMany` | the list contains the given value. `has` / `hasEvery` / `hasSome` / `isEmpty` work on every dialect since 2.18 — before that they emitted Postgres array operators, so a list column was writable and readable but not *filterable* on MySQL, SQLite or MSSQL |
 | `hasEvery`      | array fields                             | the list contains all of the given values                               |
 | `hasSome`       | array fields                             | the list contains at least one of the given values                      |
 | `isEmpty`       | array fields                             | `length === 0`                                                          |
@@ -1395,7 +1427,9 @@ const full = await db.user.findFirst({
   include: { posts: { include: { comments: true } } },
 });
 
-// you can filter and limit an included relation
+// you can filter and limit an included relation. `take` is PER PARENT
+// (fixed in 2.18 — it used to cap the whole batch), which costs one query
+// per parent; without inner paging the include stays a single batched query.
 await db.user.findFirst({
   include: { posts: { where: { status: 'PUBLISHED' }, orderBy: { created_at: 'desc' }, take: 5 } },
 });
@@ -1415,8 +1449,9 @@ await db.post.findMany({
   skip:    40,                          // offset
 });
 
-// cursor pagination, for stable paging over large sets
-await db.post.findMany({ take: 20, cursor: { id: lastSeenId }, skip: 1 });
+// cursor pagination, for stable paging over large sets.
+// The cursor is EXCLUSIVE — the cursor row is not returned, so no `skip: 1`.
+await db.post.findMany({ orderBy: { id: 'asc' }, take: 20, cursor: { id: lastSeenId } });
 ```
 
 See more — **[docs/QUERIES.md](docs/QUERIES.md)** for every operator with per-dialect SQL/Mongo emit, cursor pagination, distinct, streaming internals, common bugs, and eight worked queries. **[docs/AGGREGATIONS.md](docs/AGGREGATIONS.md)** for count/sum/avg/groupBy/having dashboards. **[docs/WINDOWS.md](docs/WINDOWS.md)** for ROW_NUMBER / LAG / LEAD / moving averages / sessionization. **[docs/PAGINATION.md](docs/PAGINATION.md)** for cursor vs offset vs keyset and Relay/REST response shapes. **[docs/STREAMING.md](docs/STREAMING.md)** for `findManyStream` internals per driver. **[docs/N-PLUS-ONE.md](docs/N-PLUS-ONE.md)** for the canonical query-explosion prevention patterns.
@@ -1457,16 +1492,35 @@ outright. All four are compiled to a single atomic write per dialect.
 await db.post.update({
   where: { id: 'p1' },
   data: {
-    views:     { increment: 1 },     // also: decrement, multiply, divide, set
-    score:     { multiply: 2 },
-    rank:      { divide: 2 },
-    published: true,
+    views:      { increment: 1 },    // also: decrement, multiply, divide, set
+    score:      { multiply: 2 },
+    rank:       { divide: 2 },
+    high_score: { max: 9001 },       // clamp: write only if higher (2.18)
+    floor:      { min: 3 },          // clamp: write only if lower (2.18)
+    tags:       { push: 'urgent' },  // list columns: push / addToSet / pull
+    published:  true,
   },
 });
 ```
 
+`max` and `min` clamp in place — "record this if it is the best so far"
+without a read-compare-write. The list ops work on `f.stringArray()` and
+`f.intArray()`; `addToSet` and `pull` are **not available on SQLite or
+MSSQL, and `pull` is not on MySQL**, because those dialects store these
+columns as JSON and JSON has no portable value-based remove. An
+unsupported combination throws, naming the dialect. Full matrix in
+[docs/MUTATIONS.md](docs/MUTATIONS.md#list-column-ops--push-addtoset-pull).
+
 Pair an atomic op with `col()` in `where` for a single-statement, race-safe
 guard (see [Comparing two columns](#comparing-two-columns-col)).
+
+`divide` is an exact division since 2.18 — it used to be rewritten as
+`multiply: 1 / n`, which drifted on a `decimal` money column and rounded an
+`int`. Every SQL dialect now emits `col = col / $n`; Mongo needs an
+aggregation-pipeline update (4.2+) to get a real `$divide`, which means a
+`divide` cannot be combined with `upsert` there — that combination throws
+with instructions to split it. See
+[docs/MUTATIONS.md](docs/MUTATIONS.md#divide-is-an-exact-division-2180).
 
 Operator objects are validated against the column (since 2.7): a typo like
 `{ incrment: 5 }`, a numeric op on a string column, or two ops in one

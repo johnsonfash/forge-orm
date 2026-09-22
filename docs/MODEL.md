@@ -29,6 +29,7 @@ Related deep-dives:
   * [Boolean and dateTime](#boolean-and-datetime)
   * [`f.enumOf(...)`](#fenumof)
   * [`f.json()`](#fjson)
+  * [`f.bytes()`](#fbytes)
   * [`f.embed()` and `f.embedMany()`](#fembed-and-fembedmany)
   * [`f.stringArray()` and `f.intArray()`](#fstringarray-and-fintarray)
   * [`f.geoPoint()`](#fgeopoint)
@@ -239,6 +240,40 @@ work uniformly across all six — see [JSON-PATH.md](./JSON-PATH.md).
 different keys, or you want to keep extra payload without growing the
 column count. If the shape is fixed and known, prefer `f.embed()` —
 queries inside it stay typed.
+
+`f.json()` takes a type parameter: `f.json<{ tags: string[] }>()`
+carries that shape into the row type, the `create` input and the
+`update` input. Bare `f.json()` is `unknown`, which forces the caller
+to narrow rather than handing back `any`.
+
+### `f.bytes()`
+
+Raw binary, typed as `Uint8Array`. New in 2.18.0.
+
+```ts
+body: f.bytes(),                     // no declared ceiling
+etag: f.bytes({ maxBytes: 32 }),     // a 32-byte hash, never more
+```
+
+| Dialect | Storage |
+|---|---|
+| PG | `bytea` |
+| MySQL | smallest blob class that fits `maxBytes` (`LONGBLOB` when undeclared) |
+| SQLite | `BLOB` |
+| DuckDB | `BLOB` |
+| MSSQL | `VARBINARY(n)` when `maxBytes <= 8000`, else `VARBINARY(MAX)` |
+| Mongo | BSON `BinData` |
+| IndexedDB | the typed array itself |
+
+Writes take a `Uint8Array`, a Node `Buffer`, an `ArrayBuffer` or any
+typed-array view. A base64 or hex **string** is refused, because base64
+in a text column costs 33% extra storage and bandwidth for the life of
+the table. `maxBytes` is checked on write on every dialect, not only on
+the ones whose column type carries a length.
+
+**Use when:** the value is bytes — a file, a thumbnail, a content hash,
+a signature, an encrypted blob. Full reference:
+[BINARY.md](./BINARY.md).
 
 ### `f.embed()` and `f.embedMany()`
 

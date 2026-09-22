@@ -12,7 +12,7 @@ import { buildCursor } from './cursor';
 import { buildOrderBy } from './orderby';
 import { buildProjection } from './projection';
 import { buildUpdateData } from './data';
-import { buildWhereTree, type SchemaContext } from './where';
+import { buildWhereTree, vanishedWhereError, whereVanished, type SchemaContext } from './where';
 
 // High-level entrypoints used by CollectionWrapper (and `compile.*` paths) to
 // turn user args into IR nodes. Each builder is pure — no driver imports.
@@ -44,11 +44,19 @@ export function buildSelect(
 ): SelectNode {
   const a = args ?? {};
   const { projection, hydration } = buildProjection(model, a, schema);
+  const where = buildWhereTree(model, a.where, schema);
+  if (whereVanished(a.where, where)) {
+    throw vanishedWhereError(
+      cardinality === 'one' ? 'findFirst/findUnique' : 'findMany',
+      model.collection,
+      a.where,
+    );
+  }
   const node: SelectNode = {
     kind: 'select',
     model: modelKey,
     cardinality,
-    where: buildWhereTree(model, a.where, schema),
+    where,
     projection,
     hydration: hydration ? materialiseHydration(hydration, schema) : undefined,
     orderBy: buildOrderBy(a.orderBy),
@@ -94,10 +102,14 @@ export function buildCount(
   schema?: SchemaContext,
 ): CountNode {
   const a = args ?? {};
+  const where = buildWhereTree(model, a.where, schema);
+  if (whereVanished(a.where, where)) {
+    throw vanishedWhereError('count', model.collection, a.where);
+  }
   return {
     kind: 'count',
     model: modelKey,
-    where: buildWhereTree(model, a.where, schema),
+    where,
     distinct: a.distinct?.length ? a.distinct : undefined,
   };
 }
@@ -147,14 +159,23 @@ export function buildUpdate(
   const { projection, hydration } = args.returning
     ? buildProjection(model, args.returning, schema)
     : {};
+  const where = buildWhereTree(model, args.where, schema);
+  if (whereVanished(args.where, where)) {
+    throw vanishedWhereError(args.many ? 'updateMany' : 'update', model.collection, args.where);
+  }
   return {
     kind: 'update',
     model: modelKey,
-    where: buildWhereTree(model, args.where, schema) ?? { kind: 'and', children: [] },
+    where: where ?? { kind: 'and', children: [] },
     set: frag.set,
     increment: frag.increment,
     multiply: frag.multiply,
+    divide: frag.divide,
+    max: frag.max,
+    min: frag.min,
     push: frag.push,
+    addToSet: frag.addToSet,
+    pull: frag.pull,
     unset: frag.unset,
     many: !!args.many,
     upsertCreate: args.upsertCreate,
@@ -179,10 +200,14 @@ export function buildDelete(
   const { projection } = args.returning
     ? buildProjection(model, args.returning, schema)
     : {};
+  const where = buildWhereTree(model, args.where, schema);
+  if (whereVanished(args.where, where)) {
+    throw vanishedWhereError(args.many ? 'deleteMany' : 'delete', model.collection, args.where);
+  }
   return {
     kind: 'delete',
     model: modelKey,
-    where: buildWhereTree(model, args.where, schema) ?? { kind: 'and', children: [] },
+    where: where ?? { kind: 'and', children: [] },
     many: !!args.many,
     returning: projection,
   };
@@ -235,11 +260,30 @@ export function buildGroupBy(
   args: BuildGroupByArgs,
   schema?: SchemaContext,
 ): GroupByNode {
+  const where = buildWhereTree(model, args.where, schema);
+  if (whereVanished(args.where, where)) {
+    throw vanishedWhereError('groupBy', model.collection, args.where);
+  }
+  // Each bucket is a field→boolean map, not a bare boolean. `_count: true`
+  // contributes no SELECT column, so it was silently dropped when another
+  // bucket was present and produced `SELECT  FROM …` — a syntax error — when
+  // it was the only one. Say what the shape is instead.
+  for (const bucket of ['_count', '_avg', '_sum', '_min', '_max'] as const) {
+    const v = (args as unknown as Record<string, unknown>)[bucket];
+    if (v === undefined || (typeof v === 'object' && v !== null)) continue;
+    throw new Error(
+      `[forge] groupBy on '${model.collection}': ${bucket} takes a map of fields, ` +
+      `not ${JSON.stringify(v)}. Use ` +
+      (bucket === '_count'
+        ? '`_count: { _all: true }` for the row count, or `_count: { <field>: true }`.'
+        : `\`${bucket}: { <field>: true }\`.`),
+    );
+  }
   return {
     kind: 'groupBy',
     model: modelKey,
     by: args.by,
-    where: buildWhereTree(model, args.where, schema),
+    where,
     having: normalizeHaving(args.having),
     _count: args._count,
     _avg: args._avg,

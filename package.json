@@ -1,7 +1,7 @@
 {
   "name": "forge-orm",
-  "version": "2.17.0",
-  "description": "Prisma-shape multi-database ORM/wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB & SQL Server from one codebase \u2014 typed geo / vector / JSON path / full-text search, no codegen, no query engine. Bring your own schema.",
+  "version": "2.18.0",
+  "description": "Prisma-shape multi-database ORM/wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB & SQL Server from one codebase — typed geo / vector / JSON path / full-text search, no codegen, no query engine. Bring your own schema.",
   "license": "MIT",
   "author": "johnsonfash",
   "homepage": "https://github.com/johnsonfash/forge-orm#readme",
@@ -155,6 +155,7 @@
     "forge:all": "npm run forge:check && npm run forge:integration && npm run forge:bench"
   },
   "peerDependencies": {
+    "@electric-sql/pglite": ">=0.2.0",
     "@sqlite.org/sqlite-wasm": ">=3.45.0",
     "better-sqlite3": "^11.0.0",
     "mongodb": "^6.0.0",
@@ -162,6 +163,9 @@
     "pg": "^8.0.0"
   },
   "peerDependenciesMeta": {
+    "@electric-sql/pglite": {
+      "optional": true
+    },
     "mongodb": {
       "optional": true
     },

@@ -12,6 +12,7 @@ isn't the right shape.
 
 * [What N+1 actually is](#what-n1-actually-is)
 * [How `include` solves it](#how-include-solves-it)
+* [Nested paging changes the query count](#nested-paging-changes-the-query-count)
 * [`select` for projection — avoiding over-fetch](#select-for-projection--avoiding-over-fetch)
 * [Nested `include` — N depth, perf curve, denormalisation](#nested-include--n-depth-perf-curve-denormalisation)
 * [The DataLoader pattern](#the-dataloader-pattern)
@@ -108,7 +109,9 @@ SELECT "id", "name", "email"
 
 Forge then walks the second result set, attaches each user to its
 matching post by id, and returns the hydrated array. The number of
-queries equals the **depth** of the include tree, not the breadth.
+queries equals the **depth** of the include tree, not the breadth — with
+one exception, which is the next section: a nested `take` or `skip` turns
+that relation level into one query per parent.
 
 ### Per-dialect emit
 
@@ -119,12 +122,14 @@ queries equals the **depth** of the include tree, not the breadth.
 | SQLite     | `SELECT …`   | `SELECT … FROM "users" WHERE "id" IN (?, ?, …)`                                         |
 | DuckDB     | `SELECT …`   | `SELECT … FROM "users" WHERE "id" IN (?, ?, …)`                                         |
 | MSSQL      | `SELECT …`   | `SELECT … FROM [users] WHERE [id] IN (@p1, @p2, …)`                                     |
-| Mongo      | `find(...)`  | `$lookup` against the related collection, unwound into the parent shape during hydration |
+| Mongo      | `find(...)`  | `find({ <fk>: { $in: [...] } })` against the related collection, joined client-side |
 
-On Mongo the related fetch happens inside the aggregation pipeline as a
-`$lookup` rather than a second round trip. The cost model is similar —
-one extra pipeline stage, not one extra query per parent — but the
-profile looks different in the slow-query log.
+Mongo runs the same plan as the SQL adapters — a second batched `find`,
+joined in the client. It does **not** use `$lookup` for hydration:
+`$lookup` is restricted on the protocol-compatible servers (Cosmos
+rejects it, DocumentDB supports a limited form), and a plain `find`
+composes better with nested `select` / `orderBy` / `take`. See
+[MONGO](./MONGO.md#relations-via-lookup-vs-application-side-hydration).
 
 ### Why not a single JOIN?
 
@@ -148,6 +153,70 @@ visible at five or six levels deep. If you're certain the cross product
 won't blow up — flat one-to-one shapes, a single shallow many — you can
 drop to `$queryRaw` and write the JOIN yourself; see
 [docs/RAW-SQL.md](./RAW-SQL.md).
+
+---
+
+## Nested paging changes the query count
+
+`include` costs one query per relation level — *unless* that level pages
+its own list. A nested `take` or `skip` means "give each parent its own
+page", and a single batched query cannot do that, so forge issues one
+query per parent instead.
+
+The decision is made in one shared place, `hydrateManyRelation` in
+`src/ir/hydrate-many.ts`, which all six adapters call:
+
+| Nested `take` / `skip` | Plan | Queries for N parents |
+|---|---|---|
+| absent | one batched `IN` query | 1 |
+| present | one query per parent, each with its own `LIMIT` / `OFFSET` | N |
+
+So `include: { posts: true }` over a hundred users is two queries, and
+`include: { posts: { take: 3 } }` over the same hundred users is a
+hundred and one. That is bounded by the outer `take` — page the parents
+and you bound the children — but it is worth knowing before you put a
+nested `take` in a list endpoint.
+
+### The bug this fixes
+
+Before 2.18.0 the inner `take` was folded into the batched query:
+
+```ts
+await db.user.findMany({ take: 10, include: { posts: { take: 3 } } });
+```
+
+```sql
+SELECT * FROM posts WHERE author_id IN (…10 authors…) LIMIT 3
+```
+
+Three posts total, not three per author. One author got three; the other
+nine came back with `posts: []`. Nothing errored, and nine empty arrays
+are indistinguishable from nine authors who have not posted — which is
+why this survived as long as it did. `skip` was wrong the same way: it
+skipped rows of the combined result, not of each parent's list.
+
+### Why not slice in memory?
+
+Fetching every child row in one batched query and slicing each parent's
+list client-side is one round trip, which sounds like the better trade
+until you look at the volume. It is **unbounded**: `take: 3` over ten
+authors with a hundred thousand posts each pulls a million rows across
+the wire to return thirty. One query per parent is bounded by the outer
+`take`, so the cost is something you can predict from the call site.
+
+If N queries is too many for your fan-out, you have three options:
+
+* **Page the parents harder.** A smaller outer `take` bounds N directly.
+* **Drop the nested paging** and slice in your own code — correct when
+  you know each parent has tens of children, not thousands. The
+  [worked example](#worked-examples) below shows both shapes side by
+  side.
+* **Write the window function yourself** in `$queryRaw`
+  ([docs/RAW-SQL.md](./RAW-SQL.md)). Forge does not emit one, but nothing
+  stops you.
+
+In both plans the nested `where` you passed is ANDed with the
+foreign-key filter, so nested filtering and nested paging compose.
 
 ---
 
@@ -525,10 +594,12 @@ await db.user.findFirst({
 ```
 
 Four sibling relations off one user is four round trips after the parent
-query. forge runs them in parallel — the wall clock is `max(rtt)`, not
-`sum(rtt)` — but the planner has to do four separate prepared-statement
-lookups with their own `ROW_NUMBER() OVER` windowing. On a busy database
-that's four contention points.
+query — and because each one carries a nested `take`, each is a
+per-parent query rather than a batched one. With a single parent that is
+four queries either way; fan the parent out to fifty users and it is 4 ×
+50. forge runs the four relations in parallel, so the wall clock is
+`max(rtt)` rather than `sum(rtt)`, but they are four separate contention
+points on a busy database.
 
 If the four lists are independent and the caller can render them
 asynchronously, run them as four explicit `findMany` calls in parallel
@@ -543,8 +614,8 @@ const [posts, comments, likes, follows] = await Promise.all([
 ]);
 ```
 
-Same wall clock, fewer cross-table dependencies for the planner, and
-each lookup hits its own index without the windowing wrapper. This is a
+Same wall clock, fewer cross-table dependencies for the planner, and one
+query per list instead of one per list per parent. This is a
 shape-of-call-site choice rather than a forge feature — both call shapes
 are valid.
 
@@ -1110,8 +1181,8 @@ async function recentPostsForUsers(userIds: string[]) {
 The trade-off: the single query pulls more rows than strictly needed
 (every post for every user, not just the top 5). For users with ten or
 fifty posts the over-fetch is small; for users with thousands it isn't.
-The per-parent windowed form using `take` inside `include` does the
-windowing at the database:
+The per-parent form using `take` inside `include` pushes the limit down
+to the database instead:
 
 ```ts
 async function recentPostsForUsers(userIds: string[]) {
@@ -1123,10 +1194,15 @@ async function recentPostsForUsers(userIds: string[]) {
 }
 ```
 
-`take: 5` inside `include` compiles to `ROW_NUMBER() OVER (PARTITION BY
-author_id ORDER BY created_at DESC) <= 5` on SQL, so the database does
-the windowing — at most five rows per user come back. See
-[docs/RELATIONS.md — Bounded children per parent](./RELATIONS.md#bounded-children-per-parent).
+`take: 5` inside `include` does **not** compile to a window function.
+There is no `ROW_NUMBER() OVER (PARTITION BY …)` anywhere in the
+adapters. It compiles to one query per user, each with its own
+`ORDER BY created_at DESC LIMIT 5`, so at most five rows per user come
+back — at the cost of one round trip per user. Pick between the two by
+which you would rather spend: rows on the wire, or queries. See
+[Nested paging changes the query count](#nested-paging-changes-the-query-count)
+and
+[docs/RELATIONS.md — Nested `take` and `skip` are per parent](./RELATIONS.md#nested-take-and-skip-are-per-parent).
 
 ---
 

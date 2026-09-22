@@ -1,6 +1,7 @@
 import type { FieldDef } from '../../schema/types';
 import type { Dialect } from '../postgres/dialect';
 import { toGeoWKT } from '../shared/wkt';
+import { jsonPathSpec } from '../json-path-spec';
 
 // SQLite dialect. Mostly Postgres-compatible (double-quoted idents, ON CONFLICT
 // upsert, NULLS FIRST/LAST since 3.30), but:
@@ -23,6 +24,44 @@ export const SqliteDialect: Dialect = {
     return '?';
   },
 
+  trueLiteral: 'TRUE',
+  falseLiteral: 'FALSE',
+
+  // SQLite's LIKE is already case-insensitive for ASCII, but not beyond it,
+  // and that is configurable per build. LOWER() on both sides is explicit.
+  caseInsensitiveLike(quotedColumn, patternExpr) {
+    return `LOWER(${quotedColumn}) LIKE LOWER(${patternExpr})`;
+  },
+
+  // Arrays are a JSON array in a TEXT column, so the filters go through
+  // json_each — which is what this file's header has claimed since the
+  // adapter was written, without it ever being implemented.
+  arrayFilter(op, quotedColumn, values, params) {
+    const ph = (v: unknown) => this.placeholder(params, v);
+    const each = `SELECT 1 FROM json_each(${quotedColumn}) WHERE value`;
+    switch (op) {
+      case 'has':      return `EXISTS (${each} = ${ph(values[0])})`;
+      case 'hasSome':  return `EXISTS (${each} IN (${values.map(ph).join(', ')}))`;
+      // Every candidate must appear: count the DISTINCT matches and require
+      // one per candidate. DISTINCT matters because the column may repeat a
+      // value, which would otherwise inflate the count.
+      case 'hasEvery':
+        return `(SELECT COUNT(DISTINCT value) FROM json_each(${quotedColumn}) ` +
+               `WHERE value IN (${values.map(ph).join(', ')})) = ${values.length}`;
+      case 'isEmpty':  return `COALESCE(json_array_length(${quotedColumn}), 0) = 0`;
+    }
+  },
+
+  // Arrays are JSON in a TEXT column here. `'$[#]'` is SQLite's append path.
+  arrayOp(op, quotedColumn, params, value) {
+    const p = () => this.placeholder(params, value);
+    switch (op) {
+      case 'push':     return `json_insert(${quotedColumn}, '$[#]', ${p()})`;
+      // No JSON_CONTAINS and no value→index lookup in core SQLite.
+      case 'addToSet': return null;
+      case 'pull':     return null;
+    }
+  },
   columnType(field: FieldDef) {
     switch (field.kind) {
       case 'id':
@@ -43,6 +82,7 @@ export const SqliteDialect: Dialect = {
       case 'bool':       return 'INTEGER';       // 0 / 1
       case 'dateTime':   return 'TEXT';           // ISO 8601 string
       case 'json':       return 'TEXT';           // JSON-encoded
+      case 'bytes':      return 'BLOB';
       case 'enum':       return 'TEXT';           // + CHECK
       case 'embed':      return 'TEXT';           // JSON
       case 'embedMany':  return 'TEXT';           // JSON array
@@ -128,9 +168,8 @@ export const SqliteDialect: Dialect = {
     return '0';
   },
 
-  jsonPathExpr(quotedCol, path) {
-    const pathSpec = '$' + path.map((s) => /^\d+$/.test(s) ? `[${s}]` : `.${s}`).join('');
-    return `json_extract(${quotedCol}, '${pathSpec.replace(/'/g, "''")}')`;
+  jsonPathExpr(quotedCol, path, _operand, params) {
+    return `json_extract(${quotedCol}, ${this.placeholder(params, jsonPathSpec(path))})`;
   },
 
   geoWithinPolygonClause(quotedCol, field, multiPolygon, params) {

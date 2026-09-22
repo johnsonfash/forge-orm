@@ -136,8 +136,15 @@ function projectForeignKeys(
   const out: IntrospectedForeignKey[] = [];
   const rels = typeof model.relations === 'function' ? model.relations() : {};
   for (const r of Object.values(rels) as RelationDef[]) {
-    const target = schema[(r as { model?: string }).model ?? ''];
+    // Same three skips the expected side applies (diff-core buildExpected,
+    // migrate-gen): the inverse side of a one-to-many holds no FK, and an
+    // `on` of kind `id` is the inverse side of a one-to-one — the constraint
+    // lives on the other table. Projecting them would put foreign keys in
+    // the snapshot that no database has.
+    if (r.inverse) continue;
+    const target = schema[r.target];
     if (!r.on || !r.refs || !target) continue;
+    if (!model.fields[r.on] || model.fields[r.on]?.kind === 'id') continue;
     out.push({
       name: `fk_${model.collection}_${r.on}`,
       column: r.on,

@@ -10,6 +10,7 @@
 // Outbound: identity — structured-clone already handed us the app shape.
 
 import type { ModelDef, FieldDef } from '../../schema/types';
+import { bytesForStore } from '../../bytes';
 
 export function coerceInbound(model: ModelDef<any>, row: Record<string, any>, opts: { forCreate?: boolean } = {}): Record<string, any> {
   const out: Record<string, any> = { ...row };
@@ -24,6 +25,12 @@ export function coerceInbound(model: ModelDef<any>, row: Record<string, any>, op
     }
     if (def.kind === 'dateTime' && typeof cur === 'string') {
       out[name] = new Date(cur);
+    }
+    // Structured clone stores a typed array natively, so there is nothing to
+    // encode — but the type and the maxBytes ceiling still have to be checked
+    // here, or IDB would accept a value every SQL dialect rejects.
+    if (def.kind === 'bytes') {
+      out[name] = bytesForStore(model.collection, name, def.maxBytes, cur);
     }
     if (def.updatedAt && opts.forCreate && !(name in row)) {
       out[name] = new Date();

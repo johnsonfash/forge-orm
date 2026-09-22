@@ -4,6 +4,613 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.18.0 — two injections, a filter that emptied tables, and the dialect leaks behind them
+
+**Minor, with several deliberate behaviour changes. Upgrade.** Almost
+everything here ran without complaint and produced the wrong answer, or
+gave the caller more reach than the endpoint did. Nothing threw, nothing
+logged, and two of them left data behind that needed a repair script.
+
+Three of these are security fixes and are the reason to upgrade now. The
+rest share one cause, described under
+[Dialect leaks](#dialect-leaks--the-shape-of-the-whole-release).
+
+### Security: SQL injection through a JSON path on MySQL
+
+`where: { meta: { path: ['a', 'b'], equals: x } }` interpolated the path
+into the SQL text after escaping it — and on MySQL the escaping applied
+two passes in the wrong order. A `'` became `\'`, and the second pass
+turned that into `\''`. MySQL reads `\'` as an escaped quote, so the
+*next* quote closed the string literal and everything after it in the
+path was executed as SQL.
+
+The path segments are fully caller-controlled. Any endpoint that let a
+user name a key inside a JSON column — a filter builder, a saved-view
+feature, a generic search API — was a full injection.
+
+The fix is not better escaping. The path is now **bound as a
+parameter** on MySQL, SQLite, DuckDB and MSSQL, built by a shared
+`jsonPathSpec()` (new `src/adapters/json-path-spec.ts`) and passed
+through a `params` argument added to `Dialect.jsonPathExpr`. There is no
+escaping left to get wrong, and the path no longer appears in the SQL
+text at all — so it will not show up in slow-query logs or `$explain`
+output either. Postgres was never affected; it uses operator syntax
+rather than a path string.
+
+### Security: identifier injection on MSSQL
+
+`MssqlDialect.quoteIdent` refuses a `]` and a NUL byte, which is what
+makes a bracket-quoted T-SQL identifier safe. The MSSQL compiler
+bypassed it at around fourteen sites, writing `` `[${k}]` `` directly.
+
+Worse, `update` and `upsert` take their column names straight from the
+caller's `data` object and never required them to exist in the model. So
+
+```ts
+update({ data: { "role] = 'admin', [x": 1 } })
+```
+
+closed the bracket and wrote a column the endpoint never exposed — a
+mass-assignment escalation on any handler that spread a request body
+into `data`. Every identifier now routes through a single `q()` helper
+that calls `quoteIdent`.
+
+### Security: an all-`undefined` `where` no longer means "every row"
+
+`undefined` is skipped throughout the query surface, which is what makes
+`where: { status: maybeStatus }` mean "don't filter on status". But when
+*every* value in a filter was `undefined`, the whole filter disappeared
+and the statement applied to the entire table:
+
+```ts
+await db.account.deleteMany({ where: { tenant_id: req.user?.tenantId } });
+// → DELETE FROM "accounts"        ← no WHERE at all
+```
+
+One optional chain that returned `undefined` emptied a tenant table. The
+single-row verbs were worse, not better: `delete({ where: { id: maybeId } })`
+compiled to `WHERE ctid = (SELECT ctid FROM "accounts" LIMIT 1)` and
+destroyed an **arbitrary** row.
+
+`buildSelect`, `buildUpdate`, `buildDelete`, `buildCount` and
+`buildGroupBy` now throw when a filter was written and none of its
+values survived:
+
+```
+[forge] deleteMany on 'accounts' was given a filter whose every value is
+undefined (tenant_id), so it would apply to EVERY row.
+  This is almost always an optional value that came back undefined — check
+  the source of 'tenant_id'.
+  To act on every row on purpose, omit `where` entirely.
+```
+
+The rule is exactly "keys were written, and none of them survived":
+
+| Call                                  | Meaning                     |
+|---------------------------------------|-----------------------------|
+| `where` omitted                       | every row — allowed         |
+| `where: {}`                           | every row — allowed         |
+| `where: { a: 'x', b: undefined }`     | filters on `a` — allowed    |
+| `where: { a: undefined }`             | **throws**                  |
+
+Partial `undefined` is untouched, which is the whole point of the
+feature. An omitted `where` and an explicit `where: {}` are how you say
+"every row" deliberately, and they are the escape hatch.
+
+This is a deliberate divergence from Prisma, which allows the
+all-`undefined` case and applies it to the whole table. Tests:
+`src/__tests__/vanished-where.spec.ts`.
+
+### The keyset cursor ignored the sort direction
+
+The comparison was a hardcoded `>` / `$gt`, whatever the `orderBy` said.
+So the single most common feed query there is —
+
+```ts
+await db.post.findMany({
+  orderBy: { created_at: 'desc' }, take: 20, cursor: { created_at: last },
+});
+```
+
+— asked for rows *greater* than the last row seen while walking
+downwards. Page 2 came back full of rows from page 1, and the user saw
+the same posts again. It is now `>` for `asc` and `<` for `desc`, per
+key.
+
+Composite cursors were wrong in a second way. When every key sorts the
+same direction the compiler now emits a row-value comparison,
+`(a, b) < ($1, $2)`, which an index on those columns satisfies with one
+range scan. When the directions are mixed — `{ score: 'desc' }, { id:
+'asc' }` — a row comparison cannot express it at all, because
+`(a, b) > (x, y)` applies one operator to the whole tuple, so it expands
+lexicographically instead:
+
+```sql
+(a < $1) OR (a = $1 AND b > $2) OR …
+```
+
+T-SQL has no row-value comparison, so `Dialect.rowValueComparison` is a
+new capability flag, `false` on MSSQL, and MSSQL takes the expansion
+even for uniform directions.
+
+Mongo had it worse. A composite cursor became
+
+```js
+{ $and: [ { a: { $gt: x } }, { b: { $gt: y } } ] }
+```
+
+which is not a tuple comparison. Given rows sorted by `(a, b)`, the row
+after `(5, 9)` is `(5, 10)` — and that row has `b = 10 > 9` but `a = 5`,
+which is not `> 5`, so the `$and` rejected it. Every row sharing the
+cursor's leading value was skipped. Mongo now uses the same `$or`
+lexicographic expansion.
+
+Note while you are here: forge's cursor is **exclusive** — it emits a
+strict `>` / `<` and the cursor row is never returned. Prisma's is
+inclusive, which is why Prisma code pairs `cursor` with `skip: 1`.
+Carrying that habit into forge skips one row per page. This is a
+deliberate divergence, now documented in
+[PAGINATION.md](docs/PAGINATION.md); several examples in the docs had it
+wrong and have been corrected.
+
+### Mongo `update` never coerced its values
+
+`create` coerced its payload by field kind. `where` coerced its leaves.
+`update` only renamed keys. So writing an id string to an
+`f.objectId()` column through `update` or `updateMany` stored a BSON
+`String` where `create` would have stored an `ObjectId`:
+
+```ts
+await db.session.create({ data: { location_id: id } });      // ObjectId
+await db.session.updateMany({ where: { … }, data: { location_id: id } });
+                                                             // String
+```
+
+And because `where` *does* coerce,
+`findMany({ where: { location_id: id } })` then searched for the
+ObjectId and silently never matched those rows. They were invisible, not
+missing. The same applied to dates: an ISO string handed to `update`
+stayed a string, so `gt` / `lt` filters stopped matching it.
+
+Nothing counted the rows, so nothing noticed. Undoing it needed a
+repair script, which is how it was found. `$set`, `$push`, `$addToSet`
+and `$pull` now coerce by field kind; `$inc`, `$mul`, `$max` and `$min`
+are left alone, because their operands are numbers.
+
+If you have written through `update` on Mongo on 2.17.0 or earlier,
+check for mixed types in `objectId` and `dateTime` columns before
+assuming the rows are gone.
+
+### Nested `take` / `skip` applied to the whole batch
+
+```ts
+await db.user.findMany({ take: 10, include: { posts: { take: 3 } } });
+```
+
+issued `SELECT … FROM posts WHERE author_id IN (…10 authors…) LIMIT 3`
+— three posts **in total**. The first author got three; the other nine
+got `[]`. `skip` skipped rows of the combined result, so it dropped
+whole authors.
+
+`take` and `skip` inside an `include` are per parent now. With no inner
+paging, the include is still the single batched `IN` query — that path
+is unchanged and still not N+1. With inner paging, it is one query per
+parent, bounded by the outer `take`. That cost is the point: the
+alternative is to fetch every child row and slice in memory, which is
+one round trip but unbounded — `take: 3` over ten authors with a hundred
+thousand posts each would pull a million rows to return thirty.
+
+Six near-identical copies of this loader, one per adapter, collapsed
+into one shared `hydrateManyRelation`.
+
+### `divide` was a multiply by the reciprocal
+
+`divide: 3` was rewritten into `multiply: 0.3333333333333333` in the IR,
+before any adapter could see it. An exact `decimal` money column drifted
+on every update; an `int` column rounded. `divide` is now its own IR op,
+every SQL dialect emits a native `col = col / $n`, IndexedDB divides,
+and `divide: 0` is refused when the update is built.
+
+Mongo has no `$div` update operator, so an exact divide compiles to an
+aggregation-pipeline update (MongoDB 4.2+) with a real `$divide`. Every
+other op in the same call is translated to the matching pipeline
+expression so the update stays one atomic statement, and literals are
+wrapped in `$literal` — inside a pipeline a bare string beginning with
+`$` is a *field reference*, so `{ name: '$5 off' }` would otherwise
+store the value of a field called `5 off`.
+
+### Dialect leaks — the shape of the whole release
+
+One cause sits behind the next four fixes and the MySQL injection above.
+The five SQL dialects share a compiler that was written against
+Postgres, and the non-Postgres adapters are that Postgres SQL with
+targeted rewrites applied. Any construct with no hook to rewrite it
+leaked Postgres syntax into a database that does not speak it. The
+symptom was never subtle when it surfaced — a syntax error — but it hid
+completely until someone used that feature on that dialect, which for
+several of these was nobody until now.
+
+Each of the four got a capability hook on `Dialect`, so the next one is
+a missing implementation rather than silently wrong SQL.
+
+**`mode: 'insensitive'` emitted `ILIKE` everywhere.** `contains` /
+`startsWith` / `endsWith` with `mode: 'insensitive'` — the most-used
+filter in the Prisma vocabulary — compiled to Postgres's `ILIKE`
+regardless of dialect, so on MySQL, SQLite and MSSQL the query did not
+return the wrong rows, it did not run:
+
+```
+near "ILIKE": syntax error
+```
+
+New `Dialect.caseInsensitiveLike`. SQLite emits
+`LOWER(col) LIKE LOWER(?)` (its built-in `LIKE` is case-insensitive for
+ASCII only, and that is a build option), MySQL and MSSQL emit their own
+forms, Postgres and DuckDB keep `ILIKE`.
+
+**`f.stringArray()` and `f.intArray()` were not filterable on three
+dialects.** `has` / `hasSome` / `hasEvery` / `isEmpty` emitted the
+Postgres array operators — `= ANY(col)`, `col && ARRAY[…]`,
+`col @> ARRAY[…]`, `array_length` — for every dialect. Postgres and
+DuckDB have real array columns; MySQL, SQLite and MSSQL store these
+kinds as JSON, so a declared field kind was writable and readable but
+**not filterable** on half the supported databases.
+
+New `Dialect.arrayFilter`:
+
+| Dialect  | `has` / `hasSome` / `hasEvery` / `isEmpty`                      |
+|----------|-----------------------------------------------------------------|
+| Postgres | `= ANY` / `&&` / `@>` / `array_length`                          |
+| DuckDB   | `list_contains` / `list_has_any` / `list_has_all` / `len`        |
+| MySQL    | `JSON_CONTAINS` / `JSON_OVERLAPS` / `JSON_CONTAINS` / `JSON_LENGTH` |
+| SQLite   | `json_each` / `json_array_length`                               |
+| MSSQL    | `OPENJSON`                                                      |
+
+The SQLite adapter's own file header had described the `json_each`
+approach since the adapter was written. It was never implemented. That
+comment is now true.
+
+**`push` emitted `array_append` everywhere**, a function that does not
+exist on MySQL, SQLite or MSSQL. New `Dialect.arrayOp` — see
+[new atomic operators](#new-atomic-operators-max-min-addtoset-pull) for
+the support matrix, which is not uniform and is not pretended to be.
+
+**`TRUE` and `FALSE` are not T-SQL.** An empty list in a filter compiles
+to a constant — `{ in: [] }` can never match, `{ notIn: [] }` always
+matches — and the constant was a bare `TRUE` / `FALSE`. On MSSQL that is
+a syntax error, and `in: []` is not an exotic input: it is what an empty
+`.map()` produces, so any "filter by the ids I selected" endpoint broke
+on zero selections. New `Dialect.trueLiteral` / `falseLiteral`, `'1=1'`
+and `'1=0'` on MSSQL.
+
+### New atomic operators: `max`, `min`, `addToSet`, `pull`
+
+`max` and `min` clamp a number in place — write the value only if it
+exceeds, or falls below, what is stored. `addToSet` appends to a list
+column only when the value is not already there; `pull` removes every
+occurrence.
+
+All four are in the **typed** update input now, along with `push` and
+`unset: true`. That matters more than it sounds: `push` existed in the
+IR since 2.2 but was never on `FieldUpdateValue`, so it was only
+reachable through the internal builder — a documented operator that
+would not typecheck. The typed shape is now derived from the column:
+numeric columns offer the numeric ops, list columns offer the array ops,
+and everything offers `set` and `unset`.
+
+`addToSet` and `pull` need a value-based contains or remove, and a
+JSON-backed array column cannot do that portably. Rather than emit
+something that quietly works for text arrays and not numeric ones, the
+dialects that cannot express an operation return nothing and the
+compiler raises an error naming the dialect and the column:
+
+| Dialect   | `push`                      | `addToSet` | `pull`   |
+|-----------|-----------------------------|------------|----------|
+| Postgres  | `array_append`              | yes        | yes      |
+| DuckDB    | `list_append`               | yes        | yes      |
+| Mongo     | `$push`                     | `$addToSet`| `$pull`  |
+| IndexedDB | in JS                       | yes        | yes      |
+| MySQL     | `JSON_ARRAY_APPEND`         | yes        | **no**   |
+| SQLite    | `json_insert '$[#]'`        | **no**     | **no**   |
+| MSSQL     | `JSON_MODIFY 'append $'`    | **no**     | **no**   |
+
+The error tells you to read the array, change it, and write the whole
+list back — or to move that collection to Postgres or DuckDB, whose
+array columns support it natively. MySQL's `pull` is refused
+specifically because removing by value needs the element's index first,
+and `JSON_SEARCH` returns a path only for strings.
+
+### `orderBy` on an aggregate bucket was silently dropped
+
+`orderBy: { _sum: { total: 'desc' } }` on a `groupBy` never reached the
+SQL or the Mongo pipeline. `buildOrderBy` had no branch for an aggregate
+bucket: the value is an object, but it has no `nearTo` and no string
+`sort`, so the entry fell through every case and was discarded. The
+compiler then saw an empty `orderBy` and emitted no `ORDER BY` at all.
+
+A mixed sort is what made this hard to catch. The plain-column entry
+survived and the aggregate entry did not, so
+
+```ts
+orderBy: [{ _sum: { total: 'desc' } }, { customer_id: 'asc' }]
+```
+
+came back ordered by `customer_id` — a result that *looks* sorted. "Top
+ten customers by lifetime value" therefore returned an arbitrary ten
+customers, and a dashboard renders that indistinguishably from the real
+answer.
+
+`OrderByEntry` gained an `agg?: { bucket, field }` marker and
+`buildOrderBy` recognises all five buckets. On SQL the groupBy compiler
+emits the aggregate **expression** rather than the SELECT-list alias:
+
+```sql
+ORDER BY SUM("orders"."total") DESC, "orders"."customer_id" ASC
+```
+
+That is deliberate. An alias reference would only work for a bucket that
+was also selected; the expression means you can order by an average you
+did not ask to return. `_count: { _all: 'desc' }` becomes
+`ORDER BY COUNT(*) DESC`. Mongo sorts on the `$group` output alias,
+`{ $sort: { __agg_sum_total: -1 } }`, which exists by that stage.
+
+A plain `findMany` drops an aggregate entry instead of emitting
+`"orders"."_sum"`, which would be a SQL error — an aggregate order only
+means something after a `GROUP BY`. Tests:
+`src/__tests__/aggregate-order.spec.ts`.
+
+### A bucket that is not a map of fields is refused
+
+`_count: true` reads naturally and was accepted, and it produced
+nothing: a bare bucket contributes **zero** SELECT columns. Alongside
+another bucket the key was simply absent from the result; on its own the
+statement came out as `SELECT  FROM "orders" …` and the driver reported
+a syntax error near `FROM`, pointing at the one part of the query that
+was fine.
+
+All five buckets now validate when the query is built:
+
+```
+[forge] groupBy on 'orders': _count takes a map of fields, not true. Use
+`_count: { _all: true }` for the row count, or `_count: { <field>: true }`.
+```
+
+The check is at IR-build time rather than in the type system, so it
+catches an untyped caller — a handler that forwards a parsed request
+body — as well as a mistyped one.
+
+### `aggregate({ _sum, _avg, _min, _max, _count })` now exists
+
+The docs had described a whole-table aggregate for a long time, on the
+strength of Prisma having one. The wrapper had only the Mongo pipeline
+escape hatch, so every one of those examples threw
+`[forge] aggregate() needs a pipeline`.
+
+It is now a real overload that delegates to `groupBy({ by: [] })` and
+unwraps the single-element array, so it works on every dialect and
+returns the payload directly:
+
+```ts
+const totals = await db.order.aggregate({
+  where:  { status: 'PAID' },
+  _sum:   { total: true },
+  _count: { _all: true },
+});
+// → { _sum: { total: 19872 }, _count: { _all: 187 } }
+```
+
+Zero matching rows returns the shape that was asked for rather than
+`undefined` — counts at `0`, every sum / avg / min / max `null` — so
+destructuring the result cannot throw on an empty filter. Note that the
+aggregates come back `null` and not `0`, which is SQL's answer and the
+one worth guarding with `?? 0` before formatting. `aggregate({ pipeline })`
+and `aggregate([...])` still route to the Mongo escape hatch.
+`_count` takes an object (`{ _all: true }`, or a column name for a
+non-NULL count) — see the bucket-shape guard above. Tests:
+`src/__tests__/aggregate-whole-table.spec.ts`.
+
+### Behaviour change: a Mongo relation filter throws
+
+A relation filter compiled to `{}` — match-all. Mongo has no join in a
+plain `find`, so there was nothing to compile, and match-all is the most
+dangerous answer available: the same compiler builds the filter for
+reads **and** for writes.
+
+```ts
+await db.post.deleteMany({ where: { author: { is: { email: 'x' } } } });
+// compiled to deleteMany({}) — the whole collection
+```
+
+A read just returned every document instead of the matching ones, with
+no error. It now throws, naming the relation and its mode, and showing
+the two-step rewrite (select the ids, then `where: { fk: { in: ids } }`)
+plus the `aggregate([{ $lookup: … }])` option for a single round trip.
+
+Breaking only in that code relying on the match-all now errors — which
+is the point.
+
+### Behaviour change: `divide` plus `upsert` throws on Mongo
+
+An aggregation-pipeline update has no `$setOnInsert`, so "divide the
+column if the row exists, seed it if it does not" cannot be one
+statement on Mongo. Rather than silently dropping one half, forge says
+so and tells you to split it: upsert the row first, then update with the
+divide.
+
+The one case that still works is when `create` seeds the *same* field
+the `divide` touches. That overlap already took the 2.7.0
+update-then-create fallback on Mongo, so it never reaches the pipeline
+compiler and never throws — it is two statements either way. SQL
+dialects are unaffected throughout: `INSERT … ON CONFLICT DO UPDATE SET
+col = col / $n` is one statement there.
+
+### New: `f.bytes()` — a real binary field kind
+
+This shipped in the tree without a changelog entry, so here it is
+properly. `f.bytes()` / `f.bytes({ maxBytes })` stores raw binary, typed
+as `Uint8Array`.
+
+| Dialect   | Column                                                        |
+|-----------|---------------------------------------------------------------|
+| Postgres  | `bytea`                                                       |
+| SQLite    | `BLOB`                                                        |
+| DuckDB    | `BLOB`                                                        |
+| MySQL     | smallest blob class that fits `maxBytes`, `LONGBLOB` undeclared |
+| MSSQL     | `VARBINARY(n)` when `maxBytes <= 8000`, else `VARBINARY(MAX)` |
+| Mongo     | BSON `BinData`                                                |
+| IndexedDB | the typed array itself                                        |
+
+Writes take a `Uint8Array`, a Node `Buffer`, an `ArrayBuffer` or any
+`ArrayBufferView`; a typed-array view keeps its own window, so storing
+`new Uint8Array(buf, 100, 4)` stores four bytes and not the kilobyte
+behind it. A base64 or hex **string** is refused, with the decode call
+in the message — base64 in a text column costs 33% extra storage,
+bandwidth and cache forever, and is the mistake this field kind exists
+to stop.
+
+`maxBytes` is enforced at runtime on every dialect, not only on the ones
+whose type carries a length, so the same write is accepted or rejected
+identically on Postgres and MySQL. It counts bytes, not elements.
+
+Reads hand back something that *is* a `Uint8Array`, so the row a server
+reads has the same usable type as the row a browser reads. On Node that
+is usually the driver's `Buffer`, a `Uint8Array` subclass, passed
+through rather than copied. `toBytes`, `isBytesInput`, `fromDriverBytes`
+and the type `BytesInput` are exported for code at the edges.
+
+Drift detection improved with it: `bytes` is now its own category and
+the binary type names (`bytea`, `blob`, `tinyblob`, `mediumblob`,
+`longblob`, `varbinary`, `binary`, `image`) are recognised on the
+database side. Before, a bytes column was uncategorised, and an
+uncategorised column is skipped — so a `bytea` that had silently become
+`text` was not reported as drift at all.
+
+Two bugs on the `update` path were found while documenting this and
+fixed before release. First, the update builder decides between "a
+value" and "an atomic operator" by asking whether the object has a key
+named `set` — and `Uint8Array.prototype.set` exists, so every bytes
+value took the operator branch and the *method* became the column
+value. It now checks `isBytesInput` first, and `bytes` joined the
+scalar kinds so a stray operator object on a bytes column is refused by
+name instead of written through. Second, per-dialect inbound coercion
+ran for `create`, `createMany` and `upsert`'s create block but never for
+`update`, so `maxBytes` went unenforced there and a base64 string was
+accepted and stored as text. A new `_coerceUpdateSet` runs it over an
+update's `set` at all four `buildUpdate` call sites.
+
+Mongo is deliberately left out of that step: its `coerceInbound` is the
+create-payload builder, and running it on an update would stamp create
+defaults onto the row. Mongo's update coercion comes from
+`remapAndCoerce` instead, as above.
+
+Full reference: [docs/BINARY.md](docs/BINARY.md).
+
+### A bundled app could not upgrade past 2.13.0
+
+`pglite-driver.ts` imported its optional peer with a literal specifier:
+
+```ts
+mod = await import(/* @vite-ignore */ '@electric-sql/pglite');
+```
+
+A bundler resolves a literal specifier at build time even inside a
+`try`/`catch`, and even behind `@vite-ignore` — that comment steers
+Vite's dynamic-import analysis, not esbuild's resolver. So any consumer
+that had never heard of PGlite failed to build from 2.14.0 onwards:
+
+```
+node_modules/forge-orm/dist/adapters/postgres/pglite-driver.js:112:89:
+ERROR: Could not resolve "@electric-sql/pglite"
+```
+
+There was no way to opt out short of installing a package the app does
+not use. The specifier now lives in a `const`, which a bundler cannot
+resolve statically, so the import stays a runtime one — which is the
+whole point of an optional peer. `@electric-sql/pglite` is also declared
+in `peerDependenciesMeta` as optional now, where it should have been all
+along; it was reachable in code while being absent from the manifest.
+
+Found by upgrading a real consumer rather than by reading: the library's
+own test suite never bundles itself, so nothing here could have caught
+it.
+
+### `forge diff --apply` and `forge rollback` no longer lie to the ledger
+
+Two mirror-image bugs in the migration ledger, both of which left
+`forge migrate status` disagreeing with the database.
+
+`forge diff --apply` recorded a migration as applied after running zero
+statements. That happens for real: a diff whose only entries are the
+SQLite "cannot `ALTER ADD FOREIGN KEY`" comment notes splits to no
+executable SQL. The migration file was written, the row was inserted,
+and the schema was unchanged — so the drift stayed, invisibly, and the
+next `diff` proposed it again. It now refuses, tells you the file
+contains comments only, and exits non-zero.
+
+`forge rollback` did the same thing in reverse: a `down` block with no
+statements ran nothing and then deleted the ledger row, leaving the
+database carrying the change while `status` reported the migration as
+pending — so the next `forge migrate` re-ran the `up`. `planRollback`
+now refuses, and says either to write the reverse SQL or to delete the
+row by hand if the migration genuinely has nothing to reverse.
+
+Separately, `forge generate` projected foreign keys into its snapshot
+that no database would ever have — the inverse side of a one-to-many
+holds no FK, and an `on` of kind `id` is the inverse side of a
+one-to-one, where the constraint lives on the other table. Every
+snapshot therefore disagreed with every introspection, and `generate`
+produced a spurious FK change on a schema that was already in sync.
+`projectForeignKeys` now applies the same three skips the expected side
+applies. Tests: `snapshot-foreign-keys.spec.ts`,
+`rollback-down-block.spec.ts`.
+
+### Docs
+
+The correctness fixes above turned up documentation describing
+behaviour that was never implemented. Retracted or corrected:
+
+- `update`'s `where` was documented as type-narrowed to the model's
+  unique fields, with a non-unique field described as a TypeScript
+  error. It never was — every verb takes the full `WhereInput`, and
+  `InferWhereUnique` is only `Partial<WhereInput>`. The advice that
+  followed from it ("use `updateMany` instead") sent readers down a
+  doubled round trip, because `update` already returns the row.
+- Per-parent `include` windowing was documented as compiling to
+  `ROW_NUMBER() OVER (PARTITION BY …)` on SQL and `$slice` on Mongo.
+  Neither exists anywhere in the tree; the real mechanism is the
+  per-parent query described above.
+- Soft-deleted rows were documented as hidden inside an `include`. They
+  are not — the filter is applied at the top level of `findMany`,
+  `findFirst`, `count` and `findManyStream` only, and relation
+  subqueries have no soft-delete awareness. Flagged as a known gap
+  rather than quietly rewritten.
+- `take: -N` was documented as a backwards page, with a described
+  implementation (flip the predicate, flip the `ORDER BY`, re-reverse
+  the array). None of it is implemented; the value is passed straight
+  through as the limit. Marked unsupported.
+- Several cursor examples paired `cursor` with `skip: 1`, which drops a
+  row against an exclusive cursor.
+- `aggregate({ _sum, _avg, … })` was documented across eight pages and
+  did not exist. So was `orderBy` on an aggregate bucket, in eight more
+  places. Both went the other way from the retractions above: the
+  capability was implemented rather than the examples removed, and they
+  are now true as written. The `_count: true` form in them was
+  corrected to `_count: { _all: true }`, which is the shape the
+  compiler reads — and is now the only one it accepts.
+- `createDb()` returns a Promise and has to be awaited. Unawaited,
+  `db.$models` is `undefined` and `'User' in db` is `false`, which
+  looks exactly like a schema that never registered.
+
+New page: [docs/BINARY.md](docs/BINARY.md).
+
+### Tests
+
+895 passing across 61 suites. New suites: `bytes.spec.ts`,
+`cursor-direction.spec.ts`, `nested-paging.spec.ts`,
+`vanished-where.spec.ts`, `aggregate-whole-table.spec.ts`,
+`aggregate-order.spec.ts`, `snapshot-foreign-keys.spec.ts`,
+`rollback-down-block.spec.ts`.
+
 ## 2.17.0 — per-dialect entry points
 
 **Minor.** A third way to connect, for the case the other two handle

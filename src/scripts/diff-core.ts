@@ -222,6 +222,7 @@ export function fieldCategory(kind: string): string | undefined {
     case 'bool': return 'bool';
     case 'dateTime': return 'datetime';
     case 'json': case 'embed': case 'embedMany': return 'json';
+    case 'bytes': return 'bytes';
     default: return undefined;   // arrays etc. — skip
   }
 }
@@ -236,6 +237,7 @@ export function dbTypeCategory(type: string): string | undefined {
   if (/^(bool|tinyint\(1\))/.test(t)) return 'bool';
   if (/^(timestamp|datetime|date|time)/.test(t)) return 'datetime';
   if (/^(json|jsonb)/.test(t)) return 'json';
+  if (/^(bytea|blob|tinyblob|mediumblob|longblob|varbinary|binary|image)/.test(t)) return 'bytes';
   return undefined;
 }
 

@@ -24,6 +24,7 @@ import { applyCascadesForDelete } from './cascade';
 import { notFoundError, rethrowMongoError } from './errors';
 import type { ObjectId } from 'mongodb';
 import { mongo } from './bson';
+import { hydrateManyRelation } from '../../ir/hydrate-many';
 
 interface ExecOpts { session?: ClientSession }
 
@@ -533,39 +534,14 @@ async function hydrateMany(
   targetModel: ModelDef<any>,
   session?: ClientSession,
 ): Promise<void> {
-  const parentRefs = unique(rows.map((r) => r[rel.refs]).filter(notNull));
-  if (parentRefs.length === 0) {
-    for (const r of rows) r[rel.name] = [];
-    return;
-  }
   const fkDef = getFieldDef(targetModel, rel.on);
-  const coerced = parentRefs.map((v) =>
-    coerceFieldValue(fkDef ?? targetModel.fields[rel.on] ?? { kind: 'objectId' } as any, v),
-  );
-  const subNode = mergeNested(rel, { cardinality: 'many' });
-  // Combine the nested.where (if any) with our IN-filter via AND.
-  const fkLeaf = { kind: 'leaf', field: rel.on, op: 'in', value: coerced } as const;
-  const where = subNode.where
-    ? { kind: 'and' as const, children: [subNode.where, fkLeaf] }
-    : fkLeaf;
-  const node: SelectNode = {
-    ...subNode,
-    kind: 'select',
-    model: rel.target,
-    cardinality: 'many',
-    where,
-  };
-  const found = await executeSelect(node, targetModel, { session });
-  const byParent = new Map<string, any[]>();
-  for (const t of found) {
-    const k = stringKey(t[rel.on]);
-    const list = byParent.get(k);
-    if (list) list.push(t);
-    else byParent.set(k, [t]);
-  }
-  for (const r of rows) {
-    r[rel.name] = byParent.get(stringKey(r[rel.refs])) ?? [];
-  }
+  await hydrateManyRelation({
+    rows, rel,
+    keyOf: stringKey,
+    mapRef: (v) =>
+      coerceFieldValue(fkDef ?? targetModel.fields[rel.on] ?? ({ kind: 'objectId' } as any), v),
+    runSelect: (node) => executeSelect(node, targetModel, { session }),
+  });
 }
 
 function mergeNested(rel: RelationPlan, fallback: { where?: any; cardinality: 'one' | 'many' }) {

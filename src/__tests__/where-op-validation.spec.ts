@@ -134,8 +134,14 @@ describe('cross-dialect compilation of the 2.7 where shapes', () => {
   it('dotted embed path emits native JSON access per dialect', () => {
     const node = buildSelect('user', user, { where: { 'address.city': 'sf' } }, 'many', schema as any);
     expect((sqlSelect(node, user) as any).sql).toContain(`"users"."address"->>'city' = $1`);
-    expect((sqlSelect(node, user, MysqlDialect as any) as any).sql).toContain(`JSON_EXTRACT(\`users\`.\`address\`, '$.city')`);
-    expect((sqlSelect(node, user, SqliteDialect as any) as any).sql).toContain(`json_extract("users"."address", '$.city')`);
+    // The path is bound as a parameter on every dialect that takes it as a
+    // string, so it no longer appears in the SQL text at all.
+    const my = sqlSelect(node, user, MysqlDialect as any) as any;
+    expect(my.sql).toContain('JSON_EXTRACT(`users`.`address`,');
+    expect(my.params).toContain('$.city');
+    const lite = sqlSelect(node, user, SqliteDialect as any) as any;
+    expect(lite.sql).toContain('json_extract("users"."address",');
+    expect(lite.params).toContain('$.city');
     expect((mongoSelect(node, user) as any).args.filter).toEqual({ 'address.city': 'sf' });
   });
 

@@ -36,16 +36,35 @@ outright. All four are compiled to a single atomic write per dialect.
 await db.post.update({
   where: { id: 'p1' },
   data: {
-    views:     { increment: 1 },     // also: decrement, multiply, divide, set
-    score:     { multiply: 2 },
-    rank:      { divide: 2 },
-    published: true,
+    views:      { increment: 1 },    // also: decrement, multiply, divide, set
+    score:      { multiply: 2 },
+    rank:       { divide: 2 },
+    high_score: { max: 9001 },       // clamp: write only if higher (2.18)
+    floor:      { min: 3 },          // clamp: write only if lower (2.18)
+    tags:       { push: 'urgent' },  // list columns: push / addToSet / pull
+    published:  true,
   },
 });
 ```
 
+`max` and `min` clamp in place — "record this if it is the best so far"
+without a read-compare-write. The list ops work on `f.stringArray()` and
+`f.intArray()`; `addToSet` and `pull` are **not available on SQLite or
+MSSQL, and `pull` is not on MySQL**, because those dialects store these
+columns as JSON and JSON has no portable value-based remove. An
+unsupported combination throws, naming the dialect. Full matrix in
+[docs/MUTATIONS.md](/reference/mutations#list-column-ops--push-addtoset-pull).
+
 Pair an atomic op with `col()` in `where` for a single-statement, race-safe
 guard (see [Comparing two columns](/guide/reading-data#comparing-two-columns-col)).
+
+`divide` is an exact division since 2.18 — it used to be rewritten as
+`multiply: 1 / n`, which drifted on a `decimal` money column and rounded an
+`int`. Every SQL dialect now emits `col = col / $n`; Mongo needs an
+aggregation-pipeline update (4.2+) to get a real `$divide`, which means a
+`divide` cannot be combined with `upsert` there — that combination throws
+with instructions to split it. See
+[docs/MUTATIONS.md](/reference/mutations#divide-is-an-exact-division-2180).
 
 Operator objects are validated against the column (since 2.7): a typo like
 `{ incrment: 5 }`, a numeric op on a string column, or two ops in one

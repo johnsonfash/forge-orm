@@ -44,10 +44,17 @@ doc assumes you already know `findMany`, `where`, `select`, and
 
 Five entry points, picked by what the caller wants back.
 
-- **`count({ where, distinct? })`** → `number`. "How many rows match."
+- **`count({ where, distinct? })`** → `Promise<number>`. "How many rows
+  match." It resolves to the number itself — not a wrapper object, not
+  `unknown`. `count({ distinct: ['col'] })` has the same return type.
 - **`aggregate({ where, _avg, _sum, _min, _max, _count })`** → one
-  `{ _avg, _sum, _min, _max, _count }` payload. "Overall sum / avg /
-  min / max across these rows." Equivalent to `groupBy` with `by: []`.
+  payload **object**, `{ _avg, _sum, _min, _max, _count }`. "Overall
+  sum / avg / min / max across these rows." Works on every dialect.
+  It is an overload over `groupBy({ by: [] })` — same IR, same SQL —
+  that unwraps the one-element array for you, so you get the object
+  and not `[{ … }]`. Forge picks this form over the Mongo pipeline
+  form below whenever any of `_count`, `_sum`, `_avg`, `_min`, `_max`
+  is present.
 - **`groupBy({ by, _avg, _sum, _min, _max, _count, where, having, orderBy, take, skip })`**
   → array of `{ <by-col>: value, _count?, _sum?, _avg?, _min?, _max? }`.
   "Per-group aggregates."
@@ -329,13 +336,40 @@ await db.order.aggregate({
   _avg:  { total: true },
   _min:  { total: true },
   _max:  { total: true },
-  _count: true,                  // top-level row count, no nesting
+  _count: { _all: true },        // COUNT(*) — the matched row count
 });
 // → { _sum: { total: 19_872, items_count: 187 },
 //     _avg: { total: 432.18 },
 //     _min: { total: 12 }, _max: { total: 4500 },
-//     _count: 46 }
+//     _count: { _all: 46 } }
 ```
+
+The return value is the payload object itself, so read straight off
+it — `result._sum.total`, `result._count._all`. There is no array to
+index into; that is the one difference from `groupBy({ by: [] })`,
+which is otherwise the same query.
+
+Every bucket is a **map of fields**, never a bare `true`. Use
+`_count: { _all: true }` for `COUNT(*)`, and `_count: { total: true }`
+for `COUNT("total")` — the count of rows where that column is not
+NULL.
+
+A bare `true` is refused when the query is built, on every dialect and
+for all five buckets:
+
+```ts
+await db.order.groupBy({ by: ['status'], _count: true });
+// [forge] groupBy on 'orders': _count takes a map of fields, not true.
+//   Use `_count: { _all: true }` for the row count, or `_count: { <field>: true }`.
+```
+
+The guard is new in 2.18.0, and it exists because the old failure was
+hard to read. A bare bucket contributed **zero** SELECT columns, so
+with another bucket present the key was simply missing from the result,
+and on its own the statement came out as `SELECT  FROM "orders" …` and
+the driver reported a syntax error near `FROM` — pointing at the one
+part of the query that was fine. The check runs at IR-build time rather
+than in the type system, so it catches an untyped caller too.
 
 Per-dialect emit (PG):
 
@@ -346,7 +380,7 @@ SELECT
   AVG("total")        AS "__agg_avg_total",
   MIN("total")        AS "__agg_min_total",
   MAX("total")        AS "__agg_max_total",
-  COUNT(*)            AS "__agg_count"
+  COUNT(*)            AS "__agg_count__all"
 FROM "order"
 WHERE "status" = $1 AND "created_at" >= $2;
 ```
@@ -354,6 +388,45 @@ WHERE "status" = $1 AND "created_at" >= $2;
 No `GROUP BY` — there is exactly one row in the result. On Mongo the
 `$group` stage uses `_id: null` and the executor unwraps the single
 document back into the `{ _sum, _avg, … }` payload.
+
+### Zero matching rows
+
+When the `where` matches nothing, `aggregate` still returns the shape
+you asked for rather than `undefined` or `{}`. Counts come back `0`;
+every `_sum`, `_avg`, `_min` and `_max` comes back `null`.
+
+```ts
+await db.order.aggregate({
+  where:  { status: 'NOPE' },
+  _sum:   { total: true },
+  _avg:   { total: true },
+  _count: { _all: true },
+});
+// → { _count: { _all: 0 }, _avg: { total: null }, _sum: { total: null } }
+```
+
+That guarantee is why destructuring the result cannot throw. What it
+does not do is hand you a number: `null` is not `0`, and the
+difference is invisible until a filter goes empty in production. A
+dashboard tile that does `_sum.total.toFixed(2)` throws
+`Cannot read properties of null (reading 'toFixed')` on the first
+empty month; one that
+interpolates `${_sum.total}` prints the string "null". JavaScript
+hides it in arithmetic — `null + 1` is `1` — so the bug survives
+every test that only exercises a non-empty table. Coerce at the read:
+
+```ts
+const { _sum, _count } = await db.order.aggregate({
+  where: filter, _sum: { total: true }, _count: { _all: true },
+});
+const revenue = (_sum.total ?? 0).toFixed(2);   // "0.00" on an empty filter
+const orders  = _count._all;                    // already 0, no coerce needed
+```
+
+This is a different cause from the all-NULL-column case in
+[Nullable handling](#nullable-handling) — there the rows exist and
+SQL's own `SUM` of all-NULL input is what returns NULL. Both land on
+`null`, so the same `?? 0` covers both.
 
 ---
 
@@ -501,8 +574,8 @@ float on Mongo. SQLite's `AVG` widens to `REAL` — the IEEE 754 double.
 For an integer-only running average, do the math yourself:
 
 ```ts
-const { _sum, _count } = await db.order.aggregate({ _sum: { items_count: true }, _count: true });
-const avgItems = _count > 0 ? _sum.items_count / _count : 0;
+const { _sum, _count } = await db.order.aggregate({ _sum: { items_count: true }, _count: { _all: true } });
+const avgItems = _count._all > 0 ? _sum.items_count / _count._all : 0;
 ```
 
 That's exact integer division on the way in and one float divide at
@@ -663,16 +736,50 @@ orderBy: { _sum: { total: 'desc' } }
 // or: orderBy: [{ _sum: { total: 'desc' } }, { status: 'asc' }]
 ```
 
-Emits `ORDER BY SUM("total") DESC` on SQL (every dialect re-emits the
-aggregate function rather than aliasing through the SELECT-list alias,
-which is portable enough); `{ $sort: { __agg_sum_total: -1 } }` on the
-Mongo alias.
+On SQL this emits the aggregate **expression**, not the SELECT-list
+alias:
+
+```sql
+ORDER BY SUM("orders"."total") DESC, "orders"."customer_id" ASC
+```
+
+`_count: { _all: 'desc' }` becomes `ORDER BY COUNT(*) DESC`. Emitting
+the expression rather than the alias is deliberate: it means you can
+sort on a bucket you did **not** also select, which an alias reference
+cannot do.
+
+```ts
+// order by average order value, without returning it
+await db.order.groupBy({
+  by: ['customer_id'],
+  _count: { _all: true },
+  orderBy: { _avg: { total: 'desc' } },
+});
+// → SELECT "orders"."customer_id", COUNT(*) AS "__agg_count__all"
+//   FROM "orders" GROUP BY "orders"."customer_id"
+//   ORDER BY AVG("orders"."total") DESC
+```
+
+On Mongo the sort targets the `$group` output alias, which exists by
+then: `{ $sort: { __agg_sum_total: -1 } }`.
 
 Order on a `by` column directly with `orderBy: { status: 'asc' }`. On
-Mongo the `by` columns live under `_id.<name>`, which the executor
-resolves automatically. Sorting by a bucket you didn't ask for is
-silently dropped on SQL (alias doesn't exist) and an error on Mongo —
-always ask for every bucket you intend to sort on.
+Mongo the `by` columns live under `_id.<name>`, which the compiler
+resolves automatically — a mixed sort comes out as
+`{ $sort: { __agg_sum_total: -1, '_id.customer_id': 1 } }`.
+
+**This is fixed in 2.18.0, and it was broken in a quiet way before.**
+`buildOrderBy` had no branch for an aggregate bucket, so
+`{ _sum: { total: 'desc' } }` was dropped from the IR entirely and no
+`ORDER BY` on it was emitted. A mixed sort was the worst case: the
+plain-column entry survived and the aggregate entry did not, so the
+query came back *ordered* — just not by the thing you asked for. "Top
+ten customers by lifetime value" returned an arbitrary ten rows. If you
+are below 2.18.0, check any `groupBy` you sort by a bucket.
+
+An aggregate `orderBy` is only meaningful on `groupBy`. A plain
+`findMany` drops the entry rather than emitting `"orders"."_sum"`, which
+would be a SQL error.
 
 ---
 
@@ -715,8 +822,9 @@ let the UI virtualise.
 `groupBy` collapses to one row per group; window functions keep every
 row and attach an aggregate computed across a window. Running totals,
 ranks, moving averages, and top-N-per-group are all window-function
-shapes. Forge does not emit window functions today — every aggregate
-goes through `GROUP BY` — so reach for `$queryRaw`:
+shapes. The typed aggregate surface on this page does not emit them —
+`groupBy` always compiles to `GROUP BY` — so on SQL reach for
+`$queryRaw`:
 
 ```ts
 // top 3 most-expensive orders per customer
@@ -730,8 +838,10 @@ const top3 = rows.filter((r) => r.rk <= 3);
 
 Per-dialect support: PG, MySQL 8+, SQLite 3.25+, MSSQL, and DuckDB all
 support window functions; MySQL 5.7 does not; Mongo's
-`$setWindowFields` (5.0+) is the closest analogue through the raw
-`aggregate({ pipeline })` surface. See [RAW-SQL.md](./RAW-SQL.md).
+`$setWindowFields` (5.0+) runs through the `aggregate({ pipeline })`
+surface rather than raw SQL. [WINDOWS.md](./WINDOWS.md) is the full
+treatment — the per-dialect matrix, top-N-per-group, moving averages
+and sessionization. See also [RAW-SQL.md](./RAW-SQL.md).
 
 ---
 
@@ -909,6 +1019,12 @@ const top = await db.order.groupBy({
 });
 // → [{ customer_id: 'u_42', _sum: { total: 89_400 }, _count: { _all: 124 } }, …]
 ```
+
+The rows really are the top ten: the `orderBy` compiles to
+`ORDER BY SUM("order"."total") DESC` before the `LIMIT 10`, so the cap
+is applied to the sorted groups. Needs 2.18.0 — before that the
+aggregate `orderBy` was dropped and this query returned an arbitrary
+ten customers, which looks identical in a dashboard.
 
 To attach the customer name, follow up with a second `findMany`
 against `id: { in: top.map(r => r.customer_id) }` and zip into a Map.

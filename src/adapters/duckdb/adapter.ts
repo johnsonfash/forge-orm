@@ -11,6 +11,7 @@ import {
   type DuckdbExecOpts,
 } from './execute';
 import { duckdbDriver, type DuckdbDriver, type DuckdbQueryable } from './driver';
+import { bytesForDriver } from '../../bytes';
 
 // DuckdbAdapter — drives a DuckdbDriver port (driver.ts). By default it opens
 // a `@duckdb/node-api` instance from the URL (file path or `:memory:`); a
@@ -167,7 +168,9 @@ export class DuckdbAdapter implements Adapter {
     const out: Record<string, any> = {};
     for (const [k, v] of Object.entries(data)) {
       const field = model?.fields?.[k];
-      if (field && (field.kind === 'json' || field.kind === 'embed' || field.kind === 'embedMany')
+      if (field?.kind === 'bytes' && v != null) {
+        out[k] = bytesForDriver(model?.collection ?? '?', k, field.maxBytes, v);
+      } else if (field && (field.kind === 'json' || field.kind === 'embed' || field.kind === 'embedMany')
           && v != null && typeof v === 'object') {
         out[k] = JSON.stringify(v);
       } else {

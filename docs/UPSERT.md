@@ -83,18 +83,29 @@ The full signature, with every option:
 
 | Field      | Type                  | Required | Notes                                                  |
 |------------|-----------------------|----------|--------------------------------------------------------|
-| `where`    | unique selector       | yes      | drives the conflict target — see below                 |
+| `where`    | full `where` filter   | yes      | its eq-leaves drive the conflict target — see below    |
 | `create`   | full create input     | yes      | runs when no row matched                               |
 | `update`   | partial update input  | yes      | runs when a row matched; pass `{}` for "no-op on hit" |
 | `select`   | select shape          | no       | narrows the returned column list                       |
 | `include`  | include shape         | no       | issues a follow-up read for relations                  |
 
-`where` is type-narrowed at compile time to the model's unique fields —
-`@id`, anything marked `.unique()`, and compound uniques declared via
-`uniques: [['provider', 'event_id']]`. Passing a non-unique field is a
-TypeScript error. This is the same narrowing as `findUnique` and
-`update`, and for the same reason: the conflict target must correspond
-to a constraint the database can enforce.
+`where` is **not** narrowed to unique fields. It is the same full filter
+type every other verb takes (`where: WhereInput<F>` on the wrapper), and
+neither TypeScript nor forge checks it. What actually matters is that the
+equality leaves of your `where` name a real unique constraint, because
+those columns are what forge hands the database as the conflict target —
+`whereLeafColumns` walks the `where` tree, collects the `eq` leaves, and
+drops them into `ON CONFLICT (…)` / `ON DUPLICATE KEY UPDATE` /
+`MERGE … ON`.
+
+Nothing verifies that for you. If those columns are not actually unique,
+either the database complains about a conflict target it has no
+constraint for, or — worse — the upsert never sees a conflict and quietly
+inserts a duplicate. Declare the constraint, then name its columns here.
+
+The plural verbs (`updateMany`, `deleteMany`, `softDeleteMany`) are the
+ones that mean "however many rows match"; the single-row verbs mean "I
+expect one", and that expectation is yours to keep.
 
 The return value is the row after the operation — either freshly inserted
 or freshly updated. Shape it with `select` / `include` the same way you
@@ -136,15 +147,26 @@ joined with an underscore. See
 [`docs/INDEXES.md`](./INDEXES.md#compound-unique-keys) for the naming
 rules and how to override them.
 
-### Non-eq filters in `where` are rejected
+### Non-eq filters in `where` are silently ignored
 
-If the `where` block includes anything other than equality on a unique
-column — a range filter, a logical `OR`, a `not` — forge throws at
-compile time. There is no sane interpretation of `ON CONFLICT (price)
-WHERE price > 10`; the conflict target has to be a constant column
-list, and the unique constraint has to exist on those columns. Use
-`updateMany` when you actually want a compound filter that decides
-which rows to touch.
+Only equality leaves are collected. `whereLeafColumns` walks `leaf` and
+`and` nodes looking for `op: 'eq'` and returns nothing for anything
+else — a range filter, a logical `OR`, a `not`. Nothing throws, at
+compile time or at run time.
+
+That matters, because a `where` with *no* usable eq-leaf leaves the
+conflict target empty, and Postgres / SQLite / DuckDB then get
+`ON CONFLICT DO NOTHING` instead of `ON CONFLICT (…) DO UPDATE`. Paired
+with `RETURNING *`, `DO NOTHING` returns **no row** on conflict, so the
+upsert resolves to nothing at exactly the moment the row already
+existed — the one case upsert is there to handle. The update half never
+runs either.
+
+There is no sane interpretation of `ON CONFLICT (price) WHERE price > 10`:
+the conflict target has to be a constant column list with a unique
+constraint behind it. So keep the `where` to equality on the constrained
+columns, and use `updateMany` when you actually want a compound filter
+deciding which rows to touch.
 
 ### The unique constraint has to exist
 
@@ -600,10 +622,23 @@ await db.pageViewCounter.upsert({
 ```
 
 Read: "if a counter row exists for `/landing`, bump it; otherwise create
-one starting at 1." One statement on every dialect. This is the right
-shape for any keyed counter — page views, event counts, per-user
-quotas, per-tenant balances. See
+one starting at 1." One statement on every SQL dialect, and the right
+shape for any keyed counter — page views, event counts, per-user quotas,
+per-tenant balances. See
 [Atomic number ops](./MUTATIONS.md#atomic-number-ops) for the full list.
+
+Mongo is the exception, and only for the shape above: when `create` seeds
+a field that `update` then hits with an atomic op, Mongo cannot express
+it in one statement — `$setOnInsert.count` and `$inc.count` are a path
+collision, and the server rejects the update document outright. So the
+wrapper falls back to update-then-create with a duplicate-key retry
+(`src/builder/collection.ts`): two statements, Prisma's semantics
+exactly — insert applies `create` only, update applies `update` only.
+The earlier behaviour of dropping the `create` value is what this
+replaced, and it was worse: `create: { seq: 100 }, update: { seq: {
+increment: 1 } }` came back as `1`, not `100`, because the seed silently
+vanished. Plain `$set` overlap still takes the single atomic op —
+writing the same field either way is well defined.
 
 | Adapter   | `count: { increment: 1 }` in upsert update branch     |
 |-----------|-------------------------------------------------------|
@@ -612,18 +647,57 @@ quotas, per-tenant balances. See
 | sqlite    | `"count" = "count" + 1`                               |
 | duckdb    | `"count" = "count" + 1`                               |
 | mssql     | `tgt.[count] = COALESCE(tgt.[count], 0) + 1`          |
-| mongo     | `{ $inc: { count: 1 } }` (plus `$setOnInsert.count = 0`) |
+| mongo     | `{ $inc: { count: 1 } }`, or update-then-create when `create` seeds `count` too |
 
 The MSSQL `COALESCE` wrap handles the case where the existing column
 value is `NULL` — `NULL + 1` is `NULL`, which would silently drop the
-increment, so forge defends against it. The Mongo path needs both
-`$setOnInsert.count = 0` (so the document has a `count` to increment
-on the next call) and `$inc.count = 1` on this call; forge composes
-both into the update document automatically.
+increment, so forge defends against it.
 
-The `multiply`, `divide`, and `decrement` ops compose the same way.
-Each is one statement, race-free against concurrent upserts on the
-same row.
+`multiply`, `decrement`, `max`, `min`, `push`, `addToSet` and `pull`
+compose the same way — one statement on SQL, race-free against
+concurrent upserts on the same row, and subject to the same Mongo
+fallback when `create` seeds the same field.
+
+### `divide` + `upsert` throws on Mongo
+
+`divide` is different, because Mongo has no `$div` update operator. An
+exact divide has to compile to an aggregation-pipeline update, and a
+pipeline has no `$setOnInsert` — there is no insert-only branch to put
+the `create` values in. "Divide on conflict, seed on insert" therefore
+cannot be one statement, and forge says so rather than dropping one
+half:
+
+```
+[forge:mongo] upsert cannot combine `create` with a `divide` update.
+Mongo needs an aggregation-pipeline update for an exact divide, and a
+pipeline has no $setOnInsert. Split it: upsert the row first, then
+update with the divide.
+```
+
+Split it, as the message says:
+
+```ts
+await db.product.upsert({
+  where:  { sku: 'A1' },
+  create: { sku: 'A1', price: '90.00' },
+  update: {},                            // no-op on hit
+});
+await db.product.update({
+  where: { sku: 'A1' },
+  data:  { price: { divide: 3 } },
+});
+```
+
+One narrow exception: if `create` seeds the *same* field you are
+dividing, the wrapper takes the update-then-create fallback described
+above and never reaches the pipeline compiler, so you get two statements
+instead of an error. Either way it is two statements — wrap them in
+`db.$transaction(...)` if the pair has to be atomic.
+
+Only Mongo is affected. Every SQL dialect emits a native
+`col = col / $n` inside the update branch, and `divide: 0` is refused
+when the IR is built, on every adapter. See
+[MONGO — `divide` compiles to a pipeline update](./MONGO.md#divide-compiles-to-a-pipeline-update).
 
 ---
 

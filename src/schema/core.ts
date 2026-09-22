@@ -187,6 +187,35 @@ export const f = {
   // back `any`. Pass `f.json<any>()` to opt back into the pre-2.6.4 behaviour.
   json: <T = unknown>() => make<T, 'json'>('json'),
 
+  /**
+   * Raw binary — a file, a thumbnail, a hash, an encrypted blob.
+   *
+   *   const Asset = model('assets', {
+   *     id: f.id(),
+   *     body: f.bytes(),                       // no declared ceiling
+   *     etag: f.bytes({ maxBytes: 32 }),       // TINYBLOB on MySQL
+   *   });
+   *
+   * JS type is `Uint8Array`. A Node `Buffer` is accepted on write because
+   * Buffer extends Uint8Array; reads always hand back a plain `Uint8Array`
+   * so the same code runs in the browser. Storage is the dialect's native
+   * binary type — never base64 — so a blob costs its own length, not 4/3 of it.
+   *
+   * `maxBytes` picks the physical type where the dialect has size classes
+   * and is enforced on write everywhere, so the limit behaves the same on
+   * Postgres (one `bytea` type) as on MySQL.
+   */
+  bytes: (opts: { maxBytes?: number } = {}) => {
+    if (opts.maxBytes != null && (!Number.isInteger(opts.maxBytes) || opts.maxBytes <= 0)) {
+      throw new Error(
+        `[forge] f.bytes({ maxBytes }): maxBytes must be a positive integer, got ${opts.maxBytes}`,
+      );
+    }
+    const fld = make<Uint8Array, 'bytes'>('bytes');
+    if (opts.maxBytes != null) fld.def.maxBytes = opts.maxBytes;
+    return fld;
+  },
+
   enumOf: <const V extends readonly string[]>(values: V) =>
     new Field<V[number], 'enum'>({
       kind: 'enum',
@@ -642,6 +671,10 @@ type ForgeNullMarker =
   | { readonly __forge: 'JsonNull' }
   | { readonly __forge: 'AnyNull' };
 
+// The element type of a list column, looking through optionality so an
+// `f.stringArray().optional()` still offers the array operators.
+type ElementOf<T> = [NonNullable<T>] extends [readonly (infer E)[]] ? E : never;
+
 type FieldUpdateValue<X> = X extends Field<infer T, any>
   ?
       | _InputVal<X>
@@ -653,9 +686,25 @@ type FieldUpdateValue<X> = X extends Field<infer T, any>
               decrement?: number;
               multiply?: number;
               divide?: number;
+              /** Write the value only if it is greater than what is stored. */
+              max?: number;
+              /** Write the value only if it is less than what is stored. */
+              min?: number;
               set?: T;
+              unset?: true;
             }
-          : { set?: T | null })
+          : [ElementOf<T>] extends [never]
+            ? { set?: T | null; unset?: true }
+            : {
+                /** Append, whether or not it is already there. */
+                push?: ElementOf<T> | ElementOf<T>[];
+                /** Append only if it is not already there. */
+                addToSet?: ElementOf<T> | ElementOf<T>[];
+                /** Remove every occurrence. */
+                pull?: ElementOf<T>;
+                set?: T | null;
+                unset?: true;
+              })
   : never;
 
 // OrderByInput — scalar field names with 'asc' | 'desc'.

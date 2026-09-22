@@ -14,6 +14,7 @@ import {
 } from './execute';
 import { withMysqlErrors } from './errors';
 import { mysql2Driver, type MysqlDriver, type MysqlQueryable } from './driver';
+import { bytesForDriver } from '../../bytes';
 
 // MysqlAdapter — drives a MysqlDriver port (driver.ts). By default it opens a
 // mysql2 promise pool from the URL; a pre-wrapped driver (mariadb, PlanetScale,
@@ -189,6 +190,9 @@ export class MysqlAdapter implements Adapter {
       const field = model?.fields?.[k];
       if (!field || v == null) { out[k] = v; continue; }
       switch (field.kind) {
+        case 'bytes':
+          out[k] = bytesForDriver(model?.collection ?? '?', k, field.maxBytes, v);
+          break;
         case 'bool':       out[k] = v ? 1 : 0; break;
         case 'json':
         case 'embed':

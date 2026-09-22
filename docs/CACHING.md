@@ -951,7 +951,7 @@ app.get('/v1/products', async (req, res) => {
     where: { published: true, ...(category ? { category } : {}) },
     orderBy: [{ rank: 'desc' }, { id: 'asc' }],
     take: 50,
-    ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    ...(cursor ? { cursor: { id: cursor } } : {}),
   });
 
   res.setHeader(

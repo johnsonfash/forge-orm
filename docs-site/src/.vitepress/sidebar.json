@@ -136,6 +136,10 @@
           "link": "/reference/embed"
         },
         {
+          "text": "Binary columns",
+          "link": "/reference/binary"
+        },
+        {
           "text": "Relations",
           "link": "/reference/relations"
         },

@@ -12,6 +12,7 @@ import {
   type PgPoolHandle,
 } from './execute';
 import { pgDriver, type PostgresDriver, type PgQueryable } from './driver';
+import { bytesForDriver } from '../../bytes';
 
 // PostgresAdapter — drives a PostgresDriver port (driver.ts). By default it
 // opens a node-postgres Pool from the URL; a pre-wrapped driver (postgres.js,
@@ -180,7 +181,9 @@ export class PostgresAdapter implements Adapter {
     const out: Record<string, any> = {};
     for (const [k, v] of Object.entries(data)) {
       const field = model?.fields?.[k];
-      if (field && (field.kind === 'json' || field.kind === 'embed' || field.kind === 'embedMany')
+      if (field?.kind === 'bytes' && v != null) {
+        out[k] = bytesForDriver(model?.collection ?? '?', k, field.maxBytes, v);
+      } else if (field && (field.kind === 'json' || field.kind === 'embed' || field.kind === 'embedMany')
           && v != null && typeof v === 'object') {
         out[k] = JSON.stringify(v);
       } else {

@@ -11,6 +11,7 @@ import {
   type MssqlExecOpts,
 } from './execute';
 import { mssqlDriver, type MssqlDriver, type MssqlQueryable } from './driver';
+import { bytesForDriver } from '../../bytes';
 
 const CAPS: AdapterCapabilities = {
   nativeCascades: true,
@@ -147,7 +148,9 @@ export class MssqlAdapter implements Adapter {
     const out: Record<string, any> = {};
     for (const [k, v] of Object.entries(data)) {
       const field = model?.fields?.[k];
-      if (field && (field.kind === 'json' || field.kind === 'embed' || field.kind === 'embedMany'
+      if (field?.kind === 'bytes' && v != null) {
+        out[k] = bytesForDriver(model?.collection ?? '?', k, field.maxBytes, v);
+      } else if (field && (field.kind === 'json' || field.kind === 'embed' || field.kind === 'embedMany'
                   || field.kind === 'stringArray' || field.kind === 'intArray')
           && v != null && typeof v === 'object') {
         out[k] = JSON.stringify(v);

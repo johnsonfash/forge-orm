@@ -4,8 +4,8 @@ dotenv.config();
 
 import { createDb } from '../factory';
 import {
-  ensureHistoryTable, listApplied, parseMigrationFile, rawExec,
-  readMigrationFile, removeMigration, splitStatements,
+  ensureHistoryTable, listApplied, parseMigrationFile, planRollback, rawExec,
+  readMigrationFile, removeMigration,
 } from './migrate-runtime';
 
 // forge:rollback — run the `down` block of the most-recently-applied migration
@@ -32,7 +32,11 @@ async function main() {
       process.exit(1);
     }
     const { down } = parseMigrationFile(content);
-    const statements = splitStatements(down);
+    const { statements, refusal } = planRollback(latest, down);
+    if (refusal) {
+      console.error(`[forge:rollback] ${refusal}`);
+      process.exit(1);
+    }
     console.log(`[forge:rollback] rolling back '${latest}' (${statements.length} statement(s))`);
     for (const s of statements) {
       try { await rawExec(db, s); }

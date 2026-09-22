@@ -43,19 +43,24 @@ the row.
 | `findMany` | `T[]` | no | any filter |
 | `findFirst` | `T \| null` | no | any filter |
 | `findFirstOrThrow` | `T` | yes — `RecordNotFound` | any filter |
-| `findUnique` | `T \| null` | no | **only** unique-by selectors |
-| `findUniqueOrThrow` | `T` | yes — `RecordNotFound` | **only** unique-by selectors |
+| `findUnique` | `T \| null` | no | any filter |
+| `findUniqueOrThrow` | `T` | yes — `RecordNotFound` | any filter |
 
-The unique-by-selector rule for `findUnique` is enforced at the wrapper
-level. The `where` must address the row through a single unique column
-(`id`, anything declared with `.unique()`) or a declared compound unique
-(`{ user_id_video_id: { user_id, video_id } }`). Passing a non-unique
-filter — `findUnique({ where: { email_domain: 'x.co' } })` against a
-non-unique `email_domain` — throws a build-time error before the query
-runs. The compiler relies on this to skip the `LIMIT 1` and the
-deterministic-order tie-breaker.
+`findUnique` does **not** narrow its `where` to unique columns. It is an
+alias for `findFirst`: the wrapper declares `where: WhereInput<F>` — the
+full filter type — on both, and `findUnique`'s body does nothing but call
+`findFirst` with the args it was handed. There is no compile-time check
+and no runtime check. The "unique" in the name states your intent; it
+constrains nothing.
 
-`findFirst` does not impose that rule. It will happily run
+So `findUnique({ where: { email_domain: 'x.co' } })` against a non-unique
+`email_domain` runs happily and returns one of the matching rows — which
+one is unspecified. That is the failure to watch for: you read it as "the
+row", the database gave you "a row", and the two agree right up until a
+second row matches. Reach for `findMany` as soon as the filter can match
+more than one row.
+
+`findFirst` — and therefore `findUnique` — will happily run
 `findFirst({ where: { active: true } })` and return whichever row the
 underlying engine surfaces first. That row is **not** deterministic
 unless you also pass `orderBy`. On PG it usually tracks heap order; on
@@ -66,8 +71,9 @@ of the segment, which is undefined under concurrent writes. Always pair
 When to reach for each:
 
 - **Already have the unique key** (id from a URL, email from a login
-  form) → `findUnique`. The compiler trusts the uniqueness, the result
-  type is `T | null`, and the SQL skips ordering.
+  form) → `findUnique`. The result type is `T | null`, and the name tells
+  the next reader you expect one row. It buys you nothing the compiler
+  enforces — see above.
 - **Need exactly one row but don't have a unique key** (first matching
   draft, most recent log line) → `findFirst({ where, orderBy })`.
 - **Caller treats "missing" as a programmer error** (load a row I just
@@ -111,6 +117,29 @@ SQLite use `"col"`, MySQL/MariaDB use `` `col` ``, MSSQL uses `[col]`.
 Placeholders are `$1, $2, …` on PG/MSSQL, `?` on MySQL/SQLite. LIKE
 metacharacters in the value are escaped at compile time before being
 wrapped in `%`.
+
+### `undefined` values, and the filter that vanishes
+
+An `undefined` value drops its leaf from the tree. That is what makes a
+conditionally-built filter work — `where: { status: maybeStatus }` means
+"don't filter on status when I don't have one", and nothing else in the
+filter is affected.
+
+The exception, new in 2.18.0: if a filter was written and **every** value
+in it is `undefined`, the whole tree disappears and the query applies to
+every row. That is refused:
+
+```ts
+await db.account.findMany({ where: { tenant_id: req.user?.tenantId } });
+// [forge] findMany on 'accounts' was given a filter whose every value is
+// undefined (tenant_id), so it would apply to EVERY row.
+```
+
+It matters most on the write side, where it used to empty tables — the
+full rule, the table of what is and is not allowed, and the deliberate
+escape hatch are in
+[MUTATIONS](./MUTATIONS.md#a-filter-whose-values-all-vanished-is-refused).
+An omitted `where` and an explicit `where: {}` still mean every row.
 
 ### `equals`
 
@@ -721,9 +750,17 @@ const page2 = await db.post.findMany({
   orderBy: { id: 'asc' },
   take:    20,
   cursor:  { id: lastId },
-  skip:    1,                        // skip the cursor row itself
 });
 ```
+
+Forge's cursor is **exclusive** — no `skip` is needed, and adding
+`skip: 1` drops a row. The compiled predicate is a strict `>` (ascending)
+or `<` (descending), never `>=`, so the cursor row is already excluded.
+Pass `skip: 1` on top of that and you skip one row too many: with rows
+`p0…p5` and a cursor on `p2`, the cursor alone returns `[p3, p4, p5]` and
+`cursor` + `skip: 1` returns `[p4, p5]` — `p3` is gone from the result
+set entirely, and nothing reports it. See
+**[PAGINATION](./PAGINATION.md)** for the full treatment.
 
 The IR emits a half-open inequality on the cursor key — `"id" > $n` —
 which is a sargable index scan on every SQL dialect and a
@@ -740,7 +777,6 @@ await db.post.findMany({
   orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
   take:    20,
   cursor:  { id: lastSeenId },        // single-column cursor is fine even with multi-column orderBy
-  skip:    1,
 });
 ```
 
@@ -886,9 +922,10 @@ await db.order.aggregate({
   _sum:  { total: true, items_count: true },
   _min:  { total: true },
   _max:  { total: true },
-  _count: true,                        // top-level row count
+  _count: { _all: true },              // COUNT(*) — the row count
 });
-// → { _avg: { total: 432.18 }, _sum: { total: 19_872, items_count: 187 }, … }
+// → { _avg: { total: 432.18 }, _sum: { total: 19_872, items_count: 187 },
+//     _count: { _all: 46 }, … }
 ```
 
 Per-dialect emit (PG):
@@ -900,7 +937,7 @@ SELECT
   SUM("items_count")  AS "__agg_sum_items_count",
   MIN("total")        AS "__agg_min_total",
   MAX("total")        AS "__agg_max_total",
-  COUNT(*)            AS "__agg_count"
+  COUNT(*)            AS "__agg_count__all"
 FROM "order"
 WHERE "status" = $1 AND "created_at" >= $2;
 ```
@@ -908,6 +945,21 @@ WHERE "status" = $1 AND "created_at" >= $2;
 MySQL and SQLite emit the same shape with their identifier and
 placeholder syntax. Mongo emits a single `$group` stage with
 `_id: null` and the same `__agg_*` keys.
+
+`aggregate` returns the payload object directly, not a one-element
+array — it is `groupBy({ by: [] })` with the array unwrapped, and it
+runs on every dialect. `_count` must be an object: `{ _all: true }`
+for `COUNT(*)`, `{ col: true }` for `COUNT("col")` (non-NULL rows
+only). Since 2.18.0 a bare `_count: true` is refused when the query is
+built — `[forge] … _count takes a map of fields, not true` — rather
+than emitting no `COUNT` column and leaving the key missing from the
+result.
+
+On a `where` that matches no rows you still get the shape you asked
+for — counts are `0`, and every `_sum` / `_avg` / `_min` / `_max` is
+`null`. See
+[AGGREGATIONS.md → Zero matching rows](./AGGREGATIONS.md#zero-matching-rows)
+for why `?? 0` belongs at every dashboard read site.
 
 **Floating-point caveats.** `_avg` on a `f.number()` column returns a
 JavaScript number — on PG that comes back as `numeric` (string in
@@ -931,15 +983,15 @@ await db.order.groupBy({
   by:    ['status'],
   where: { created_at: { gte: oneDayAgo } },
   _sum:  { total: true },
-  _count: true,
+  _count: { _all: true },
   having: {
     _sum: { total: { gt: 1_000 } },
   },
   orderBy: { _sum: { total: 'desc' } },
 });
 // → [
-//   { status: 'PAID',    _sum: { total: 12_300 }, _count: 17 },
-//   { status: 'PENDING', _sum: { total: 4_120  }, _count:  9 },
+//   { status: 'PAID',    _sum: { total: 12_300 }, _count: { _all: 17 } },
+//   { status: 'PENDING', _sum: { total: 4_120  }, _count: { _all:  9 } },
 // ]
 ```
 
@@ -949,7 +1001,7 @@ Per-dialect emit (PG):
 SELECT
   "status",
   SUM("total") AS "__agg_sum_total",
-  COUNT(*)     AS "__agg_count"
+  COUNT(*)     AS "__agg_count__all"
 FROM "order"
 WHERE "created_at" >= $1
 GROUP BY "status"
@@ -959,8 +1011,12 @@ ORDER BY SUM("total") DESC;
 
 `having` accepts the same operator vocabulary as `where` (`equals`,
 `not`, `lt`, `lte`, `gt`, `gte`) but the field key is an aggregate
-shape — `_count`, `_avg: { col }`, `_sum: { col }`, `_min: { col }`,
-`_max: { col }`. Anything else throws at build time.
+shape — `_count: { _all }` or `_count: { col }`, `_avg: { col }`,
+`_sum: { col }`, `_min: { col }`, `_max: { col }`. The column (or
+`_all`) is always a level of its own: `having: { _count: { gt: 0 } }`
+names no column, so nothing matches and the whole clause is dropped
+without a word — the query then returns every group and the filter
+you thought you wrote never ran.
 
 Multi-column group keys:
 
@@ -1138,7 +1194,7 @@ const matches = await db.customer.findMany({
   },
   orderBy: [{ name: 'asc' }, { id: 'asc' }],
   take:    25,
-  ...(lastSeenId ? { cursor: { id: lastSeenId }, skip: 1 } : {}),
+  ...(lastSeenId ? { cursor: { id: lastSeenId } } : {}),
   select: { id: true, name: true, email: true },
 });
 ```
@@ -1155,8 +1211,8 @@ const recent = await db.order.groupBy({
   by:     ['status'],
   where:  { created_at: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
   _sum:   { total: true },
-  _count: true,
-  having: { _count: { gt: 0 } },           // drop empty buckets
+  _count: { _all: true },
+  having: { _count: { _all: { gt: 0 } } },  // drop empty buckets
   orderBy: { _sum: { total: 'desc' } },
 });
 ```
@@ -1164,7 +1220,7 @@ const recent = await db.order.groupBy({
 PG emit:
 
 ```sql
-SELECT "status", SUM("total") AS "__agg_sum_total", COUNT(*) AS "__agg_count"
+SELECT "status", SUM("total") AS "__agg_sum_total", COUNT(*) AS "__agg_count__all"
 FROM "order"
 WHERE "created_at" >= $1
 GROUP BY "status"
@@ -1203,7 +1259,7 @@ const nearby = await db.shop.findMany({
   where:   { location: { near: { lng: here.lng, lat: here.lat, withinMeters: 5_000 } } },
   orderBy: [{ location: { nearTo: here } }, { id: 'asc' }],
   take:    20,
-  ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+  ...(cursor ? { cursor: { id: cursor } } : {}),
 });
 ```
 

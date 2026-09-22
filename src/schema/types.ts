@@ -14,6 +14,16 @@ export type FieldKind =
   | 'bool'
   | 'dateTime'
   | 'json'
+  // Raw binary. JS-side `Uint8Array` (a Node `Buffer` is accepted on write,
+  // since Buffer IS a Uint8Array). Per-dialect storage:
+  //   PG        → bytea
+  //   MySQL     → LONGBLOB
+  //   SQLite    → BLOB
+  //   DuckDB    → BLOB
+  //   MSSQL     → VARBINARY(MAX)
+  //   Mongo     → BinData (subtype 0)
+  //   IndexedDB → the typed array itself (structured clone stores it natively)
+  | 'bytes'
   | 'enum'
   | 'embed'
   | 'embedMany'
@@ -92,6 +102,17 @@ export interface FieldDef {
   // When true on a dateTime field, this is the soft-delete column. Reads add
   // `WHERE <col> IS NULL`; deletes become updates setting it to now(). One per model.
   softDeleteAt?: boolean;
+  /**
+   * Declared upper bound in bytes for a `bytes` field. Drives the physical
+   * type where the dialect has size classes, so a 200-byte hash is not
+   * given a 4GB column:
+   *   MySQL — <=255 TINYBLOB, <=65_535 BLOB, <=16_777_215 MEDIUMBLOB, else LONGBLOB
+   *   MSSQL — <=8000 VARBINARY(n), else VARBINARY(MAX)
+   * PG / SQLite / DuckDB / Mongo / IndexedDB have one binary type and ignore
+   * it for DDL. It is still enforced on write by the runtime guard, so the
+   * limit means the same thing on every dialect.
+   */
+  maxBytes?: number;
   // Exact-numeric precision/scale for `decimal` fields. PG numeric(p,s), MySQL
   // DECIMAL(p,s). SQLite NUMERIC ignores them.
   precision?: number;

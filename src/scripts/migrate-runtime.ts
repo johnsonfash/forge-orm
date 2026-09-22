@@ -54,11 +54,75 @@ export async function removeMigration(db: ForgeDb, name: string): Promise<void> 
 
 // Split a migration block into individual executable statements, dropping
 // comment-only and blank lines (so `-- note` lines never hit the driver).
+//
+// The comment test is per LINE, not per statement. A generated `down` can
+// open with a warning ahead of its SQL (alter-column.ts does this for a
+// narrowing), and one of those lines ends in `;` — so testing `/^--/`
+// against the whole chunk classified `-- review…\nALTER TABLE …` as a
+// comment and silently discarded the ALTER.
+//
+// Only the LEADING run of comment lines is stripped. Once real SQL has
+// started a `--` is left where it is: inside a string literal it is not a
+// comment, and forge cannot tell which it is without a lexer. A `;` inside
+// a string literal still splits the statement for the same reason.
 export function splitStatements(block: string): string[] {
-  return block
-    .split(/;\s*(?:\n|$)/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0 && !/^--/.test(s));
+  const out: string[] = [];
+  for (const chunk of block.split(/;\s*(?:\n|$)/)) {
+    const sql = stripLeadingComments(chunk);
+    if (sql.length > 0) out.push(sql);
+  }
+  return out;
+}
+
+function stripLeadingComments(chunk: string): string {
+  let s = chunk.trim();
+  for (;;) {
+    if (s.startsWith('--')) {
+      const nl = s.indexOf('\n');
+      if (nl === -1) return '';
+      s = s.slice(nl + 1).trim();
+      continue;
+    }
+    if (s.startsWith('/*')) {
+      const end = s.indexOf('*/');
+      // Unterminated: the split landed inside the block comment, so nothing
+      // in this chunk is executable.
+      if (end === -1) return '';
+      s = s.slice(end + 2).trim();
+      continue;
+    }
+    return s;
+  }
+}
+
+export interface RollbackPlan {
+  statements: string[];
+  /** Set when the rollback must not run — the reason, ready to print. */
+  refusal?: string;
+}
+
+/**
+ * What `forge rollback` should do with a migration's `down` block.
+ *
+ * A `down` block with no executable statements has to abort rather than
+ * fall through to `removeMigration`: running nothing and then deleting the
+ * ledger row leaves the database carrying the change while `status` reports
+ * the migration as pending, so the next apply re-runs the `up`.
+ */
+export function planRollback(name: string, down: string): RollbackPlan {
+  const statements = splitStatements(down);
+  if (statements.length > 0) return { statements };
+  return {
+    statements,
+    refusal:
+      `'${name}' has no statements in its \`down\` block, so there is nothing to ` +
+      `run. Leaving it recorded as applied — dropping the ledger row after ` +
+      `running nothing would report it as pending while the database still ` +
+      `carries its changes, and the next \`forge migrate\` would re-run the up.\n` +
+      `  → Write the reverse SQL in the \`-- down\` section, or, if this ` +
+      `migration genuinely has nothing to reverse, delete its row from ` +
+      `_forge_migrations by hand.`,
+  };
 }
 
 export interface ParsedMigration { up: string; down: string; }

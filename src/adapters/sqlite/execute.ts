@@ -19,6 +19,8 @@ import {
 } from './compile-from-ir';
 import { withSqliteErrors } from './errors';
 import type { SqliteDriver } from './driver';
+import { fromDriverBytes } from '../../bytes';
+import { hydrateManyRelation } from '../../ir/hydrate-many';
 
 // SQLite IR executor. Talks to a SqliteDriver port (see driver.ts), so it works
 // over a synchronous driver (better-sqlite3) or an async one (expo-sqlite,
@@ -43,6 +45,9 @@ export function decodeRow(model: ModelDef<any>, row: any): any {
     const v = row[k];
     if (v == null) { out[k] = v; continue; }
     switch (field.kind) {
+      // better-sqlite3 / mysql2 hand back a Buffer, the wasm build a
+      // Uint8Array. Normalise so the row shape is driver-independent.
+      case 'bytes':      out[k] = fromDriverBytes(v); break;
       case 'bool':       out[k] = v === 1 || v === true; break;
       case 'dateTime':   out[k] = typeof v === 'string' ? new Date(v) : v; break;
       case 'json':
@@ -236,27 +241,10 @@ async function hydrateMany(
   rel: RelationPlan,
   targetModel: ModelDef<any>,
 ): Promise<void> {
-  const refs = unique(rows.map((r) => r[rel.refs]).filter((v) => v != null));
-  if (refs.length === 0) { for (const r of rows) r[rel.name] = []; return; }
-  const nestedWhere = (rel.nested as any)?.where;
-  const fkLeaf = { kind: 'leaf' as const, field: rel.on, op: 'in' as const, value: refs };
-  const where = nestedWhere
-    ? { kind: 'and' as const, children: [nestedWhere, fkLeaf] }
-    : fkLeaf;
-  const subNode: SelectNode = {
-    kind: 'select', model: rel.target, cardinality: 'many',
-    ...(rel.nested ?? {}),
-    where,
-  };
-  const found = await executeSqliteSelect(db, subNode, targetModel);
-  const byParent = new Map<string, any[]>();
-  for (const t of found) {
-    const k = String(t[rel.on]);
-    const list = byParent.get(k);
-    if (list) list.push(t);
-    else byParent.set(k, [t]);
-  }
-  for (const r of rows) r[rel.name] = byParent.get(String(r[rel.refs])) ?? [];
+  await hydrateManyRelation({
+    rows, rel, keyOf: (v) => String(v),
+    runSelect: (node) => executeSqliteSelect(db, node, targetModel),
+  });
 }
 
 async function applyRelationCounts(

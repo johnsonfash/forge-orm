@@ -23,6 +23,7 @@ import {
 } from './compile-from-ir';
 import { withDuckdbErrors } from './errors';
 import type { DuckdbQueryable } from './driver';
+import { hydrateManyRelation } from '../../ir/hydrate-many';
 
 export interface DuckdbExecOpts {
   /** Transaction-bound queryable (passed by `withTransaction`). */
@@ -205,27 +206,10 @@ async function hydrateMany(
   rel: RelationPlan,
   targetModel: ModelDef<any>,
 ): Promise<void> {
-  const refs = unique(rows.map((r) => r[rel.refs]).filter(notNull));
-  if (refs.length === 0) { for (const r of rows) r[rel.name] = []; return; }
-  const nestedWhere = (rel.nested as any)?.where;
-  const fkLeaf = { kind: 'leaf' as const, field: rel.on, op: 'in' as const, value: refs };
-  const where = nestedWhere
-    ? { kind: 'and' as const, children: [nestedWhere, fkLeaf] }
-    : fkLeaf;
-  const subNode: SelectNode = {
-    kind: 'select', model: rel.target, cardinality: 'many',
-    ...(rel.nested ?? {}),
-    where,
-  };
-  const found = await executeDuckdbSelect(exec, subNode, targetModel);
-  const byParent = new Map<string, any[]>();
-  for (const t of found) {
-    const k = stringKey(t[rel.on]);
-    const list = byParent.get(k);
-    if (list) list.push(t);
-    else byParent.set(k, [t]);
-  }
-  for (const r of rows) r[rel.name] = byParent.get(stringKey(r[rel.refs])) ?? [];
+  await hydrateManyRelation({
+    rows, rel, keyOf: stringKey,
+    runSelect: (node) => executeDuckdbSelect(exec, node, targetModel),
+  });
 }
 
 async function applyRelationCounts(

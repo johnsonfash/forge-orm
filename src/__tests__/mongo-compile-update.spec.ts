@@ -29,20 +29,83 @@ describe('mongo compileUpdate (IR successor to translateUpdateData)', () => {
     expect(update({ count: { decrement: 2 } }).$inc).toEqual({ count: -2 });
   });
 
-  test('multiply / divide → $mul', () => {
+  test('multiply → $mul', () => {
     expect(update({ count: { multiply: 4 } }).$mul.count).toBe(4);
-    expect(update({ count: { divide: 5 } }).$mul.count).toBe(1 / 5);
+  });
+
+  test('divide → an aggregation-pipeline $divide, not $mul by a reciprocal', () => {
+    // Mongo has no `$div` update operator. Rewriting `divide: 5` as
+    // `$mul: 0.2` is exact here but not for `divide: 3`, and it also turns an
+    // int column into a double. A pipeline update has a real $divide.
+    const u = update({ count: { divide: 3 } });
+    expect(Array.isArray(u)).toBe(true);
+    expect(u[0].$set.count).toEqual({ $divide: [{ $ifNull: ['$count', 0] }, 3] });
+    expect(JSON.stringify(u)).not.toContain('$mul');
+  });
+
+  test('a pipeline update carries the other ops across unchanged', () => {
+    const u = update({ name: 'x', count: { divide: 2 } });
+    // A literal must be wrapped: inside a pipeline a bare '$...' string is a
+    // field reference, so an unwrapped value would read a column instead.
+    expect(u[0].$set.name).toEqual({ $literal: 'x' });
+    expect(u[0].$set.count).toEqual({ $divide: [{ $ifNull: ['$count', 0] }, 2] });
+  });
+
+  test('a "$"-prefixed string survives a pipeline update', () => {
+    // The concrete failure $literal prevents: storing the value of a field
+    // named "5 off" instead of the text "$5 off".
+    const u = update({ name: '$5 off', count: { divide: 2 } });
+    expect(u[0].$set.name).toEqual({ $literal: '$5 off' });
+  });
+
+  test('divide + upsert is refused rather than silently half-applied', () => {
+    const node = buildUpdate('m', M, {
+      where: { id: 'x' },
+      data: { count: { divide: 2 } },
+      many: false,
+      upsertCreate: { count: 100 },
+    } as any);
+    expect(() => compileUpdate(node, M)).toThrow(/no \$setOnInsert/);
   });
 
   test('explicit set wrapper → $set', () => {
     expect(update({ count: { set: 9 } }).$set.count).toBe(9);
   });
 
-  test('renames `id` → `_id` key in the $set payload (value coercion is coerceInbound\'s job)', () => {
+  test('renames `id` → `_id` AND coerces the value to an ObjectId', () => {
+    // This test used to assert the value stayed a string, on the belief that
+    // `coerceInbound` would handle it later. It never ran for update — only
+    // for create, createMany and upsert.create — so an id or a date written
+    // through `update` was stored with the wrong BSON type, and `where`
+    // (which DOES coerce) then failed to match those rows for good.
     const oid = new ObjectId();
     const u = update({ id: oid.toString(), name: 'x' });
     expect(u.$set.id).toBeUndefined();
-    expect(u.$set._id).toBe(oid.toString());   // key remapped at compile; ObjectId coercion happens in coerceInbound
+    expect(u.$set._id).toBeInstanceOf(ObjectId);
+    expect(u.$set._id.toString()).toBe(oid.toString());
+  });
+
+  test('an update writes the same BSON types a create would', () => {
+    const oid = new ObjectId();
+    const N = model('n', {
+      id: f.id(),
+      owner_id: f.objectId(),
+      due_at: f.dateTime(),
+    }) as unknown as ModelDef<any>;
+    const node = buildUpdate('n', N, {
+      where: { id: 'x' },
+      data: { owner_id: oid.toString(), due_at: '2026-03-04T05:06:07.000Z' },
+      many: false,
+    } as any);
+    const u = (compileUpdate(node, N) as any).args.update;
+    expect(u.$set.owner_id).toBeInstanceOf(ObjectId);
+    expect(u.$set.due_at).toBeInstanceOf(Date);
+    expect((u.$set.due_at as Date).toISOString()).toBe('2026-03-04T05:06:07.000Z');
+  });
+
+  test('atomic numeric ops are left alone — they are numbers, not field values', () => {
+    const u = update({ count: { increment: 3 } });
+    expect(u.$inc).toEqual({ count: 3 });
   });
 });
 

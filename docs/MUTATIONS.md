@@ -15,8 +15,10 @@ adapter-specific and described below.
 * [`create` vs `createMany`](#create-vs-createmany)
 * [`update` vs `updateMany`](#update-vs-updatemany)
 * [`upsert`](#upsert)
+* [A filter whose values all vanished is refused](#a-filter-whose-values-all-vanished-is-refused)
 * [`delete` vs `deleteMany`](#delete-vs-deletemany)
 * [Atomic number ops](#atomic-number-ops)
+* [List column ops — `push`, `addToSet`, `pull`](#list-column-ops--push-addtoset-pull)
 * [`set` vs `unset`](#set-vs-unset)
 * [Nested writes](#nested-writes)
 * [`createMany` + `skipDuplicates`](#createmany--skipduplicates)
@@ -100,10 +102,10 @@ for when to use which.
 
 ## `update` vs `updateMany`
 
-| Verb         | `where`                | Returns               | Notes                                |
-|--------------|------------------------|-----------------------|--------------------------------------|
-| `update`     | unique selector        | the updated row       | throws if no row matched             |
-| `updateMany` | any filter             | `{ count: number }`   | zero matches is a no-op, not an error |
+| Verb         | `where`                | Rows affected          | Returns               | Notes                                |
+|--------------|------------------------|------------------------|-----------------------|--------------------------------------|
+| `update`     | any filter             | exactly one            | the updated row       | throws if no row matched             |
+| `updateMany` | any filter             | every match            | `{ count: number }`   | zero matches is a no-op, not an error |
 
 ```ts
 await db.user.update({
@@ -117,11 +119,51 @@ const { count } = await db.user.updateMany({
 });
 ```
 
-`update`'s `where` is type-narrowed to the model's unique fields (the
-`@id`, plus anything marked `.unique()` or part of a unique compound).
-Passing a non-unique field there is a TypeScript error. If you genuinely
-want a single-row update against a non-unique filter, use `updateMany` and
-either rely on the count or guard with `take: 1` in a preceding `findFirst`.
+### `update`'s `where` is a full filter, not a unique selector
+
+`update` takes the same `where` type as `findMany` — `WhereInput`, every
+operator, every field. It is **not** narrowed to the model's unique
+fields, at compile time or at runtime. Nothing checks that your selector
+is unique, and `InferWhereUnique` is only `Partial<WhereInput>`.
+
+What "single-row" means is the number of rows written, not the shape of
+the filter. Given a filter that matches many rows, `update` writes
+**one** of them, and which one is unspecified — there is no `ORDER BY` in
+the emitted statement:
+
+```ts
+// Legal, and it compiles. One row of the many gets archived.
+await db.post.update({ where: { score: { gte: 0 } }, data: { archived: true } });
+```
+
+On Postgres that is `UPDATE … WHERE ctid = (SELECT ctid FROM … WHERE … LIMIT 1)`
+(SQLite rewrites the same shape onto its hidden `rowid`); on Mongo it is
+`findOneAndUpdate`. So a non-unique filter on `update` is
+not a type error — it is a silent coin toss over which row you wrote.
+Pass a selector you know identifies one row, or use `updateMany` when
+"however many match" is what you mean.
+
+### `updateMany` then re-reading the row is two round trips
+
+`update` already returns the updated row — every adapter either uses
+`RETURNING` / `OUTPUT` or, on MySQL, follows the write with a `SELECT`,
+and Mongo compiles to `findOneAndUpdate … returnDocument: 'after'`. So
+this pattern:
+
+```ts
+await db.user.updateMany({ where: { id }, data: { name } });   // round trip 1
+const user = await db.user.findFirst({ where: { id } });       // round trip 2
+```
+
+costs twice what it needs to, and the re-read is not even the row you
+wrote — another writer can land in between. Write it as one call:
+
+```ts
+const user = await db.user.update({ where: { id }, data: { name } });
+```
+
+Reach for `updateMany` when you genuinely want every match updated and
+the count is the answer. Reach for `update` when you want one row back.
 
 ### What each adapter compiles to
 
@@ -141,7 +183,7 @@ filter inside one `$transaction` — or, on Postgres only, drop to
 
 ### Why `update` throws on no match
 
-A typed `update` against a unique key is asserting the row exists. Letting
+An `update` is asserting that a row to write exists. Letting
 that silently no-op masks application bugs: the handler thinks it wrote,
 the database disagrees, and the next read shows stale data. The
 `updateMany` path is the right verb when "match or not" is a valid
@@ -151,10 +193,16 @@ outcome.
 
 ## `upsert`
 
-`upsert` takes three blocks: `where` (must be a unique selector), `create`
-(used when no row matches), and `update` (used when one does). Forge
-compiles to a single atomic statement on every adapter — there is no
-read-then-write that could race.
+`upsert` takes three blocks: `where`, `create` (used when no row
+matches), and `update` (used when one does). Forge compiles to a single
+atomic statement on every adapter — there is no read-then-write that
+could race.
+
+`where` is a full filter, like everywhere else. What `upsert` needs from
+it is that its equality leaves name a real unique constraint, because
+those columns become the conflict target. Forge does not verify that;
+the database does, or does not — see
+[Constraints on the conflict target](#constraints-on-the-conflict-target).
 
 ```ts
 await db.user.upsert({
@@ -207,14 +255,89 @@ the conflict target — they would not be valid in `ON CONFLICT`. Use
 
 ---
 
+## A filter whose values all vanished is refused
+
+New in 2.18.0, and it is the one behaviour change in this document that
+can break working code — deliberately, because the code was not working.
+
+`undefined` is skipped everywhere in the filter surface. That is what
+makes an optional filter work:
+
+```ts
+where: { status: maybeStatus }        // maybeStatus undefined → don't filter on status
+```
+
+But when *every* value in a filter was `undefined`, the filter
+disappeared entirely and the statement applied to the whole table:
+
+```ts
+await db.account.deleteMany({ where: { tenant_id: req.user?.tenantId } });
+// Before 2.18.0:  DELETE FROM "accounts"     ← no WHERE at all
+```
+
+One optional chain that returned `undefined` emptied a tenant table.
+The single-row verbs were worse rather than safer, because they still
+constrain to one row: `delete({ where: { id: maybeId } })` compiled to
+`WHERE ctid = (SELECT ctid FROM "accounts" LIMIT 1)` and destroyed an
+**arbitrary** row.
+
+Every builder — `findMany`, `findFirst`, `findUnique`, `count`,
+`groupBy`, `update`, `updateMany`, `delete`, `deleteMany` — now throws
+when a filter was written and none of its values survived:
+
+```
+[forge] deleteMany on 'accounts' was given a filter whose every value is
+undefined (tenant_id), so it would apply to EVERY row.
+  This is almost always an optional value that came back undefined — check
+  the source of 'tenant_id'.
+  To act on every row on purpose, omit `where` entirely.
+```
+
+The rule is exactly "keys were written, and none of them survived":
+
+| Call                              | Meaning                  |
+|-----------------------------------|--------------------------|
+| `where` omitted                   | every row — allowed      |
+| `where: {}`                       | every row — allowed      |
+| `where: { a: 'x', b: undefined }` | filters on `a` — allowed |
+| `where: { a: undefined }`         | **throws**               |
+
+Partial `undefined` is untouched, which is the whole point of the
+feature — a query builder that conditionally adds filters keeps
+working. And an omitted `where`, or an explicit `where: {}`, is how you
+say "every row" on purpose:
+
+```ts
+await db.session.deleteMany();              // truncate, deliberately
+await db.session.deleteMany({ where: {} }); // the same, said out loud
+```
+
+So the fix in a handler is not to reach for `where: {}` — it is to
+check the value before you get here:
+
+```ts
+const tenantId = req.user?.tenantId;
+if (!tenantId) throw new Forbidden();
+await db.account.deleteMany({ where: { tenant_id: tenantId } });
+```
+
+This is a deliberate divergence from Prisma, which allows the
+all-`undefined` case and applies it to the whole table.
+
+---
+
 ## `delete` vs `deleteMany`
 
 Same asymmetry as `update`.
 
-| Verb         | `where`         | Returns         | Notes                              |
-|--------------|-----------------|-----------------|------------------------------------|
-| `delete`     | unique selector | the deleted row | throws if no row matched           |
-| `deleteMany` | any filter      | `{ count }`     | zero matches is a no-op            |
+| Verb         | `where`    | Rows affected | Returns         | Notes                              |
+|--------------|------------|---------------|-----------------|------------------------------------|
+| `delete`     | any filter | exactly one   | the deleted row | throws if no row matched           |
+| `deleteMany` | any filter | every match   | `{ count }`     | zero matches is a no-op            |
+
+`delete`'s `where` is a full filter too, with the same consequence: a
+selector matching many rows deletes one unspecified row rather than
+raising a type error.
 
 ```ts
 await db.user.delete({ where: { id: 'u1' } });
@@ -262,9 +385,22 @@ await db.post.update({
 });
 ```
 
-Supported ops: `increment`, `decrement`, `multiply`, `divide`. Each takes
-a number. Mixing an op with a `set` on the same column is rejected at
-compile time.
+Numeric ops: `increment`, `decrement`, `multiply`, `divide`, and — new
+in 2.18.0 — `max` and `min`, which clamp in place: the value is written
+only if it exceeds (`max`) or falls below (`min`) what is stored. Each
+takes a number. Mixing an op with a `set` on the same column is rejected
+when the update is built.
+
+```ts
+data: {
+  high_score:  { max: newScore },     // only if newScore is higher
+  floor_price: { min: bid },          // only if bid is lower
+}
+```
+
+`max` / `min` are useful precisely because they need no read: "record
+this if it is the best so far" is otherwise a read-compare-write, which
+loses under concurrency exactly like a hand-rolled counter does.
 
 | Adapter   | `increment 5` compiles to       | `multiply 2` compiles to       |
 |-----------|---------------------------------|--------------------------------|
@@ -275,9 +411,59 @@ compile time.
 | mssql     | `[views] = [views] + 5`         | `[score] = [score] * 2`        |
 | mongo     | `{ $inc: { views: 5 } }`        | `{ $mul: { score: 2 } }`       |
 
-Mongo `decrement N` is `$inc: { col: -N }`, `divide N` is `$mul: { col:
-1 / N }`. All SQL dialects compile `decrement` and `divide` to the
-obvious `- N` / `/ N`.
+Mongo `decrement N` is `$inc: { col: -N }`. All SQL dialects compile
+`decrement` and `divide` to the obvious `- N` / `/ N`.
+
+### `divide` is an exact division (2.18.0)
+
+Before 2.18.0, `divide: n` was rewritten into `multiply: 1 / n` in the
+IR, before any adapter could see it. `divide: 3` became
+`multiply: 0.3333333333333333`, so an exact `decimal` money column
+drifted a little on every update and an `int` column rounded. Nothing
+reported it; the number was just slightly wrong, and then wrong again.
+
+`divide` is now its own IR op. Every SQL dialect emits a native
+`col = col / $n`, so the database's own numeric type decides the result —
+`numeric(12,2)` stays exact. IndexedDB divides in JS. `divide: 0` is
+refused when the update is built, rather than reaching the database as a
+division by zero.
+
+**Mongo pays for this with a pipeline update.** Mongo has no `$div`
+update operator, so an exact divide compiles to an
+aggregation-pipeline update, which needs **MongoDB 4.2 or newer**.
+Every other op in the same call is translated to the matching pipeline
+expression (`increment` → `$add`, `multiply` → `$multiply`, `push` →
+`$concatArrays`, `unset` → `$unset`) so the whole update stays one
+atomic statement rather than splitting into two.
+
+One consequence is worth knowing about even if you never write a
+`divide`: inside a pipeline, a bare string beginning with `$` is a
+*field reference*, not text. Forge wraps every literal in `$literal`, so
+`data: { note: '$5 off', rank: { divide: 2 } }` stores the string
+`"$5 off"` and not the value of a field named `5 off`.
+
+**`divide` plus `upsert` throws on Mongo.** A pipeline update has no
+`$setOnInsert`, so "divide the column if the row exists, seed it if it
+does not" cannot be expressed as one statement. Rather than silently
+dropping one half, forge raises:
+
+```
+[forge:mongo] upsert cannot combine `create` with a `divide` update. Mongo needs
+an aggregation-pipeline update for an exact divide, and a pipeline has no
+$setOnInsert. Split it: upsert the row first, then update with the divide.
+```
+
+Split it exactly as the message says — an `upsert` that only seeds,
+followed by an `update` that divides.
+
+There is one case that does not throw: when `create` seeds the *same*
+field the `divide` touches. That overlap already falls back to
+update-then-create on Mongo (the 2.7.0 fix that stopped the `create`
+seed being dropped), so the pipeline compiler never sees it. It is two
+round trips either way.
+
+The SQL dialects have no such restriction; `INSERT … ON CONFLICT DO
+UPDATE SET col = col / $n` is one statement there.
 
 ### Concurrency safety
 
@@ -307,6 +493,112 @@ async function recordView(postId: string) {
 One round-trip, one statement, race-free across any number of callers.
 Contrast with the wrong shape — read, add one, write — which loses
 updates under any concurrency at all.
+
+### Counter that has to seed itself
+
+The common version of the counter is "start at N the first time, add one
+after that", and it needs no read either — `upsert` handles it, with the
+atomic op in the `update` block:
+
+```ts
+const row = await db.counter.upsert({
+  where:  { key: 'invoice-number' },
+  create: { key: 'invoice-number', seq: 1000 },   // first call  → 1000
+  update: { seq: { increment: 1 } },              // later calls → 1001, 1002, …
+});
+row.seq;                                          // the new value, returned
+```
+
+The first call applies `create` only and the later ones apply `update`
+only — which is Prisma's semantics, and was a real bug on Mongo until
+2.7.0, where the `create` seed was dropped and the first call came back
+as `1` instead of `1000`. Mongo now runs this as update-then-create with
+a duplicate-key retry; the SQL dialects get it from
+`INSERT … ON CONFLICT DO UPDATE`.
+
+There is no separate sequence API and you do not need one. See
+[UPSERT](./UPSERT.md).
+
+---
+
+## List column ops — `push`, `addToSet`, `pull`
+
+For `f.stringArray()` and `f.intArray()` columns there are three
+in-place mutations, so you do not have to read the list, change it in
+JS, and write the whole thing back:
+
+```ts
+await db.post.update({
+  where: { id: 'p1' },
+  data: {
+    tags:        { push: 'urgent' },       // append, always
+    categories:  { addToSet: 'news' },     // append only if absent
+    stale_flags: { pull: 'draft' },        // remove every occurrence
+  },
+});
+```
+
+`addToSet` and `pull` are new in 2.18.0, and all three are only now in
+the **typed** update input. `push` existed in the IR since 2.2 but was
+never on the public update type, so it was a documented operator that
+would not typecheck — reachable only through the internal builder.
+
+### They are not supported on every dialect
+
+This is the one place in forge where a documented operator is genuinely
+missing on some databases, and it is worth being plain about rather than
+papering over.
+
+Postgres and DuckDB have real array columns. MySQL, SQLite and MSSQL
+store `stringArray` / `intArray` as JSON, and JSON has no portable
+value-based contains-or-remove:
+
+| Dialect   | `push`                   | `addToSet` | `pull`   |
+|-----------|--------------------------|------------|----------|
+| Postgres  | `array_append`           | yes        | yes      |
+| DuckDB    | `list_append`            | yes        | yes      |
+| Mongo     | `$push`                  | `$addToSet`| `$pull`  |
+| IndexedDB | in JS                    | yes        | yes      |
+| MySQL     | `JSON_ARRAY_APPEND`      | yes        | **no**   |
+| SQLite    | `json_insert '$[#]'`     | **no**     | **no**   |
+| MSSQL     | `JSON_MODIFY 'append $'` | **no**     | **no**   |
+
+An unsupported combination throws, naming the dialect and the column,
+rather than emitting something that quietly works for text arrays and
+not numeric ones:
+
+```
+[forge:sqlite] 'addToSet' on 'tags' is not supported on this dialect — its
+list columns are stored as JSON, which has no value-based contains/remove.
+Read the array, change it, and write it back with `{ tags: [...] }` — or
+move the collection to Postgres/DuckDB, whose array columns support it
+natively.
+```
+
+MySQL refuses `pull` specifically because removing by value needs the
+element's index first, and `JSON_SEARCH` returns a path only for
+strings — so it would work on a `stringArray` and silently not on an
+`intArray`.
+
+The read-side filters (`has`, `hasSome`, `hasEvery`, `isEmpty`) have no
+such gap: they work on all six dialects from 2.18.0. Before 2.18.0 they
+emitted the Postgres array operators everywhere, so a list column was
+writable and readable but **not filterable** on MySQL, SQLite and
+MSSQL. That was a syntax error, not a wrong result.
+
+If you need `addToSet` semantics on a JSON-backed dialect, the portable
+form is a read-modify-write inside a transaction, or a `where` guard
+that makes the append conditional:
+
+```ts
+// append only if absent, on any dialect
+await db.$transaction(async (tx) => {
+  const row = await tx.post.findUniqueOrThrow({ where: { id } });
+  if (!row.categories.includes('news')) {
+    await tx.post.update({ where: { id }, data: { categories: [...row.categories, 'news'] } });
+  }
+});
+```
 
 ---
 

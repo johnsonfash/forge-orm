@@ -49,9 +49,23 @@ function compileWhereNode(model: ModelDef<any>, tree: WhereTree): Record<string,
     case 'not':
       return { $nor: [compileWhereNode(model, tree.child)] };
     case 'relation':
-      // Relation filters in `where` are not yet supported on Mongo (no $lookup);
-      // return {} (match-all) rather than erroring. Tracked as a known gap.
-      return {};
+      // Mongo has no join in a plain find, so a relation filter cannot be
+      // compiled here. Until 2.18.0 this returned {} — match-all — which is
+      // the most dangerous answer available: the same compiler builds the
+      // filter for reads AND for writes, so
+      //
+      //   deleteMany({ where: { author: { is: { email: 'x' } } } })
+      //
+      // compiled to `deleteMany({})` and emptied the collection. A read just
+      // returned every row instead of the matching ones, with no error.
+      throw new Error(
+        `[forge:mongo] a relation filter on '${tree.relation}' (${tree.mode}) cannot be ` +
+        'compiled for Mongo — a find has no join. Resolve it in two steps:\n' +
+        "  const ids = (await db.author.findMany({ where: { email: 'x' }, " +
+        'select: { id: true } })).map(a => a.id);\n' +
+        '  await db.post.findMany({ where: { author_id: { in: ids } } });\n' +
+        'Or use db.<model>.aggregate([{ $lookup: … }]) for a single round trip.',
+      );
     case 'leaf':
       return compileLeaf(model, tree);
   }
@@ -191,22 +205,53 @@ function compileOrderBy(orderBy: OrderByEntry[] | undefined): Array<[string, 1 |
   return orderBy.map((e) => [appKeyToDbKey(e.field), e.direction === 'desc' ? -1 : 1]);
 }
 
-function compileCursor(model: ModelDef<any>, cursor: CursorSpec | undefined): Record<string, any> | undefined {
+// Two defects lived here before 2.18.0, and both returned a wrong page
+// rather than an error:
+//
+//   1. `$gt` regardless of sort direction — so `orderBy: { createdAt: 'desc' }`
+//      paged backwards into rows it had already served.
+//   2. A composite cursor became `{ $and: [ {a: {$gt: x}}, {b: {$gt: y}} ] }`,
+//      which is not a tuple comparison. Given rows sorted by (a, b), the row
+//      after (5, 9) is (5, 10) — but that row has b=10 > 9 AND a=5, which is
+//      NOT > 5, so the $and rejected it. Every row sharing the cursor's
+//      leading value was skipped.
+function compileCursor(
+  model: ModelDef<any>,
+  cursor: CursorSpec | undefined,
+  orderBy: OrderByEntry[] | undefined,
+): Record<string, any> | undefined {
   if (!cursor?.fields) return undefined;
-  const out: Record<string, any> = {};
-  for (const key of Object.keys(cursor.fields)) {
-    const def = getFieldDef(model, key);
-    const v = def ? coerceFieldValue(def, cursor.fields[key]) : cursor.fields[key];
-    out[appKeyToDbKey(key)] = { $gt: v };
+  const keys = Object.keys(cursor.fields);
+  if (keys.length === 0) return undefined;
+
+  const op = (k: string) =>
+    orderBy?.find((e) => e.field === k)?.direction === 'desc' ? '$lt' : '$gt';
+  const val = (k: string) => {
+    const def = getFieldDef(model, k);
+    return def ? coerceFieldValue(def, cursor.fields[k], { model: model.collection, name: k }) : cursor.fields[k];
+  };
+  const key = (k: string) => appKeyToDbKey(k);
+
+  if (keys.length === 1) {
+    return { [key(keys[0])]: { [op(keys[0])]: val(keys[0]) } };
   }
-  if (Object.keys(out).length === 1) return out;
-  return { $and: Object.entries(out).map(([k, v]) => ({ [k]: v })) };
+
+  // Lexicographic expansion — the same shape the SQL side uses, and correct
+  // for mixed sort directions as well as uniform ones.
+  const terms = keys.map((k, i) => {
+    const clauses: Record<string, any>[] = keys
+      .slice(0, i)
+      .map((prev) => ({ [key(prev)]: val(prev) }));
+    clauses.push({ [key(k)]: { [op(k)]: val(k) } });
+    return clauses.length === 1 ? clauses[0] : { $and: clauses };
+  });
+  return { $or: terms };
 }
 
 export function compileSelect(node: SelectNode, modelOverride?: ModelDef<any>): MongoArtifact {
   const m = modelDef(node.model, modelOverride);
   const filter = compileWhere(m, node.where);
-  const cursorFilter = compileCursor(m, node.cursor);
+  const cursorFilter = compileCursor(m, node.cursor, node.orderBy);
   const combined = cursorFilter
     ? Object.keys(filter).length ? { $and: [filter, cursorFilter] } : cursorFilter
     : filter;
@@ -264,11 +309,96 @@ export function compileInsert(node: InsertNode, modelOverride?: ModelDef<any>): 
   };
 }
 
+// Mongo has no `$div` update operator, so an exact division cannot be
+// expressed as an update document at all. Before 2.18.0 the IR quietly
+// rewrote `divide: 3` into `$mul: 0.3333333333333333`, which drifts on a
+// money column and turns an int field into a double. An aggregation-pipeline
+// update (Mongo 4.2+) has a real `$divide`, so that is what a divide compiles
+// to — every other op is translated into the equivalent pipeline expression
+// so the whole update stays one atomic statement.
+//
+// Literals go through `$literal`: inside a pipeline a bare string beginning
+// with `$` is a field reference, so `{ $set: { note: '$5 off' } }` would
+// store the value of a field named `5 off` instead of the text.
+function compileUpdateAsPipeline(
+  m: ModelDef<any>,
+  node: UpdateNode,
+): Record<string, any>[] {
+  const setStage: Record<string, any> = {};
+  const ref = (k: string) => `$${appKeyToDbKey(k)}`;
+
+  for (const [k, v] of Object.entries(remapAndCoerce(m, node.set ?? {}))) {
+    setStage[k] = { $literal: v };
+  }
+  for (const [k, v] of Object.entries(node.increment ?? {})) {
+    setStage[appKeyToDbKey(k)] = { $add: [{ $ifNull: [ref(k), 0] }, v] };
+  }
+  for (const [k, v] of Object.entries(node.multiply ?? {})) {
+    setStage[appKeyToDbKey(k)] = { $multiply: [{ $ifNull: [ref(k), 0] }, v] };
+  }
+  for (const [k, v] of Object.entries(node.divide ?? {})) {
+    setStage[appKeyToDbKey(k)] = { $divide: [{ $ifNull: [ref(k), 0] }, v] };
+  }
+  for (const [k, v] of Object.entries(node.max ?? {})) {
+    setStage[appKeyToDbKey(k)] = { $max: [{ $ifNull: [ref(k), v] }, v] };
+  }
+  for (const [k, v] of Object.entries(node.min ?? {})) {
+    setStage[appKeyToDbKey(k)] = { $min: [{ $ifNull: [ref(k), v] }, v] };
+  }
+  for (const [k, v] of Object.entries(node.push ?? {})) {
+    setStage[appKeyToDbKey(k)] = {
+      $concatArrays: [{ $ifNull: [ref(k), []] }, Array.isArray(v) ? v : [v]],
+    };
+  }
+  for (const [k, v] of Object.entries(node.addToSet ?? {})) {
+    setStage[appKeyToDbKey(k)] = {
+      $setUnion: [{ $ifNull: [ref(k), []] }, Array.isArray(v) ? v : [v]],
+    };
+  }
+  for (const [k, v] of Object.entries(node.pull ?? {})) {
+    setStage[appKeyToDbKey(k)] = {
+      $filter: {
+        input: { $ifNull: [ref(k), []] },
+        cond: { $ne: ['$$this', v] },
+      },
+    };
+  }
+
+  const stages: Record<string, any>[] = [];
+  if (Object.keys(setStage).length) stages.push({ $set: setStage });
+  if (node.unset?.length) stages.push({ $unset: node.unset.map(appKeyToDbKey) });
+  return stages;
+}
+
 export function compileUpdate(node: UpdateNode, modelOverride?: ModelDef<any>): MongoArtifact {
   const m = modelDef(node.model, modelOverride);
+  const dividing = !!node.divide && Object.keys(node.divide).length > 0;
+  if (dividing) {
+    if (node.upsertCreate) {
+      // A pipeline update has no insert-only branch ($setOnInsert is an
+      // update-document operator), so "divide on conflict, seed on insert"
+      // cannot be one statement. Say so instead of silently dropping one half.
+      throw new Error(
+        '[forge:mongo] upsert cannot combine `create` with a `divide` update. ' +
+        'Mongo needs an aggregation-pipeline update for an exact divide, and a ' +
+        'pipeline has no $setOnInsert. Split it: upsert the row first, then ' +
+        'update with the divide.',
+      );
+    }
+    const pipeline = compileUpdateAsPipeline(m, node);
+    const filter = compileWhere(m, node.where);
+    return node.many
+      ? { kind: 'mongo', collection: m.collection, op: 'updateMany', args: { filter, update: pipeline } }
+      : {
+          kind: 'mongo',
+          collection: m.collection,
+          op: 'findOneAndUpdate',
+          args: { filter, update: pipeline, options: { returnDocument: 'after' } },
+        };
+  }
   const update: Record<string, any> = {};
   if (node.set && Object.keys(node.set).length) {
-    update.$set = remapKeys(m, node.set);
+    update.$set = remapAndCoerce(m, node.set);
   }
   if (node.increment && Object.keys(node.increment).length) {
     update.$inc = remapKeys(m, node.increment);
@@ -276,8 +406,22 @@ export function compileUpdate(node: UpdateNode, modelOverride?: ModelDef<any>): 
   if (node.multiply && Object.keys(node.multiply).length) {
     update.$mul = remapKeys(m, node.multiply);
   }
+  if (node.max && Object.keys(node.max).length) {
+    update.$max = remapKeys(m, node.max);
+  }
+  if (node.min && Object.keys(node.min).length) {
+    update.$min = remapKeys(m, node.min);
+  }
   if (node.push && Object.keys(node.push).length) {
-    update.$push = remapKeys(m, node.push);
+    // Coerced too: pushing an id string onto an array of objectId would
+    // otherwise store a String next to ObjectIds in the same array.
+    update.$push = remapAndCoerce(m, node.push);
+  }
+  if (node.addToSet && Object.keys(node.addToSet).length) {
+    update.$addToSet = remapAndCoerce(m, node.addToSet);
+  }
+  if (node.pull && Object.keys(node.pull).length) {
+    update.$pull = remapAndCoerce(m, node.pull);
   }
   if (node.unset?.length) {
     update.$unset = Object.fromEntries(node.unset.map((k) => [appKeyToDbKey(k), '']));
@@ -297,7 +441,11 @@ export function compileUpdate(node: UpdateNode, modelOverride?: ModelDef<any>): 
       ...Object.keys(update.$set || {}),
       ...Object.keys(update.$inc || {}),
       ...Object.keys(update.$mul || {}),
+      ...Object.keys(update.$max || {}),
+      ...Object.keys(update.$min || {}),
       ...Object.keys(update.$push || {}),
+      ...Object.keys(update.$addToSet || {}),
+      ...Object.keys(update.$pull || {}),
       ...Object.keys(update.$unset || {}),
     ];
     const conflicts = (a: string, b: string): boolean =>
@@ -340,6 +488,35 @@ export function compileDelete(node: DeleteNode, modelOverride?: ModelDef<any>): 
 function remapKeys(_m: ModelDef<any>, obj: Record<string, any>): Record<string, any> {
   const out: Record<string, any> = {};
   for (const k of Object.keys(obj)) out[appKeyToDbKey(k)] = obj[k];
+  return out;
+}
+
+/**
+ * Rename keys AND coerce values to their BSON types.
+ *
+ * `remapKeys` alone was what the update path used before 2.18.0, and it
+ * renamed without coercing. Create coerced (via coerceCreatePayload) and
+ * `where` coerced (via compileLeaf) — only update did not. So the same field
+ * written two ways ended up with two different BSON types in the same
+ * collection:
+ *
+ *   create({ data: { location_id: '652f…' } })   → ObjectId('652f…')
+ *   update({ data: { location_id: '652f…' } })   → "652f…"   (a String!)
+ *
+ * and because `where` DOES coerce, `findMany({ where: { location_id: id } })`
+ * searched for the ObjectId and silently never matched the string rows. The
+ * damage is permanent and invisible until something counts the rows — it needs
+ * a repair script to undo, which is how this was found.
+ *
+ * The same applied to dates: an ISO string handed to `update` stayed a string,
+ * so range queries on it stopped working.
+ */
+function remapAndCoerce(m: ModelDef<any>, obj: Record<string, any>): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const k of Object.keys(obj)) {
+    const def = getFieldDef(m, k);
+    out[appKeyToDbKey(k)] = def ? coerceFieldValue(def, obj[k], { model: m.collection, name: k }) : obj[k];
+  }
   return out;
 }
 
@@ -394,8 +571,10 @@ export function compileGroupBy(node: GroupByNode, modelOverride?: ModelDef<any>)
   if (node.orderBy?.length) {
     const sort: Record<string, 1 | -1> = {};
     for (const e of node.orderBy) {
-      // Group columns live under _id.<col>; everything else is an alias.
-      const path = node.by.includes(e.field) ? `_id.${e.field}` : appKeyToDbKey(e.field);
+      // An aggregate order targets the $group output alias directly.
+      const path = e.agg
+        ? `__agg_${e.agg.bucket.slice(1)}_${e.agg.field}`
+        : node.by.includes(e.field) ? `_id.${e.field}` : appKeyToDbKey(e.field);
       sort[path] = e.direction === 'desc' ? -1 : 1;
     }
     pipeline.push({ $sort: sort });

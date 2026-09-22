@@ -24,6 +24,20 @@ this out.
 
 Full release history is in [CHANGELOG.md](/reference/changelog). Recent highlights:
 
+- **2.18 — three things that silently returned or wrote wrong data.** A
+  keyset cursor ignored the sort direction, so `orderBy: { createdAt:
+  'desc' }` with a cursor asked for rows *greater* than the last row
+  seen and page 2 re-served page 1. Mongo `update` never coerced its
+  values, so an id string written through `update` was stored as a
+  BSON `String` where `create` would have stored an `ObjectId` — and
+  because `where` does coerce, those rows became invisible to every
+  later query. Nested `take` / `skip` applied to the whole batch
+  instead of per parent, so `include: { posts: { take: 3 } }` over ten
+  users returned three posts *in total*. Also: `divide` is an exact
+  division rather than a multiply-by-reciprocal, a Mongo relation
+  filter throws instead of matching every row in the collection, and
+  `f.bytes()` is a real binary field kind — see
+  [docs/BINARY.md](/reference/binary).
 - **2.7 — malformed queries throw instead of silently doing something
   else.** Unknown `where` operators (`$gte`, `contians`) used to be
   dropped from the tree, so the filter matched **every row**; typoed

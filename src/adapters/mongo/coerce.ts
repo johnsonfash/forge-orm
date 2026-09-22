@@ -1,6 +1,7 @@
 import type { ObjectId } from 'mongodb';
 import { mongo } from './bson';
 import { FieldDef, ModelDef } from '../../schema/types';
+import { bytesForStore, fromDriverBytes, isBytesInput } from '../../bytes';
 
 // Coercion: bridges Prisma's app-side shape with Mongo's wire shape.
 //
@@ -33,8 +34,18 @@ const dateInToDate = (v: any): any => {
 // Walks a value alongside its target FieldDef (when known) and coerces leaf
 // scalars. For nested operator objects ($in/$gte/etc.) the same field's
 // target type applies to the operator's payload.
-export function coerceFieldValue(field: FieldDef | undefined, value: any): any {
+export function coerceFieldValue(
+  field: FieldDef | undefined,
+  value: any,
+  ctx?: { model?: string; name?: string },
+): any {
   if (value == null || field == null) return value;
+
+  // Binary is handled FIRST, before the operator-object walk below. A Buffer
+  // is `typeof 'object'` and not an Array, so it would otherwise fall into
+  // that branch and `Object.keys()` it — allocating one string key per byte,
+  // i.e. a five-million-entry array for a 5 MB blob.
+  if (field.kind === 'bytes') return coerceBytesValue(field, value, ctx);
 
   // Operator object — walk its payload but keep the same field context.
   if (
@@ -89,12 +100,39 @@ export function coerceFieldValue(field: FieldDef | undefined, value: any): any {
   }
 }
 
+// A `bytes` value, or a filter operator carrying one ({ $in: [buf, buf] }).
+// Operator payloads are recognised the same way the generic walk does it —
+// a `$`-prefixed key — because the generic walk cannot be reached from here.
+function coerceBytesValue(
+  field: FieldDef,
+  value: any,
+  ctx?: { model?: string; name?: string },
+): any {
+  if (isBytesInput(value)) {
+    return bytesForStore(ctx?.model ?? '?', ctx?.name ?? '?', field.maxBytes, value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((v) => coerceBytesValue(field, v, ctx));
+  }
+  if (typeof value === 'object' && value !== null) {
+    const keys = Object.keys(value);
+    if (keys.some((k) => k.startsWith('$'))) {
+      const out: any = {};
+      for (const k of keys) out[k] = coerceBytesValue(field, value[k], ctx);
+      return out;
+    }
+  }
+  // Not binary and not an operator — hand it to the shared type error so the
+  // caller sees the field name instead of a BSON serialiser failure.
+  return bytesForStore(ctx?.model ?? '?', ctx?.name ?? '?', field.maxBytes, value);
+}
+
 function coerceEmbed(value: any, fields: Record<string, FieldDef>): any {
   if (value == null || typeof value !== 'object') return value;
   const out: any = { ...value };
   for (const k of Object.keys(out)) {
     const f = fields[k];
-    if (f) out[k] = coerceFieldValue(f, out[k]);
+    if (f) out[k] = coerceFieldValue(f, out[k], { name: k });
   }
   return out;
 }
@@ -150,7 +188,7 @@ export function coerceCreatePayload(model: ModelDef<any>, data: any): any {
   for (const k of Object.keys(withDefaults)) {
     const dbKey = appKeyToDbKey(k);
     const def = getFieldDef(model, k);
-    out[dbKey] = coerceFieldValue(def, withDefaults[k]);
+    out[dbKey] = coerceFieldValue(def, withDefaults[k], { model: model.collection, name: k });
   }
   return out;
 }
@@ -168,6 +206,9 @@ export function decodeRow(model: ModelDef<any>, doc: any): any {
 
 function decodeValue(field: FieldDef | undefined, value: any): any {
   if (value == null) return value;
+  // Before the ObjectId/array checks: BSON hands back a `Binary` wrapper,
+  // which is neither, and which the app cannot use as a typed array.
+  if (field?.kind === 'bytes') return fromDriverBytes(value);
   if (value instanceof mongo().ObjectId) return value.toString();
   if (Array.isArray(value)) return value.map((v) => decodeValue(field, v));
   if (field?.kind === 'embed' || field?.kind === 'embedMany') {

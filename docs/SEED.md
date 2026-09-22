@@ -117,13 +117,13 @@ The rule, in one line: **a seed step that uses `create` is a bug waiting to surf
 
 ```ts
 await tx.user.upsert({
-  where:  { email: 'admin@x.co' },     // unique selector
+  where:  { email: 'admin@x.co' },     // eq-leaf on a unique column
   create: { email: 'admin@x.co', name: 'Admin', role: 'owner' },
   update: { role: 'owner' },           // re-run convergence
 });
 ```
 
-* `where` — must be a unique selector. The eq-leaves become the conflict target. On Postgres / SQLite / DuckDB it's `ON CONFLICT (...)`; on MySQL it's `ON DUPLICATE KEY UPDATE`; on MSSQL it's `MERGE ... ON`; on Mongo it's `upsert: true` on `updateOne`. See [MUTATIONS.md](./MUTATIONS.md#upsert) for the full compile table.
+* `where` — a full filter, not a narrowed unique selector; nothing checks it at compile time or at runtime. Its eq-leaves become the conflict target, so they must name a real unique constraint — if they do not, the upsert either errors in the database or silently inserts a duplicate every time the seed runs. On Postgres / SQLite / DuckDB it's `ON CONFLICT (...)`; on MySQL it's `ON DUPLICATE KEY UPDATE`; on MSSQL it's `MERGE ... ON`; on Mongo it's `upsert: true` on `findOneAndUpdate`. See [MUTATIONS.md](./MUTATIONS.md#upsert) for the full compile table.
 * `create` — the row to insert when no match. Should include every required field.
 * `update` — the fields to overwrite when a match exists. This is the convergence step: re-running the seed makes the row match the seed's view of the world, not the database's.
 
@@ -672,6 +672,8 @@ await db.$executeRaw`
 `RESTART IDENTITY` resets auto-increment counters; `CASCADE` walks foreign keys. SQLite has no `TRUNCATE` — `DELETE FROM <each table>` is the substitute.
 
 **`deleteMany({})` per model.** The slowest path, but the only one that fires the same listeners as regular deletes (useful when you want audit-log rows for the reset). On Mongo it's the only option — there's no `TRUNCATE` equivalent. Order matters: children before parents, by hand, because forge has no topological sort built in.
+
+`db.$models` gives you the model names if you would rather drive the loop off the schema than hand-write the list; `db[name]` resolves a model from a runtime string, and `'Name' in db` is a non-throwing probe (reading an unknown model throws by design). That still does not order the deletes for you — put the names in the order you need them.
 
 | Scenario                           | Pick                                                       |
 |------------------------------------|------------------------------------------------------------|

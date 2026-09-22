@@ -15,6 +15,65 @@ export interface Dialect {
   placeholder(params: unknown[], value: unknown): string;
   // Map a FieldDef to the column's SQL type for DDL generation.
   columnType(field: FieldDef): string;
+  /**
+   * Boolean literals. T-SQL has no `TRUE` / `FALSE` keyword, so the compiler
+   * cannot write them directly: `where: { id: { in: [] } }` — which is what an
+   * empty `.map()` produces — emitted a bare `FALSE` and was a syntax error on
+   * MSSQL.
+   */
+  readonly trueLiteral: string;
+  readonly falseLiteral: string;
+  /**
+   * Case-insensitive LIKE. Only Postgres has `ILIKE`; the shared compiler
+   * emitted it for every dialect, so `mode: 'insensitive'` — the most used
+   * filter in the Prisma vocabulary — was a syntax error on MySQL, SQLite
+   * and MSSQL.
+   */
+  caseInsensitiveLike(quotedColumn: string, patternExpr: string): string;
+  /**
+   * Read-side filters on a list column (`has` / `hasSome` / `hasEvery` /
+   * `isEmpty`).
+   *
+   * Postgres and DuckDB have real array columns; MySQL, SQLite and MSSQL keep
+   * `stringArray` / `intArray` as JSON. The shared compiler emitted the
+   * Postgres forms (`= ANY(col)`, `col && ARRAY[…]`, `col @> ARRAY[…]`,
+   * `array_length`) for all of them, so a declared field kind was writable
+   * and readable but not FILTERABLE on three of the six dialects.
+   *
+   * `values` is already the caller's list (empty-list cases are handled by the
+   * compiler before this is called). Bind through `params`.
+   */
+  arrayFilter(
+    op: 'has' | 'hasSome' | 'hasEvery' | 'isEmpty',
+    quotedColumn: string,
+    values: unknown[],
+    params: unknown[],
+  ): string;
+  /**
+   * Emit an array mutation for an UPDATE SET clause.
+   *
+   * It has to be per-dialect because the array kinds are not stored the same
+   * way: Postgres and DuckDB have real array columns, while MySQL, SQLite and
+   * MSSQL keep `stringArray` / `intArray` as JSON. Before 2.18.0 the compiler
+   * emitted `array_append(...)` for every dialect, so `push` produced a
+   * "no such function" error on MySQL and SQLite.
+   *
+   * `addToSet` and `pull` return null on a dialect that cannot express them,
+   * and the compiler turns that into an error naming the dialect.
+   */
+  arrayOp(
+    op: 'push' | 'addToSet' | 'pull',
+    quotedColumn: string,
+    params: unknown[],
+    value: unknown,
+  ): string | null;
+  /**
+   * Whether `(a, b) > (x, y)` — row-value comparison — is valid here.
+   * Used by the keyset-cursor compiler, which falls back to the equivalent
+   * lexicographic OR expansion when it is not. Defaults to true: standard
+   * SQL has it, and only T-SQL among the supported dialects does not.
+   */
+  readonly rowValueComparison?: boolean;
   // ORDER BY direction with optional NULLS FIRST/LAST.
   orderClause(column: string, direction: 'asc' | 'desc', nulls?: 'first' | 'last'): string;
   // ON CONFLICT helper for upsert. PG: ON CONFLICT (cols) DO UPDATE SET ...
@@ -96,7 +155,7 @@ export interface Dialect {
    * `operand` is provided so the dialect can choose the right cast on
    * dialects that need typed comparisons (PG mostly).
    */
-  jsonPathExpr?(quotedCol: string, path: string[], operand: unknown): string;
+  jsonPathExpr?(quotedCol: string, path: string[], operand: unknown, params: unknown[]): string;
   /**
    * Compile a "vector near + optional withinDistance" filter. Per dialect:
    *   PG     → ($col <=> $vec) < $d   (cosine via pgvector — also <-> for L2, <#> for dot)
@@ -166,6 +225,7 @@ export const PostgresDialect: Dialect = {
       case 'bool':       return 'boolean';
       case 'dateTime':   return 'timestamptz';
       case 'json':       return 'jsonb';
+      case 'bytes':      return 'bytea';
       case 'enum':       return 'text'; // + CHECK constraint applied at DDL time
       case 'embed':      return 'jsonb';
       case 'embedMany':  return 'jsonb';
@@ -189,6 +249,36 @@ export const PostgresDialect: Dialect = {
         if (!dims) throw new Error(`[forge:pg] vector field requires { dims }`);
         return `vector(${dims})`;
       }
+    }
+  },
+
+  trueLiteral: 'TRUE',
+  falseLiteral: 'FALSE',
+
+  caseInsensitiveLike(quotedColumn, patternExpr) {
+    return `${quotedColumn} ILIKE ${patternExpr}`;
+  },
+
+  arrayFilter(op, quotedColumn, values, params) {
+    const ph = (v: unknown) => this.placeholder(params, v);
+    switch (op) {
+      case 'has':      return `${ph(values[0])} = ANY(${quotedColumn})`;
+      case 'hasSome':  return `${quotedColumn} && ARRAY[${values.map(ph).join(', ')}]`;
+      case 'hasEvery': return `${quotedColumn} @> ARRAY[${values.map(ph).join(', ')}]`;
+      case 'isEmpty':  return `coalesce(array_length(${quotedColumn}, 1), 0) = 0`;
+    }
+  },
+
+  arrayOp(op, quotedColumn, params, value) {
+    const p = () => this.placeholder(params, value);
+    switch (op) {
+      case 'push':     return `array_append(${quotedColumn}, ${p()})`;
+      // array_append only when it is not already there, so the column stays a set.
+      case 'addToSet': {
+        const a = p(), b = p();
+        return `CASE WHEN ${quotedColumn} @> ARRAY[${a}] THEN ${quotedColumn} ELSE array_append(${quotedColumn}, ${b}) END`;
+      }
+      case 'pull':     return `array_remove(${quotedColumn}, ${p()})`;
     }
   },
 

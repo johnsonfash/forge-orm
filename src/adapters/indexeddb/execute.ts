@@ -368,6 +368,24 @@ export async function executeUpdate(
       if (node.set) Object.assign(patch, node.set);
       if (node.increment) for (const [f, v] of Object.entries(node.increment)) patch[f] = ((patch[f] as number) ?? 0) + v;
       if (node.multiply) for (const [f, v] of Object.entries(node.multiply)) patch[f] = ((patch[f] as number) ?? 0) * v;
+      if (node.divide) for (const [f, v] of Object.entries(node.divide)) patch[f] = ((patch[f] as number) ?? 0) / v;
+      if (node.max) for (const [f, v] of Object.entries(node.max)) {
+        const cur = patch[f] as number | undefined;
+        patch[f] = cur == null || cur < v ? v : cur;
+      }
+      if (node.min) for (const [f, v] of Object.entries(node.min)) {
+        const cur = patch[f] as number | undefined;
+        patch[f] = cur == null || cur > v ? v : cur;
+      }
+      if (node.addToSet) for (const [f, v] of Object.entries(node.addToSet)) {
+        const cur = Array.isArray(patch[f]) ? (patch[f] as unknown[]) : [];
+        const add = Array.isArray(v) ? v : [v];
+        patch[f] = [...cur, ...add.filter((x) => !cur.includes(x))];
+      }
+      if (node.pull) for (const [f, v] of Object.entries(node.pull)) {
+        const cur = Array.isArray(patch[f]) ? (patch[f] as unknown[]) : [];
+        patch[f] = cur.filter((x) => x !== v);
+      }
       if (node.push) for (const [f, vs] of Object.entries(node.push)) {
         const arr = Array.isArray(patch[f]) ? [...(patch[f] as unknown[])] : [];
         const values = Array.isArray(vs) ? (vs as unknown[]) : [vs];

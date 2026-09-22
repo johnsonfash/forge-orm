@@ -51,6 +51,7 @@ import { buildDuckdbCompileApi } from '../adapters/duckdb/compile';
 import { buildMssqlCompileApi } from '../adapters/mssql/compile';
 import type { CompileApi, MongoCompileApi, SQLCompileApi } from '../compile';
 import { buildCount, buildDelete, buildGroupBy, buildInsert, buildProjection, buildSelect, buildUpdate, buildUpdateData } from '../ir/build';
+import type { UpdateNode } from '../ir/types';
 import type { Adapter } from '../adapters/types';
 import { getDefaultMongoAdapter } from '../adapters/mongo/adapter';
 
@@ -459,6 +460,32 @@ export class CollectionWrapper<
   // field to the current time when the caller didn't set it explicitly. (Mongo
   // also handles this in coerce; setting it here makes it uniform across SQL too.)
   private _updatedAtFields?: string[];
+
+  /**
+   * Run the adapter's inbound coercion over an update's plain assignments.
+   *
+   * `create`, `createMany` and `upsert`'s create block all did this; `update`
+   * and `updateMany` never did. On the SQL adapters that meant an update
+   * skipped every value conversion AND every value CHECK, so a `f.bytes()`
+   * column would accept a base64 string and store it as text — the exact
+   * corruption that field kind exists to prevent — and `maxBytes` was not
+   * enforced on the one path most likely to grow a row.
+   *
+   * Mongo is excluded because its coerceInbound is `coerceCreatePayload`,
+   * which also stamps create-time DEFAULTS; running it on an update would
+   * write default values over columns the caller never mentioned. Mongo's
+   * update path coerces inside its own compiler instead (`remapAndCoerce`).
+   *
+   * Only `set` is coerced. `increment`/`multiply`/`divide`/`max`/`min` are
+   * numbers, not column values, and `push`/`addToSet`/`pull` carry array
+   * ELEMENTS, which are not the column's own type.
+   */
+  private _coerceUpdateSet(node: UpdateNode): UpdateNode {
+    if (this.adapter.kind === 'mongo') return node;
+    if (!node.set || Object.keys(node.set).length === 0) return node;
+    node.set = this.adapter.coerceInbound(this.model, node.set);
+    return node;
+  }
   private _applyUpdatedAt(data: any): any {
     if (!data || typeof data !== 'object') return data;
     if (this._updatedAtFields === undefined) {
@@ -554,7 +581,7 @@ export class CollectionWrapper<
     this._assertStrictWhere(args.where);
     const mk = this._modelKey();
     const { scalar, nested } = this._splitNestedWrites(args.data, /*forCreate*/ false);
-    const node = buildUpdate(
+    const node = this._coerceUpdateSet(buildUpdate(
       mk, this.model,
       {
         where: args.where,
@@ -565,7 +592,7 @@ export class CollectionWrapper<
         semantic: _internal?.semanticOp,
       },
       schema as any,
-    );
+    ));
     const { doc } = await this.adapter.executeUpdate(node, this.model, {
       session: this._session,
       semanticOp: _internal?.semanticOp,
@@ -585,7 +612,7 @@ export class CollectionWrapper<
     this._assertWritable('updateMany');
     this._assertStrictWhere(args.where);
     const mk = this._modelKey();
-    const node = buildUpdate(
+    const node = this._coerceUpdateSet(buildUpdate(
       mk, this.model,
       {
         where: args.where,
@@ -594,7 +621,7 @@ export class CollectionWrapper<
         semantic: _internal?.semanticOp,
       },
       schema as any,
-    );
+    ));
     const r = await this.adapter.executeUpdate(node, this.model, {
       session: this._session,
       semanticOp: _internal?.semanticOp,
@@ -628,7 +655,12 @@ export class CollectionWrapper<
     const atomicPaths = [
       ...Object.keys(frag.increment ?? {}),
       ...Object.keys(frag.multiply ?? {}),
+      ...Object.keys(frag.divide ?? {}),
+      ...Object.keys(frag.max ?? {}),
+      ...Object.keys(frag.min ?? {}),
       ...Object.keys(frag.push ?? {}),
+      ...Object.keys(frag.addToSet ?? {}),
+      ...Object.keys(frag.pull ?? {}),
       ...(frag.unset ?? []),
     ];
     const createKeys = new Set(Object.keys((args.create as object) ?? {}));
@@ -639,11 +671,11 @@ export class CollectionWrapper<
       this.adapter.kind === 'mongo' && atomicPaths.some((k) => createKeys.has(k));
 
     if (destructiveOverlap) {
-      const node = buildUpdate(
+      const node = this._coerceUpdateSet(buildUpdate(
         mk, this.model,
         { where: args.where, data: this._applyUpdatedAt(args.update), many: false },
         schema as any,
-      );
+      ));
       let { doc } = await this.adapter.executeUpdate(node, this.model, { session: this._session });
       if (!doc) {
         try {
@@ -668,11 +700,11 @@ export class CollectionWrapper<
     // layer applies defaults; we only need to pre-coerce here so user-supplied
     // ids/dates become BSON types before going through Mongo's BSON.
     const createCoerced = this.adapter.coerceInbound(this.model, this._fillAutoId(args.create));
-    const node = buildUpdate(
+    const node = this._coerceUpdateSet(buildUpdate(
       mk, this.model,
       { where: args.where, data: this._applyUpdatedAt(args.update), many: false, upsertCreate: createCoerced },
       schema as any,
-    );
+    ));
     const { doc } = await this.adapter.executeUpdate(node, this.model, { session: this._session });
     return this._returnOne(doc, args);
   }
@@ -774,9 +806,62 @@ export class CollectionWrapper<
     );
   }
 
+  /**
+   * Whole-table aggregates — `{ _count, _sum, _avg, _min, _max }` over every
+   * row the `where` matches, with no grouping key.
+   *
+   *   const { _sum, _count } = await db.order.aggregate({
+   *     where: { status: 'paid' },
+   *     _sum: { total: true },
+   *     _count: { _all: true },
+   *   });
+   *
+   * It is `groupBy` with an empty `by`, unwrapped from the one-element array
+   * that returns. Before 2.18.0 only the Mongo-pipeline form below existed,
+   * so this shape threw "aggregate() needs a pipeline" — while being the form
+   * the documentation used throughout.
+   *
+   * An all-zero-row table still returns an object: the counts are 0 and every
+   * sum/avg/min/max is null, rather than `undefined` from an empty array.
+   */
+  async aggregate<A extends {
+    where?: WhereInput<F>;
+    _count?: { _all?: boolean } & { [K in keyof F]?: boolean };
+    _avg?:   { [K in keyof F]?: boolean };
+    _sum?:   { [K in keyof F]?: boolean };
+    _min?:   { [K in keyof F]?: boolean };
+    _max?:   { [K in keyof F]?: boolean };
+  }>(args: A): Promise<Record<string, any>>;
   // Replaces Prisma's aggregateRaw — same signature, returns plain documents
   // with stringified ObjectIds for ergonomic parity.
-  async aggregate(args: { pipeline: any[]; options?: any } | any[]): Promise<any[]> {
+  async aggregate(args: { pipeline: any[]; options?: any } | any[]): Promise<any[]>;
+  async aggregate(args: any): Promise<any> {
+    const AGGS = ['_count', '_avg', '_sum', '_min', '_max'] as const;
+    if (
+      args && !Array.isArray(args) && !Array.isArray(args.pipeline) &&
+      AGGS.some((k) => args[k] !== undefined)
+    ) {
+      const rows = await this.groupBy({ ...args, by: [] } as any);
+      if (rows.length > 0) return rows[0];
+      // Zero rows grouped means zero rows matched. Hand back the shape the
+      // caller asked for with empty values, so destructuring cannot explode.
+      const empty: Record<string, any> = {};
+      for (const bucket of AGGS) {
+        const req = args[bucket];
+        if (!req) continue;
+        const out: Record<string, any> = {};
+        for (const field of Object.keys(req)) {
+          if (!req[field]) continue;
+          out[field] = bucket === '_count' ? 0 : null;
+        }
+        empty[bucket] = out;
+      }
+      return empty;
+    }
+    return this._aggregatePipeline(args);
+  }
+
+  private async _aggregatePipeline(args: { pipeline: any[]; options?: any } | any[]): Promise<any[]> {
     // Accept both `aggregate({ pipeline })` and the bare-array form
     // `aggregate([...])`. The bare form used to fall through to an EMPTY
     // pipeline — a silent full-collection scan — because `args.pipeline` was

@@ -157,9 +157,20 @@ describe('IR — buildUpdateData', () => {
     expect(buildUpdateData(User, { age: { increment: 1 } }).increment).toEqual({ age: 1 });
     expect(buildUpdateData(User, { age: { decrement: 3 } }).increment).toEqual({ age: -3 });
   });
-  it('multiply / divide collapse to multiply bucket', () => {
+  it('multiply keeps its own bucket', () => {
     expect(buildUpdateData(User, { age: { multiply: 2 } }).multiply).toEqual({ age: 2 });
-    expect(buildUpdateData(User, { age: { divide: 4 } }).multiply).toEqual({ age: 0.25 });
+  });
+  it('divide keeps its own bucket — it is NOT folded into multiply', () => {
+    // Before 2.18.0 `divide: 4` became `multiply: 0.25`, so `divide: 3` became
+    // `multiply: 0.3333333333333333` and an exact decimal column drifted. The
+    // division has to survive the IR for an adapter to emit a real `/`.
+    const frag = buildUpdateData(User, { age: { divide: 4 } });
+    expect(frag.divide).toEqual({ age: 4 });
+    expect(frag.multiply).toBeUndefined();
+    expect(buildUpdateData(User, { age: { divide: 3 } }).divide).toEqual({ age: 3 });
+  });
+  it('divide by zero is refused at build time', () => {
+    expect(() => buildUpdateData(User, { age: { divide: 0 } })).toThrow(/divide by zero/);
   });
   it('push on array field', () => {
     expect(buildUpdateData(User, { tags: { push: 'x' } }).push).toEqual({ tags: 'x' });

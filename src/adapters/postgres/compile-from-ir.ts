@@ -94,12 +94,14 @@ function compileLeaf(ctx: CompileCtx, leaf: Extract<WhereTree, { kind: 'leaf' }>
     case 'ne':       return leaf.value === null ? `${col} IS NOT NULL`  : `${col} <> ${ph(leaf.value)}`;
     case 'in': {
       const arr = leaf.value as unknown[];
-      if (!arr.length) return 'FALSE';
+      // `in: []` matches nothing. Emitting `IN ()` would be a syntax error and
+      // a bare `FALSE` is not valid T-SQL, so the literal comes from the dialect.
+      if (!arr.length) return ctx.d.falseLiteral;
       return `${col} IN (${arr.map(ph).join(', ')})`;
     }
     case 'nin': {
       const arr = leaf.value as unknown[];
-      if (!arr.length) return 'TRUE';
+      if (!arr.length) return ctx.d.trueLiteral;
       return `${col} NOT IN (${arr.map(ph).join(', ')})`;
     }
     case 'lt':  return `${col} < ${ph(leaf.value)}`;
@@ -113,20 +115,21 @@ function compileLeaf(ctx: CompileCtx, leaf: Extract<WhereTree, { kind: 'leaf' }>
     case 'endsWith':
       return likeOp(ctx, col, `%${escapeForLike(String(leaf.value))}`, !!leaf.caseInsensitive);
     case 'has':
-      return `${ph(leaf.value)} = ANY(${col})`;
+      return ctx.d.arrayFilter('has', col, [leaf.value], ctx.params);
     case 'hasSome': {
       const arr = leaf.value as unknown[];
-      if (!arr.length) return 'FALSE';
-      return `${col} && ARRAY[${arr.map(ph).join(', ')}]`;
+      if (!arr.length) return ctx.d.falseLiteral;
+      return ctx.d.arrayFilter('hasSome', col, arr, ctx.params);
     }
     case 'hasEvery': {
       const arr = leaf.value as unknown[];
-      if (!arr.length) return 'TRUE';
-      return `${col} @> ARRAY[${arr.map(ph).join(', ')}]`;
+      if (!arr.length) return ctx.d.trueLiteral;
+      return ctx.d.arrayFilter('hasEvery', col, arr, ctx.params);
     }
-    case 'isEmpty':
-      return leaf.value ? `coalesce(array_length(${col}, 1), 0) = 0`
-                        : `coalesce(array_length(${col}, 1), 0) > 0`;
+    case 'isEmpty': {
+      const empty = ctx.d.arrayFilter('isEmpty', col, [], ctx.params);
+      return leaf.value ? empty : `NOT (${empty})`;
+    }
     case 'search':
       return ctx.d.searchClause(col, ph(String(leaf.value)), {
         rawColumn: leaf.field,
@@ -134,11 +137,11 @@ function compileLeaf(ctx: CompileCtx, leaf: Extract<WhereTree, { kind: 'leaf' }>
         quoteIdent: (s: string) => ctx.d.quoteIdent(s),
       });
     case 'jsonPath': {
-      if (!leaf.jsonPath) return 'TRUE';
+      if (!leaf.jsonPath) return ctx.d.trueLiteral;
       const { path, subOp } = leaf.jsonPath;
       const rawCol = `${ctx.table}.${ctx.d.quoteIdent(leaf.field)}`;
       const rendered = ctx.d.jsonPathExpr
-        ? ctx.d.jsonPathExpr(rawCol, path, leaf.value)
+        ? ctx.d.jsonPathExpr(rawCol, path, leaf.value, ctx.params)
         : pgJsonPath(rawCol, path, leaf.value);
       // Compare the extracted value against the user-supplied operand using
       // the same operator vocabulary as scalar leaves.
@@ -156,7 +159,7 @@ function compileLeaf(ctx: CompileCtx, leaf: Extract<WhereTree, { kind: 'leaf' }>
         }
         case 'in': {
           const arr = leaf.value as unknown[];
-          if (!arr.length) return 'FALSE';
+          if (!arr.length) return ctx.d.falseLiteral;
           return `${rendered} IN (${arr.map((v) => ph(coerceJsonOperand(v))).join(', ')})`;
         }
         case 'has': {
@@ -165,7 +168,7 @@ function compileLeaf(ctx: CompileCtx, leaf: Extract<WhereTree, { kind: 'leaf' }>
           return `${rendered}::text LIKE ${ph('%' + JSON.stringify(leaf.value) + '%')}`;
         }
       }
-      return 'TRUE';
+      return ctx.d.trueLiteral;
     }
     case 'near': {
       const fld = ctx.model.fields[leaf.field];
@@ -282,7 +285,8 @@ function haversineBboxPrefilter(
 
 function likeOp(ctx: CompileCtx, col: string, pattern: string, ci: boolean): string {
   const ph = ctx.d.placeholder(ctx.params, pattern);
-  return ci ? `${col} ILIKE ${ph}` : `${col} LIKE ${ph}`;
+  // ILIKE is Postgres-only; every other dialect gets its own form.
+  return ci ? ctx.d.caseInsensitiveLike(col, ph) : `${col} LIKE ${ph}`;
 }
 
 function compileRelationFilter(
@@ -291,11 +295,11 @@ function compileRelationFilter(
 ): string {
   const relations = ctx.model.relations();
   const rel = relations[tree.relation];
-  if (!rel) return 'TRUE';
+  if (!rel) return ctx.d.trueLiteral;
   const targetModel =
     ctx.schemaOverride?.[rel.target] ??
     ((schema as any)[rel.target] as ModelDef<any> | undefined);
-  if (!targetModel) return 'TRUE';
+  if (!targetModel) return ctx.d.trueLiteral;
 
   // Unique alias for this subquery — `t1`, `t2`, ... — so nested EXISTS
   // don't shadow each other.
@@ -383,29 +387,61 @@ function compileOrder(d: Dialect, table: string, orderBy: OrderByEntry[] | undef
       const alias = fld?.kind === 'vector' ? '_distance' : '_distanceMeters';
       return d.orderClause(d.quoteIdent(alias), e.direction);
     }
+    // An aggregate order is only meaningful on a groupBy; a plain select has
+    // no such column to sort by.
+    if (e.agg) return null;
     return d.orderClause(`${table}.${d.quoteIdent(e.field)}`, e.direction, e.nulls);
   }).filter((p): p is string => p !== null);
   if (!parts.length) return '';
   return `ORDER BY ${parts.join(', ')}`;
 }
 
+// A cursor is "everything that sorts AFTER this row", so which comparison
+// keeps a row depends on the direction the query sorts that column. Emitting
+// `>` unconditionally — as this did before 2.18.0 — silently returns the
+// wrong page for the single most common feed query there is
+// (`orderBy: { createdAt: 'desc' }`): it asks for rows GREATER than the last
+// row seen while walking downwards, so page 2 re-serves the rows before it.
 function compileCursor(
   d: Dialect,
   table: string,
   params: unknown[],
   cursor: SelectNode['cursor'],
+  orderBy: SelectNode['orderBy'],
 ): string {
   if (!cursor?.fields) return '';
   const keys = Object.keys(cursor.fields);
   if (keys.length === 0) return '';
-  if (keys.length === 1) {
-    const k = keys[0];
-    return `${table}.${d.quoteIdent(k)} > ${d.placeholder(params, cursor.fields[k])}`;
+
+  // A cursor key absent from orderBy has no declared direction; ascending is
+  // the same assumption the ORDER BY builder makes for a bare field.
+  const descending = (k: string) =>
+    orderBy?.find((e) => e.field === k)?.direction === 'desc';
+  const cmp = (k: string) => (descending(k) ? '<' : '>');
+  const col = (k: string) => `${table}.${d.quoteIdent(k)}`;
+  const val = (k: string) => d.placeholder(params, cursor.fields![k]);
+
+  if (keys.length === 1) return `${col(keys[0])} ${cmp(keys[0])} ${val(keys[0])}`;
+
+  // Uniform direction → row-value comparison, which an index on the same
+  // columns can satisfy with one range scan. T-SQL has no such form, so it
+  // takes the OR expansion below instead of emitting SQL it cannot parse.
+  if (d.rowValueComparison !== false && new Set(keys.map(descending)).size === 1) {
+    const cols = keys.map(col).join(', ');
+    const vals = keys.map(val).join(', ');
+    return `(${cols}) ${cmp(keys[0])} (${vals})`;
   }
-  // Composite cursor: tuple comparison. PG supports (a, b) > (?, ?).
-  const cols = keys.map((k) => `${table}.${d.quoteIdent(k)}`).join(', ');
-  const vals = keys.map((k) => d.placeholder(params, cursor.fields[k])).join(', ');
-  return `(${cols}) > (${vals})`;
+
+  // Mixed directions (`{ score: 'desc' }, { id: 'asc' }`) cannot be a row
+  // comparison — `(a, b) > (x, y)` applies ONE operator to the whole tuple.
+  // Expand lexicographically instead:
+  //   (a < x) OR (a = x AND b > y) OR (a = x AND b = y AND c < z) …
+  const terms = keys.map((k, i) => {
+    const clauses = keys.slice(0, i).map((prev) => `${col(prev)} = ${val(prev)}`);
+    clauses.push(`${col(k)} ${cmp(k)} ${val(k)}`);
+    return `(${clauses.join(' AND ')})`;
+  });
+  return `(${terms.join(' OR ')})`;
 }
 
 export function compileSelect(
@@ -471,7 +507,7 @@ export function compileSelect(
   const whereParts: string[] = [];
   const w = compileWhere(ctx, node.where);
   if (w) whereParts.push(w);
-  const c = compileCursor(dialect, table, params, node.cursor);
+  const c = compileCursor(dialect, table, params, node.cursor, node.orderBy);
   if (c) whereParts.push(c);
   const whereClause = whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : '';
 
@@ -561,7 +597,12 @@ export function hasNoUpdatePayload(node: UpdateNode): boolean {
   ) &&
     !node.increment &&
     !node.multiply &&
+    !node.divide &&
+    !node.max &&
+    !node.min &&
     !node.push &&
+    !node.addToSet &&
+    !node.pull &&
     !node.unset?.length;
 }
 
@@ -602,9 +643,47 @@ export function compileUpdate(
         parts.push(`${dialect.quoteIdent(k)} = ${table}.${dialect.quoteIdent(k)} * ${dialect.placeholder(params, v)}`);
       }
     }
-    if (node.push) {
-      for (const [k, v] of Object.entries(node.push)) {
-        parts.push(`${dialect.quoteIdent(k)} = array_append(${table}.${dialect.quoteIdent(k)}, ${dialect.placeholder(params, v)})`);
+    if (node.divide) {
+      for (const [k, v] of Object.entries(node.divide)) {
+        parts.push(`${dialect.quoteIdent(k)} = ${table}.${dialect.quoteIdent(k)} / ${dialect.placeholder(params, v)}`);
+      }
+    }
+    // GREATEST/LEAST differ on NULL between dialects (PG ignores nulls, MySQL
+    // returns NULL), so a CASE is used instead: one expression that behaves
+    // the same everywhere, and the same way Mongo's $max/$min do on a field
+    // that is missing.
+    if (node.max) {
+      for (const [k, v] of Object.entries(node.max)) {
+        const c = `${table}.${dialect.quoteIdent(k)}`;
+        const p1 = dialect.placeholder(params, v);
+        const p2 = dialect.placeholder(params, v);
+        parts.push(`${dialect.quoteIdent(k)} = CASE WHEN ${c} IS NULL OR ${c} < ${p1} THEN ${p2} ELSE ${c} END`);
+      }
+    }
+    if (node.min) {
+      for (const [k, v] of Object.entries(node.min)) {
+        const c = `${table}.${dialect.quoteIdent(k)}`;
+        const p1 = dialect.placeholder(params, v);
+        const p2 = dialect.placeholder(params, v);
+        parts.push(`${dialect.quoteIdent(k)} = CASE WHEN ${c} IS NULL OR ${c} > ${p1} THEN ${p2} ELSE ${c} END`);
+      }
+    }
+    for (const op of ['push', 'addToSet', 'pull'] as const) {
+      const bucket = node[op];
+      if (!bucket) continue;
+      for (const [k, v] of Object.entries(bucket)) {
+        const c = `${table}.${dialect.quoteIdent(k)}`;
+        const expr = dialect.arrayOp(op, c, params, v);
+        if (expr === null) {
+          throw new Error(
+            `[forge:${dialect.name}] '${op}' on '${k}' is not supported on this dialect — ` +
+            `its list columns are stored as JSON, which has no value-based ` +
+            `contains/remove. Read the array, change it, and write it back with ` +
+            `\`{ ${k}: [...] }\` — or move the collection to Postgres/DuckDB, ` +
+            'whose array columns support it natively.',
+          );
+        }
+        parts.push(`${dialect.quoteIdent(k)} = ${expr}`);
       }
     }
     if (node.unset?.length) {
@@ -772,12 +851,21 @@ export function compileGroupBy(
 
   const orderClause = (() => {
     if (!node.orderBy?.length) return '';
-    // Order by either a by-column or an aggregation alias — Prisma orders on
-    // grouped fields by default, so we just emit `field DIR` and let PG
-    // resolve it against the GROUP BY columns.
-    return `ORDER BY ${node.orderBy.map((e) =>
-      dialect.orderClause(`${table}.${dialect.quoteIdent(e.field)}`, e.direction, e.nulls),
-    ).join(', ')}`;
+    const AGG_FN: Record<string, string> = {
+      _count: 'COUNT', _avg: 'AVG', _sum: 'SUM', _min: 'MIN', _max: 'MAX',
+    };
+    return `ORDER BY ${node.orderBy.map((e) => {
+      if (e.agg) {
+        // The aggregate EXPRESSION, not the SELECT alias, so ordering on a
+        // bucket works whether or not that bucket was also selected.
+        const fn = AGG_FN[e.agg.bucket];
+        const colExpr = e.agg.field === '_all'
+          ? '*'
+          : `${table}.${dialect.quoteIdent(e.agg.field)}`;
+        return dialect.orderClause(`${fn}(${colExpr})`, e.direction, e.nulls);
+      }
+      return dialect.orderClause(`${table}.${dialect.quoteIdent(e.field)}`, e.direction, e.nulls);
+    }).join(', ')}`;
   })();
   const limit = node.limit != null ? `LIMIT ${Number(node.limit)}` : '';
   const offset = node.offset != null ? `OFFSET ${Number(node.offset)}` : '';

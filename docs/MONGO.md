@@ -16,12 +16,15 @@ shared with every other adapter.
 * [Index types forge emits](#index-types-forge-emits)
 * [Atlas-specific features](#atlas-specific-features)
 * [The aggregation pipeline](#the-aggregation-pipeline)
+* [Relation filters throw (behaviour change in 2.18.0)](#relation-filters-throw-behaviour-change-in-2180)
 * [Transactions](#transactions)
 * [Change streams](#change-streams)
 * [Read concerns and write concerns](#read-concerns-and-write-concerns)
 * [Sharding](#sharding)
 * [Connection pool](#connection-pool)
 * [BSON types — round-trip with forge](#bson-types--round-trip-with-forge)
+* [`divide` compiles to a pipeline update](#divide-compiles-to-a-pipeline-update)
+* [The `update` path and BSON coercion](#the-update-path-and-bson-coercion)
 * [Common errors](#common-errors)
 * [Three worked examples](#three-worked-examples)
 * [Where to look in the source](#where-to-look-in-the-source)
@@ -199,6 +202,13 @@ Two reasons for the choice:
    relation level is just another `find` with its own `select`,
    `include`, `orderBy`, `limit`. The pipeline form would need a
    sub-pipeline per relation and a final `$project` to peel it apart.
+
+The single batched fetch shown above is what runs when the nested
+`include` has no paging of its own. Add a nested `take` or `skip` and the
+hydration step switches to one `find` per parent, because a nested page
+is per parent — the shared logic lives in `src/ir/hydrate-many.ts` and
+behaves identically on all six adapters. See
+[N-PLUS-ONE](./N-PLUS-ONE.md) for the cost and the reasoning.
 
 If you need a true server-side join (avoiding the round-trip overhead
 on a fan-out of thousands), reach for `db.<model>.aggregate(...)`
@@ -478,19 +488,78 @@ Stage-by-stage notes:
 * **`$unwind`** — not emitted; raw aggregate. Useful when you need to
   group by an element of an `embedMany` array.
 
-Relation filters (`where: { posts: { some: {...} } }`) currently emit
-`{}` (match-all) on Mongo, with a known-gap note in `compileWhereNode`:
+---
+
+## Relation filters throw (behaviour change in 2.18.0)
+
+A relation filter — `where: { author: { is: { … } } }`,
+`where: { posts: { some: { … } } }` — cannot be compiled for Mongo,
+because a `find` has no join. Up to 2.17.0 `compileWhereNode` returned
+`{}` for it: match-all. That is the most dangerous answer available,
+because the same compiler builds the filter for reads **and** for writes:
 
 ```ts
-case 'relation':
-  // Relation filters in `where` are not yet supported on Mongo (no $lookup);
-  // return {} (match-all) rather than erroring. Tracked as a known gap.
-  return {};
+// On 2.17.0 and earlier this compiled to deleteMany({})
+// and emptied the collection.
+await db.post.deleteMany({ where: { author: { is: { email: 'x' } } } });
 ```
 
-The workaround is a raw `aggregate` with `$lookup` + `$match` on the
-joined field — see [Cross-collection joins](#1-atlas-search-hybrid-query)
-in the worked examples.
+A read was no better — it returned every row in the collection instead of
+the matching ones, with no error and nothing in the logs.
+
+From 2.18.0 it throws, naming the relation and its mode:
+
+```
+[forge:mongo] a relation filter on 'author' (is) cannot be compiled for
+Mongo — a find has no join. Resolve it in two steps:
+  const ids = (await db.author.findMany({ where: { email: 'x' }, select: { id: true } })).map(a => a.id);
+  await db.post.findMany({ where: { author_id: { in: ids } } });
+Or use db.<model>.aggregate([{ $lookup: … }]) for a single round trip.
+```
+
+So the rewrite is two queries — resolve the related ids, then filter on
+the foreign key:
+
+```ts
+const ids = (await db.author.findMany({
+  where:  { email: 'x' },
+  select: { id: true },
+})).map((a) => a.id);
+
+await db.post.findMany({ where: { author_id: { in: ids } } });
+```
+
+Or one round trip, with the join written out by hand:
+
+```ts
+await db.post.aggregate([
+  { $lookup: { from: 'authors', localField: 'author_id', foreignField: '_id', as: 'author' } },
+  { $match:  { 'author.email': 'x' } },
+]);
+```
+
+**This is a behaviour change.** Code written against 2.17.0 or earlier
+that leant on the match-all — knowingly or not — now errors instead of
+running. That is the point: an error is recoverable, and a `deleteMany`
+that ignored its filter was not.
+
+`aggregate()` is two methods behind one name, and only one of them is
+Mongo-specific. Forge dispatches on the arguments: any of the five
+bucket keys (`_count`, `_sum`, `_avg`, `_min`, `_max`) picks the
+portable form, anything else goes to the pipeline.
+
+The **bucket** form — `aggregate({ where, _count, _sum, _avg, _min, _max })`
+— is `groupBy({ by: [] })` with the one-element array unwrapped. It runs
+on every dialect and ports without change.
+
+The **pipeline** form — `aggregate({ pipeline })` / `aggregate([...])` —
+is Mongo-only. It hands the pipeline straight to the driver's
+`collection.aggregate` (`src/builder/collection.ts`), so there is no
+usable equivalent on a SQL adapter; a query written this way is a query
+that stays on Mongo. That is a fair trade for `$lookup`, `$facet` and
+`$setWindowFields`, as long as it is a decision rather than an
+accident. See
+[AGGREGATIONS.md](./AGGREGATIONS.md#the-aggregation-surface).
 
 ---
 
@@ -803,10 +872,15 @@ arithmetic loses precision on values past 2^53.
 
 ### `Binary`
 
-`f.bytes()`. App-side: a Node `Buffer` or `Uint8Array`. DB-side: BSON
-`Binary` (subtype 0 by default). The driver round-trips both
-directly. ThumbHash payloads, image blobs, and signed tokens all
-fit here.
+`f.bytes()` — new in 2.18.0, see [BINARY](./BINARY.md). App-side: a Node
+`Buffer` or `Uint8Array`. DB-side: BSON `Binary` (subtype 0 by default).
+The driver round-trips both directly. ThumbHash payloads, image blobs,
+and signed tokens all fit here.
+
+Unlike the SQL adapters, Mongo coerces and size-checks an `f.bytes()`
+value on the **`update`** path as well as on `create`, because both run
+through `remapAndCoerce` — see
+[The `update` path and BSON coercion](#the-update-path-and-bson-coercion).
 
 ### `Regex` and `Long`
 
@@ -820,6 +894,186 @@ on read.
 
 Not a BSON type — forge does not auto-convert. Use `Decimal128` for
 exact arithmetic or `Long` for 64-bit-int compatibility.
+
+---
+
+## `divide` compiles to a pipeline update
+
+Mongo has no `$div` update operator, so an exact division cannot be
+written as an update document at all. Before 2.18.0 the IR papered over
+that by rewriting the operator before any adapter saw it:
+
+```ts
+{ price: { divide: 3 } }   //  became  $mul: 0.3333333333333333
+```
+
+That is not a division. On an exact `f.decimal()` money column it drifts
+a little on every update, and the drift compounds — divide a balance by
+three often enough and the ledger no longer adds up. On an `f.int()`
+column it rounds, and turns the field into a double on the way.
+
+From 2.18.0 a `divide` compiles to an **aggregation-pipeline update**
+(`compileUpdateAsPipeline`), which has a real `$divide`:
+
+```ts
+await db.product.update({
+  where: { id: 'p1' },
+  data:  { price: { divide: 3 } },
+});
+// → updateOne(filter, [{ $set: { price: { $divide: [{ $ifNull: ['$price', 0] }, 3] } } }])
+```
+
+This needs **MongoDB 4.2 or newer** — pipeline updates do not exist
+before that.
+
+Every other operator in the same `data` is translated into the matching
+pipeline expression, so the whole update stays one atomic statement
+rather than splitting into two writes:
+
+| Operator | Update document | Pipeline expression |
+|---|---|---|
+| `increment` | `$inc` | `$add` |
+| `multiply` | `$mul` | `$multiply` |
+| `divide` | — (none exists) | `$divide` |
+| `max` / `min` | `$max` / `$min` | `$max` / `$min` |
+| `push` | `$push` | `$concatArrays` |
+| `addToSet` | `$addToSet` | `$setUnion` |
+| `pull` | `$pull` | `$filter` |
+| `unset` | `$unset` | `$unset` stage |
+
+### Literals are wrapped in `$literal`
+
+Inside a pipeline, a bare string that begins with `$` is a **field
+reference**, not text. So a plain `$set` stage would read the wrong
+thing entirely:
+
+```ts
+data: { name: '$5 off', price: { divide: 2 } }
+// without the wrap: { $set: { name: '$5 off' } }
+//   → stores the value of a field called "5 off" (usually missing → the key is dropped)
+// with it:          { $set: { name: { $literal: '$5 off' } } }
+//   → stores the text "$5 off"
+```
+
+Forge wraps every literal in the `$set` stage in `$literal`, so a value
+that happens to start with `$` — a price, a template token, a shell
+snippet — is stored as you wrote it.
+
+### `divide` + `upsert` throws
+
+A pipeline update has no insert-only branch: `$setOnInsert` is an
+update-*document* operator and a pipeline cannot carry one. So "divide
+on conflict, seed the row on insert" cannot be expressed as one
+statement, and forge says so instead of silently dropping half of it:
+
+```
+[forge:mongo] upsert cannot combine `create` with a `divide` update.
+Mongo needs an aggregation-pipeline update for an exact divide, and a
+pipeline has no $setOnInsert. Split it: upsert the row first, then
+update with the divide.
+```
+
+Split it into two calls, as the message says:
+
+```ts
+await db.product.upsert({
+  where:  { sku: 'A1' },
+  create: { sku: 'A1', price: '90.00' },
+  update: {},                            // no-op on hit
+});
+await db.product.update({
+  where: { sku: 'A1' },
+  data:  { price: { divide: 3 } },
+});
+```
+
+Those are two statements, so they are not atomic together. Wrap them in
+`db.$transaction(...)` if that matters — which needs a replica set, see
+[Transactions](#transactions).
+
+One narrow exception to the throw: if `create` seeds the *same* field
+you are dividing, the wrapper never reaches the pipeline compiler. That
+overlap already has its own Mongo fallback — update-then-create with a
+duplicate-key retry — so you get two statements rather than an error.
+The outcome is the same either way: two statements, not one. See
+[UPSERT — Atomic ops in the update branch](./UPSERT.md#atomic-ops-in-the-update-branch).
+
+### The rest of the adapters
+
+`divide: 0` never reaches an adapter: it is refused when the IR is built
+(`src/ir/build/data.ts`) with `update.<field>.divide: cannot divide by
+zero`. Every SQL dialect emits a native `col = col / $n`, and IndexedDB
+does the division in JS. Mongo is the only adapter that needs the
+pipeline detour.
+
+---
+
+## The `update` path and BSON coercion
+
+Every value forge writes has to be turned into the right BSON type
+first — an id string into an `ObjectId`, an ISO string into a BSON
+`Date`. Three code paths need that, and until 2.18.0 only two of them
+did it.
+
+| Path | 2.17.0 and earlier | 2.18.0 |
+|---|---|---|
+| `create` | coerced (`coerceCreatePayload`) | coerced |
+| `where` | coerced (`compileLeaf`) | coerced |
+| `update` / `updateMany` | **keys renamed, values untouched** | coerced |
+
+`update` called `remapKeys`, which renamed app field names to db column
+names and passed the values through as they arrived. So the same field
+written two ways ended up with two different BSON types in one
+collection:
+
+```ts
+await db.shop.create({ data: { location_id: '652f…' } });  // → ObjectId('652f…')
+await db.shop.update({ where: { id }, data: { location_id: '652f…' } });
+                                                          // → "652f…"  a String!
+```
+
+And because `where` *does* coerce, every later read went looking for an
+`ObjectId`:
+
+```ts
+await db.shop.findMany({ where: { location_id: '652f…' } });
+// compiles to { location_id: ObjectId('652f…') } — never matches the String rows
+```
+
+Those rows were **invisible, not missing**. The same held for dates: an
+ISO string handed to `update` stayed a string, so `gt` / `lt` range
+filters silently stopped matching it.
+
+Nothing errored at any point. The damage was permanent, and it stayed
+invisible until something counted the rows and the number came back
+wrong — which is how this was found. Undoing it needs a repair script;
+forge cannot fix it for you on read, because a string and an `ObjectId`
+are two different values as far as the server is concerned.
+
+**If you are on 2.17.0 or earlier and you have ever written an
+`f.objectId()` or `f.dateTime()` field through `update`, assume you have
+mixed-type rows.** Upgrading stops new ones appearing; it does not
+convert the ones already there. Check per field with a `$type` probe and
+convert what you find:
+
+```ts
+// How many rows hold a String where an ObjectId belongs?
+await db.shop.aggregate([
+  { $match: { location_id: { $type: 'string' } } },
+  { $count: 'broken' },
+]);
+```
+
+### What coerces now
+
+`$set`, `$push`, `$addToSet` and `$pull` all go through
+`remapAndCoerce`, so a value written or pushed lands with the field's
+declared BSON type. Pushing an id string onto an array of `ObjectId`
+would otherwise have parked a `String` next to `ObjectId`s in the same
+array, which breaks every `$in` against it.
+
+The atomic numeric operators — `$inc`, `$mul`, `$max`, `$min` — are left
+alone. They carry numbers, and a number needs no coercion.
 
 ---
 
@@ -1042,6 +1296,7 @@ compose well into typed `include`.
 | Args → IR compile API | `src/adapters/mongo/compile.ts` |
 | Inbound / outbound coercion (ObjectId, Date, embeds, defaults, extended-JSON) | `src/adapters/mongo/coerce.ts` |
 | `executeSelect` + `$geoNear` + `$vectorSearch` bridges + hydration | `src/adapters/mongo/execute.ts` |
+| Relation hydration — batched vs. per-parent paging (shared by all six adapters) | `src/ir/hydrate-many.ts` |
 | Cascade walker (`onDelete: Cascade` / `SetNull`) | `src/adapters/mongo/cascade.ts` |
 | Error translation (`P2002`, `P2025`) | `src/adapters/mongo/errors.ts` |
 | `forge push` — collect specs, fingerprint, ensureIndex | `src/adapters/mongo/scripts/push.ts` |
