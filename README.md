@@ -382,6 +382,18 @@ this out.
 
 Full release history is in [CHANGELOG.md](./CHANGELOG.md). Recent highlights:
 
+- **2.20.2 — an `ObjectId` in a `where` threw.**
+  `where: { author_id: new ObjectId(id) }` — the most ordinary query you
+  can write against MongoDB, and the shape [docs/MONGO.md](docs/MONGO.md)
+  promises works — failed with `unknown operator 'buffer'`. Deciding
+  whether a value was a value or an operator container like `{ gte: 5 }`
+  used "object, not array, not Date", so every class instance was walked
+  for operators, and `Object.keys()` on an ObjectId returns `['buffer']`.
+  `Decimal128`, `Long`, `Binary`, `UUID` and a raw `Buffer` all broke the
+  same way. Only a *plain* object is parsed for operators now. Worth
+  re-checking if you `try/catch` around forge queries: the throw is loud,
+  but a `catch` turns it into a query that quietly does nothing.
+  See [CHANGELOG.md](./CHANGELOG.md#2202--an-objectid-in-a-where-threw).
 - **2.20 — `updateFirst` / `deleteFirst`: one round trip instead of two.**
   `update` and `delete` return the written row but **throw** when the
   filter matched nothing, so "update it and hand it back, or tell me it
