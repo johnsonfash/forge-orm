@@ -122,6 +122,7 @@ IndexedDB's native `onupgradeneeded` versioning maps cleanly to forge-orm's non-
 | **Add a field** | No-op. IDB is schemaless — start writing it. |
 | **Add an index** | `store.createIndex()` runs inside `onupgradeneeded`. IDB re-scans existing rows and back-populates the index automatically. |
 | **Rename an index** | Runs as (drop, create) — same reindex behaviour. |
+| **Change an index's key shape** | Runs as (drop, create) under the same name. Indexes are compared on `keyPath`, `unique` and `multiEntry`, not just name — before 2.20.3 a same-named index with a different key shape was left in place, and because the adapter resolves indexes *by name*, queries then ran against the wrong shape and returned nothing. |
 | **Drop an index** | `store.deleteIndex()`. |
 | **Add a store** | `createObjectStore()`. |
 | **Drop a store** | Destructive — surfaces in `report.pending`, opt-in only via `{ destructive: true }`. |

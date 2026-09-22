@@ -73,10 +73,17 @@ export function buildStoreDDL(model: ModelDef<any>): StoreDDL {
   }
 
   // Composite uniques → compound unique indexes.
+  //
+  // A ONE-column combo must get a scalar keyPath, not a one-element array.
+  // IDB keys a compound index by an array (`['hello']`), and the planner
+  // synthesises this entry as a single-column index and looks it up with the
+  // scalar (`'hello'`) — so an array keyPath here matched nothing and every
+  // `where` on that column silently returned zero rows. `.unique()` above and
+  // `model.indexes` below already special-case length 1; this path did not.
   for (const combo of model.uniques ?? []) {
     indexes.push({
       name: `_u_${combo.join('_')}`,
-      keyPath: combo,
+      keyPath: combo.length === 1 ? combo[0] : combo,
       unique: true,
       multiEntry: false,
     });

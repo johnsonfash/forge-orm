@@ -1,6 +1,6 @@
 {
   "name": "forge-orm",
-  "version": "2.20.2",
+  "version": "2.20.3",
   "description": "Prisma-shape multi-database ORM/wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB & SQL Server from one codebase — typed geo / vector / JSON path / full-text search, no codegen, no query engine. Bring your own schema.",
   "license": "MIT",
   "author": "johnsonfash",
@@ -152,9 +152,10 @@
     "forge:typesafety": "tsc --noEmit --strict --target ES2022 --module commonjs --moduleResolution node --esModuleInterop --skipLibCheck typesafety-demo.ts",
     "forge:autocomplete": "ts-node --transpile-only --project tsconfig.json autocomplete-probe.ts",
     "forge:regression:transactions": "ts-node --transpile-only --project tsconfig.json regression-transactions.ts",
+    "forge:regression:indexeddb": "ts-node --transpile-only --project tsconfig.json regression-indexeddb.ts",
     "forge:features:pg": "SMOKE_DIALECT=pg ts-node --transpile-only --project tsconfig.json regression-dialect-features.ts",
     "forge:features:mysql": "SMOKE_DIALECT=mysql ts-node --transpile-only --project tsconfig.json regression-dialect-features.ts",
-    "forge:check": "npm run forge:test && npm run forge:typesafety && npm run forge:autocomplete && npm run forge:regression:transactions",
+    "forge:check": "npm run forge:test && npm run forge:typesafety && npm run forge:autocomplete && npm run forge:regression:transactions && npm run forge:regression:indexeddb",
     "forge:all": "npm run forge:check && npm run forge:integration && npm run forge:bench"
   },
   "peerDependencies": {
@@ -201,6 +202,7 @@
     "dotenv": "^17.4.2",
     "drizzle-kit": "^0.31.10",
     "drizzle-orm": "^0.45.2",
+    "fake-indexeddb": "^6.2.5",
     "jest": "^30.4.2",
     "mariadb": "^3.5.3",
     "mongodb": "^7.2.0",

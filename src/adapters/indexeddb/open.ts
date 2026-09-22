@@ -12,7 +12,7 @@
 // Destructive changes are surfaced in `pending` and require an explicit
 // opt-in call via `runMigrate({ destructive: true })`.
 
-import { buildDDLPlan, type DDLPlan, type StoreDDL } from './ddl';
+import { buildDDLPlan, type DDLPlan, type IndexDDL, type StoreDDL } from './ddl';
 import type { SchemaShape } from '../../schema/active';
 
 export interface OpenOptions {
@@ -63,11 +63,13 @@ export async function openDb(opts: OpenOptions): Promise<OpenResult> {
       }
       for (const { storeName, add, drop } of diff.alterStores) {
         const store = txn.objectStore(storeName);
-        for (const idx of add) {
-          store.createIndex(idx.name, idx.keyPath, { unique: idx.unique, multiEntry: idx.multiEntry });
-        }
+        // DROP FIRST. A rebuilt index appears in both lists under the same
+        // name, and createIndex on a live name throws ConstraintError.
         for (const name of drop) {
           store.deleteIndex(name);
+        }
+        for (const idx of add) {
+          store.createIndex(idx.name, idx.keyPath, { unique: idx.unique, multiEntry: idx.multiEntry });
         }
       }
     });
@@ -98,6 +100,26 @@ interface DiffPlan {
   hasWork: boolean;
 }
 
+/** True when the live index does not match what the schema now wants.
+ *  `keyPath` is a string for a single-column index and an array for a
+ *  compound one, so the two shapes have to be compared as shapes — a scalar
+ *  `'tag'` and a one-element `['tag']` are different indexes to IDB even
+ *  though they read the same. */
+function differs(store: IDBObjectStore, want: IndexDDL): boolean {
+  let live: IDBIndex;
+  try {
+    live = store.index(want.name);
+  } catch {
+    return false; // Not there — the caller's name check already covers it.
+  }
+  const sameKeyPath = Array.isArray(live.keyPath) || Array.isArray(want.keyPath)
+    ? Array.isArray(live.keyPath) && Array.isArray(want.keyPath) &&
+      live.keyPath.length === want.keyPath.length &&
+      live.keyPath.every((k, i) => k === (want.keyPath as string[])[i])
+    : live.keyPath === want.keyPath;
+  return !sameKeyPath || live.unique !== want.unique || live.multiEntry !== want.multiEntry;
+}
+
 function diffAgainstLive(plan: DDLPlan, db: IDBDatabase): DiffPlan {
   const liveStoreNames = new Set(Array.from(db.objectStoreNames));
   const wantStoreNames = new Set(plan.stores.map((s) => s.storeName));
@@ -121,8 +143,21 @@ function diffAgainstLive(plan: DDLPlan, db: IDBDatabase): DiffPlan {
       const store = tx.objectStore(want.storeName);
       const liveIdxNames = new Set(Array.from(store.indexNames));
       const wantIdxNames = new Set(want.indexes.map((i) => i.name));
-      const add = want.indexes.filter((i) => !liveIdxNames.has(i.name));
-      const drop = Array.from(liveIdxNames).filter((n) => !wantIdxNames.has(n));
+      // An index whose KEY SHAPE changed has to be rebuilt, not skipped.
+      // Comparing names alone left a stale index in place under the right
+      // name — and the adapter resolves indexes BY NAME, so the lookup then
+      // succeeds against the wrong key shape and returns nothing instead of
+      // failing. That is how the one-column `uniques` bug (2.20.3) would have
+      // survived its own fix in every database that already existed.
+      const stale = want.indexes.filter((i) => liveIdxNames.has(i.name) && differs(store, i));
+      const add = [
+        ...want.indexes.filter((i) => !liveIdxNames.has(i.name)),
+        ...stale,
+      ];
+      const drop = [
+        ...Array.from(liveIdxNames).filter((n) => !wantIdxNames.has(n)),
+        ...stale.map((i) => i.name),
+      ];
       if (add.length || drop.length) {
         alterStores.push({ storeName: want.storeName, add, drop });
       } else {

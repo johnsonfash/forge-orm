@@ -382,6 +382,18 @@ this out.
 
 Full release history is in [CHANGELOG.md](./CHANGELOG.md). Recent highlights:
 
+- **2.20.3 — a one-column `uniques` found nothing on IndexedDB.**
+  `{ uniques: [['pendingId']] }` compiled to a *compound* IDB index, whose
+  keys are arrays — while the planner looked it up with a scalar. The row
+  was written and readable by primary key, but every `where` on that column
+  returned `null`/`[]` with no error. Writing it as `f.string().unique()`,
+  or with two or more columns, was never affected. Index migration now
+  compares key *shape* rather than just the index name, so a database that
+  already has the broken index gets it rebuilt. Browser-only: Postgres,
+  MySQL, SQLite and Mongo were all verified unaffected. The adapter had no
+  execution coverage at all until now — `regression-indexeddb.ts` closes
+  that.
+
 - **2.20.2 — an `ObjectId` in a `where` threw.**
   `where: { author_id: new ObjectId(id) }` — the most ordinary query you
   can write against MongoDB, and the shape [docs/MONGO.md](docs/MONGO.md)

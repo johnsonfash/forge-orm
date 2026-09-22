@@ -43,6 +43,12 @@ jobs:
       - name: Transactions
         run: npm run forge:regression:transactions
 
+      # IndexedDB, in-process via fake-indexeddb. The adapter had NO
+      # execution coverage before 2.20.3, which is how a one-column
+      # `uniques` came to return zero rows for every query on that column.
+      - name: IndexedDB
+        run: npm run forge:regression:indexeddb
+
       # Catches what a typecheck cannot: a broken emit, a missing entry
       # point, a subpath in package.json that resolves to nothing.
       - name: Build

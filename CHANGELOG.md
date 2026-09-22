@@ -4,6 +4,52 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.20.3 — a one-column `uniques` returned nothing on IndexedDB
+
+**Patch.** On the IndexedDB adapter, declaring a single-column unique the
+composite way made every query on that column find no rows:
+
+```ts
+const Media = model('media', { id: f.id(), pendingId: f.string(), … },
+  { uniques: [['pendingId']] });
+
+await db.media.create({ data: { id: 'p1', pendingId: 'p1', … } });
+await db.media.findFirst({ where: { pendingId: 'p1' } });  // → null
+await db.media.findMany({});                               // → the row IS there
+```
+
+The row was written correctly and readable by primary key — only lookups on
+the column were blind, and they returned `null` / `[]` rather than raising.
+Writing the same constraint as `f.string().unique()`, or using two or more
+columns, was never affected.
+
+**Cause.** `ddl.ts` gave every `uniques` entry an array `keyPath`, so a
+one-element combo became a *compound* index — and IDB keys a compound index
+by an array (`['p1']`). The planner synthesises that entry as a
+single-column index and looks it up with the scalar (`'p1'`), which matches
+nothing. The `.unique()` path and `model.indexes` both already collapsed
+length 1 to a scalar; the composite-unique path was the one that did not.
+
+**Also fixed: an index whose key shape changed was never rebuilt.**
+`diffAgainstLive` compared index names only, so the broken index above would
+have survived this very fix in every database that already had one — and
+because the adapter resolves indexes *by name*, the query would keep
+succeeding against the wrong key shape and keep returning nothing. Indexes
+are now compared on `keyPath`, `unique` and `multiEntry`, and a mismatch is
+dropped and recreated (drop before add, or rebuilding a name throws
+`ConstraintError`).
+
+**The real gap this exposes.** The IndexedDB adapter had *no* execution
+coverage — `driver.ts` said the driver wrapper existed "so tests can inject
+fake-indexeddb", and nothing ever did. The same blind spot for the SQL
+dialects is what `regression-dialect-features.ts` was written for. There is
+now `regression-indexeddb.ts` (14 checks, in-process via `fake-indexeddb`),
+wired into `forge:check` and CI, covering the unique shapes, the index
+rebuild, and `f.bytes()` round-tripping as real binary.
+
+Found from a real app: a media table that stored files as `f.bytes()` and
+declared `uniques: [['pendingId']]`.
+
 ## 2.20.2 — an ObjectId in a `where` threw
 
 **Patch.** The single most ordinary thing you can write against MongoDB did

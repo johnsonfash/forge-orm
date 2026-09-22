@@ -111,6 +111,12 @@ const OrderLine = model('order_lines', {
   uniques: [['order_id', 'position']],
 });
 
+// For a SINGLE column, prefer the field shorthand above. `uniques: [['sku']]`
+// means the same thing and is enforced the same way on every dialect — but
+// `.unique()` reads better, and on IndexedDB the one-column composite form
+// was broken before 2.20.3 (it built a compound index the planner could not
+// match, so queries on that column silently found nothing).
+
 // IndexDef with unique: true — the long form. Same surface as a unique
 // index manually-written in SQL.
 const Slug = model('slugs', {
