@@ -179,6 +179,24 @@ describe('a JSON path is never spliced into the SQL text', () => {
     const evil = "a' OR 1=1#";
     const a = art(MysqlDialect, { where: { meta: { path: [evil], eq: 1 } } });
     expect(a.sql).not.toContain('OR 1=1');
-    expect(a.params).toContain(`$.${evil}`);
+    // Bound AND quoted. The quoting is not about injection — the parameter
+    // already handles that — it is because MySQL rejects a path with a bare
+    // quote or space as malformed, so an unquoted segment failed the query
+    // outright instead of matching nothing.
+    expect(a.params).toContain(`$."${evil}"`);
+  });
+
+  test('a key with a space or a hyphen is quoted, not left bare', () => {
+    for (const key of ['order-id', 'two words', 'a.b']) {
+      const a = art(MysqlDialect, { where: { meta: { path: [key], eq: 1 } } });
+      expect(a.params).toContain(`$."${key}"`);
+    }
+  });
+
+  test('a plain identifier and an array index stay unquoted', () => {
+    expect(art(MysqlDialect, { where: { meta: { path: ['city'], eq: 1 } } }).params)
+      .toContain('$.city');
+    expect(art(MysqlDialect, { where: { meta: { path: ['tags', '0'], eq: 1 } } }).params)
+      .toContain('$.tags[0]');
   });
 });

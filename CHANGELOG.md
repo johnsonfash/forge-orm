@@ -4,6 +4,75 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.20.1 — three bugs a real server found
+
+**Patch.** Every fix here was invisible to the unit suite, because the SQL it
+emits is correct-looking text and the defect only appears when a database
+executes it. Found by running the new features against a real PostgreSQL 18
+and MySQL 9.7 for the first time.
+
+### `f.bytes()` was stored as JSON text on MySQL, MSSQL and DuckDB
+
+A `Buffer` is an object, and each of those adapters' parameter coercion
+JSON-stringified any object on its way to the driver:
+
+```
+// what the column received
+{"type":"Buffer","data":[0,1,127,128,255]}
+```
+
+The write succeeded, the column filled up, and the bytes were gone. Reading
+back gave the UTF-8 of that JSON. Postgres and SQLite were unaffected — their
+coercion never stringified objects.
+
+Binary is now exempted before that branch in `mysql/compile-from-ir.ts`,
+`mssql/compile-from-ir.ts` and `duckdb/driver.ts`. Proven by a round trip on
+MySQL: `[0,1,127,128,255,13,10,0]` in, the same bytes out.
+
+### A default on a list column made the table undeployable on Postgres
+
+`f.stringArray().default([])` emitted `DEFAULT '[]'::jsonb` for a `text[]`
+column, and Postgres refuses the whole statement:
+
+```
+column "tags" is of type text[] but default expression is of type jsonb
+```
+
+So `CREATE TABLE` failed outright — not the write, the schema. The `::jsonb`
+fallback is right for `json` / `embed` / `geoPoint` and wrong for an array,
+which now emits `'{}'::text[]` or `ARRAY['a','b']::text[]` (and `integer[]`
+for `intArray`).
+
+### A JSON key with a space, a hyphen or a quote could not be queried
+
+`jsonPathSpec` wrote every segment bare, so `{ meta: { path: ['order-id'] } }`
+produced `$.order-id` — not valid JSONPath. MySQL rejected the expression with
+"Invalid JSON path expression" and the query failed rather than returning
+rows. Segments that are not plain identifiers are now quoted as `$."order-id"`,
+which every dialect taking a path string accepts. Note this was never an
+injection: the path has been a bound parameter since 2.18.0. It failed safe,
+but it failed.
+
+### New: the feature suite that found them
+
+`regression-dialect-features.ts` executes everything added in 2.18.0-2.20.0
+against a real server — `f.bytes()` round trips and `maxBytes`, the four array
+filters, `mode: 'insensitive'`, the bound JSON path (including an injection
+payload and a hyphenated key), cursor direction on a newest-first feed, the
+`divide` / `max` / `min` / `push` atomic ops, `updateFirst` / `deleteFirst`
+including the soft-deleting patch, and soft-delete scoping across `include`,
+`_count` and a relation filter. 31 checks per dialect, and it runs as part of
+`forge:integration:pg` and `forge:integration:mysql`.
+
+One thing it records rather than asserts: a case-SENSITIVE `contains` is not
+available on MySQL. The default collation is `_ci`, so a plain `LIKE` is
+already insensitive and forge has no way to force sensitivity without a
+`COLLATE` clause.
+
+### Tests
+984 jest tests across 67 suites, plus 8 transaction checks and 31 feature
+checks on each of Postgres and MySQL. `npm run forge:check` exits 0.
+
 ## 2.20.0 — `updateFirst` and `deleteFirst`: the doubled round trip on every write path
 
 **Minor, purely additive. No behaviour change to any existing API.**

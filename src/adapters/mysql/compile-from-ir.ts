@@ -23,6 +23,7 @@ import {
   compileUpdate as pgCompileUpdate,
   hasNoUpdatePayload,
 } from '../postgres/compile-from-ir';
+import { isBytesInput } from '../../bytes';
 
 function modelDef(modelKey: string, override?: ModelDef<any>): ModelDef<any> {
   if (override) return override;
@@ -35,6 +36,13 @@ function coerceParams(params: unknown[]): unknown[] {
   return params.map((v) => {
     if (typeof v === 'boolean') return v ? 1 : 0;
     if (v instanceof Date) return v;       // mysql2 handles Date natively
+      // A Buffer / Uint8Array is an object, so without this guard an
+      // `f.bytes()` value was JSON-stringified on its way to the driver and
+      // the column received the TEXT `{"type":"Buffer","data":[…]}`. The
+      // write succeeded and the bytes were gone. Only a real server shows
+      // this: the emitted SQL is identical either way, so a string-level
+      // test cannot see it.
+    if (isBytesInput(v)) return v;
     if (Array.isArray(v) || (typeof v === 'object' && v !== null && !(v instanceof Date))) {
       return JSON.stringify(v);
     }

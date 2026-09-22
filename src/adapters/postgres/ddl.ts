@@ -171,6 +171,22 @@ function renderDefault(field: FieldDef): string {
       if (typeof v === 'boolean') return ` DEFAULT ${v ? 'TRUE' : 'FALSE'}`;
       if (typeof v === 'number') return ` DEFAULT ${v}`;
       if (typeof v === 'string') return ` DEFAULT ${escapeSqlString(v)}`;
+      // An array column takes an array literal, not JSON. The `::jsonb`
+      // fallback below is right for json / embed / geoPoint and wrong for
+      // `text[]` / `integer[]` — Postgres refuses the CREATE TABLE outright
+      // ("column is of type text[] but default expression is of type jsonb"),
+      // so declaring a default on a list column made the whole table
+      // undeployable. Found by running the DDL against a real server; a
+      // string-level test cannot see it.
+      if (field.kind === 'stringArray' || field.kind === 'intArray') {
+        const cast = field.kind === 'intArray' ? 'integer[]' : 'text[]';
+        if (!Array.isArray(v)) return ` DEFAULT '{}'::${cast}`;
+        if (v.length === 0) return ` DEFAULT '{}'::${cast}`;
+        const items = v.map((x) =>
+          field.kind === 'intArray' ? String(Number(x)) : escapeSqlString(String(x)),
+        );
+        return ` DEFAULT ARRAY[${items.join(', ')}]::${cast}`;
+      }
       return ` DEFAULT ${escapeSqlString(JSON.stringify(v))}::jsonb`;
     }
   }

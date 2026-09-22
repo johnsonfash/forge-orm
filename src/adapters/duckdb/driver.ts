@@ -13,6 +13,7 @@ export interface DuckdbQueryResult {
 }
 
 import type { AdapterKind } from '../types';
+import { isBytesInput } from '../../bytes';
 
 export interface DuckdbDriver {
   readonly kind: Extract<AdapterKind, 'duckdb'>;
@@ -51,6 +52,9 @@ export interface DuckdbQueryable {
 function coerceParam(v: unknown): unknown {
   if (v == null) return v;
   if (v instanceof Date) return v.toISOString();
+  // Binary first: a Buffer is an object, and stringifying it stores the text
+  // `{"type":"Buffer","data":[…]}` in a BLOB column instead of the bytes.
+  if (isBytesInput(v)) return v;
   if (typeof v === 'object' && !Array.isArray(v)) return JSON.stringify(v);
   return v;
 }

@@ -39,6 +39,7 @@ import {
   compileSelect as pgCompileSelect,
   compileUpdate as pgCompileUpdate,
 } from '../postgres/compile-from-ir';
+import { isBytesInput } from '../../bytes';
 
 // Every identifier goes through the dialect's quoteIdent, which REFUSES a name
 // containing `]` or a NUL byte. Interpolating `[${k}]` by hand — as this file
@@ -68,6 +69,13 @@ function coerceParams(params: unknown[]): unknown[] {
     // bit on input automatically, but JSON columns receive strings — make
     // sure objects/arrays land as JSON-stringified text.
     if (v === true || v === false) return v ? 1 : 0;
+      // A Buffer / Uint8Array is an object, so without this guard an
+      // `f.bytes()` value was JSON-stringified on its way to the driver and
+      // the column received the TEXT `{"type":"Buffer","data":[…]}`. The
+      // write succeeded and the bytes were gone. Only a real server shows
+      // this: the emitted SQL is identical either way, so a string-level
+      // test cannot see it.
+    if (isBytesInput(v)) return v;
     if (Array.isArray(v) || (typeof v === 'object' && v !== null && !(v instanceof Date))) {
       return JSON.stringify(v);
     }
