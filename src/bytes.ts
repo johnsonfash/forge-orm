@@ -99,6 +99,22 @@ export function fromDriverBytes(v: unknown): unknown {
     if (val instanceof Uint8Array) return val;
     if (val instanceof ArrayBuffer) return new Uint8Array(val);
   }
+  /*
+   * DuckDB's node bindings hand back a `DuckDBBlobValue` wrapper rather than
+   * the bytes. Matched on the shape, like the BSON case above, so a second
+   * copy of @duckdb/node-api in the tree still works.
+   *
+   * AFTER the BSON check and gated on `_bsontype` being absent, because
+   * `Decimal128` ALSO has a `bytes` Uint8Array — its 16-byte internal
+   * representation. Matching shape alone would quietly turn a decimal into
+   * those raw bytes. Nothing calls this on a decimal today (it runs only for
+   * `field.kind === 'bytes'`), but it is exported, so the guard belongs here
+   * rather than in the callers' habits.
+   */
+  if (b._bsontype === undefined) {
+    const d = v as { bytes?: unknown };
+    if (d.bytes instanceof Uint8Array) return d.bytes;
+  }
   return v;
 }
 

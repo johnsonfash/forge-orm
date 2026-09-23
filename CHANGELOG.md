@@ -4,6 +4,48 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.20.4 — `f.bytes()` never worked on DuckDB
+
+**Patch.** Storing binary on DuckDB threw on every write, and a stored value
+could not be read back as bytes. Both directions were broken:
+
+```ts
+await db.asset.create({ data: { body: someUint8Array } });
+// Error: Cannot create values of type ANY. Specify a specific type.
+```
+
+**Cause, write side.** `@duckdb/node-api` cannot infer a type for a bare
+`Uint8Array` — nor for a `Buffer`. It needs its own `blobValue()` wrapper.
+The param coercion returned the bytes unchanged, which was the right fix for
+the *previous* bug (they had been JSON-stringified into a BLOB column as
+`{"0":137,"1":80,…}`) but left them unbindable. The driver now wraps them,
+resolving `blobValue` lazily so a build that never touches DuckDB does not
+pull the package in.
+
+**Cause, read side.** A BLOB comes back as a `DuckDBBlobValue` wrapper, so
+`f.bytes()` returned an object where every other dialect returns a
+`Uint8Array`. Unwrapped in the driver — it is what produces the wrapper,
+this adapter has no field-aware decode step, and doing it there also covers
+raw queries.
+
+`fromDriverBytes` now understands the wrapper too, matched on shape, and
+**ordered after the BSON check and gated on `_bsontype` being absent**:
+`Decimal128` also carries a `bytes` `Uint8Array` — its 16-byte internal
+representation — so matching on shape alone would quietly turn a decimal
+into those raw bytes.
+
+**Why it was missed.** DuckDB's driver was not installed on the machine the
+earlier bytes fix was written on, so that dialect's copy of the fix was
+verified by READING it. The code looked right and had never once run.
+`@duckdb/node-api` is a devDependency now and `regression-duckdb-bytes.ts`
+(10 checks: round trip, column type is really a blob, both columns, the
+`maxBytes` ceiling and its exact edge, a megabyte, and a non-binary value
+being refused) runs in `forge:check` and CI alongside the existing DuckDB
+and geo suites.
+
+The remaining dialect with no execution coverage is **MSSQL**, which needs a
+SQL Server to talk to.
+
 ## 2.20.3 — a one-column `uniques` returned nothing on IndexedDB
 
 **Patch.** On the IndexedDB adapter, declaring a single-column unique the

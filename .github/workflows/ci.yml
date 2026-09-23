@@ -49,6 +49,12 @@ jobs:
       - name: IndexedDB
         run: npm run forge:regression:indexeddb
 
+      # DuckDB, in-process. Its driver is a devDependency now, which is what
+      # let f.bytes() be RUN on this dialect for the first time — and it was
+      # broken in both directions until 2.20.4.
+      - name: DuckDB
+        run: npm run forge:integration:duckdb
+
       # Catches what a typecheck cannot: a broken emit, a missing entry
       # point, a subpath in package.json that resolves to nothing.
       - name: Build

@@ -26,6 +26,13 @@ const asset = await db.asset.findFirstOrThrow({ where: { name: 'logo.png' } });
 asset.body.byteLength;                // it is a Uint8Array
 ```
 
+> **DuckDB before 2.20.4.** `f.bytes()` did not work on DuckDB at all —
+> writes threw `Cannot create values of type ANY` (the node bindings accept
+> neither a `Uint8Array` nor a `Buffer`, only their own `blobValue()`), and a
+> read returned a `DuckDBBlobValue` wrapper rather than bytes. Fixed in both
+> directions in 2.20.4, and DuckDB now runs in CI so the path is executed
+> rather than assumed.
+
 ## Contents
 
 * [Why not a base64 string](#why-not-a-base64-string)

@@ -1,6 +1,6 @@
 {
   "name": "forge-orm",
-  "version": "2.20.3",
+  "version": "2.20.4",
   "description": "Prisma-shape multi-database ORM/wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB & SQL Server from one codebase — typed geo / vector / JSON path / full-text search, no codegen, no query engine. Bring your own schema.",
   "license": "MIT",
   "author": "johnsonfash",
@@ -130,7 +130,7 @@
     "forge:regression:mysql": "ts-node --transpile-only --project tsconfig.json regression-mariadb-driver.ts && ts-node --transpile-only --project tsconfig.json regression-mysql-partial-index.ts",
     "forge:integration:sqlite": "ts-node --transpile-only --project tsconfig.json integration-sqlite.ts && npm run forge:regression:sqlite",
     "forge:regression:sqlite": "ts-node --transpile-only --project tsconfig.json regression-libsql-driver.ts && ts-node --transpile-only --project tsconfig.json regression-tauri-sql-driver.ts && ts-node --transpile-only --project tsconfig.json regression-sqlite-fts5.ts",
-    "forge:integration:duckdb": "ts-node --transpile-only --project tsconfig.json regression-duckdb.ts && ts-node --transpile-only --project tsconfig.json regression-geo-duckdb.ts",
+    "forge:integration:duckdb": "ts-node --transpile-only --project tsconfig.json regression-duckdb.ts && ts-node --transpile-only --project tsconfig.json regression-duckdb-bytes.ts && ts-node --transpile-only --project tsconfig.json regression-geo-duckdb.ts",
     "forge:integration:geo": "ts-node --transpile-only --project tsconfig.json regression-geo-duckdb.ts",
     "smoke:drivers": "node scripts/driver-smoke.mjs",
     "forge:integration:sqlite:file": "SMOKE_SQLITE_URL=sqlite:./forge_smoke.db ts-node --transpile-only --project tsconfig.json integration-sqlite.ts",
@@ -155,7 +155,7 @@
     "forge:regression:indexeddb": "ts-node --transpile-only --project tsconfig.json regression-indexeddb.ts",
     "forge:features:pg": "SMOKE_DIALECT=pg ts-node --transpile-only --project tsconfig.json regression-dialect-features.ts",
     "forge:features:mysql": "SMOKE_DIALECT=mysql ts-node --transpile-only --project tsconfig.json regression-dialect-features.ts",
-    "forge:check": "npm run forge:test && npm run forge:typesafety && npm run forge:autocomplete && npm run forge:regression:transactions && npm run forge:regression:indexeddb",
+    "forge:check": "npm run forge:test && npm run forge:typesafety && npm run forge:autocomplete && npm run forge:regression:transactions && npm run forge:regression:indexeddb && npm run forge:integration:duckdb",
     "forge:all": "npm run forge:check && npm run forge:integration && npm run forge:bench"
   },
   "peerDependencies": {
@@ -187,6 +187,7 @@
     }
   },
   "devDependencies": {
+    "@duckdb/node-api": "^1.5.5-r.5",
     "@electric-sql/pglite": "^0.4.1",
     "@libsql/client": "^0.17.3",
     "@prisma/adapter-better-sqlite3": "^7.8.0",

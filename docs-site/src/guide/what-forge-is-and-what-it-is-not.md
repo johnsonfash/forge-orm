@@ -24,6 +24,15 @@ this out.
 
 Full release history is in [CHANGELOG.md](/reference/changelog). Recent highlights:
 
+- **2.20.4 — `f.bytes()` never worked on DuckDB.**
+  Writing binary threw `Cannot create values of type ANY` — the node
+  bindings take neither a `Uint8Array` nor a `Buffer`, only their own
+  `blobValue()` — and a read came back as a `DuckDBBlobValue` wrapper
+  instead of bytes. Broken in both directions, and missed because that
+  dialect's driver was not installed when the earlier bytes fix was
+  written, so its copy was only ever read. The driver is a devDependency
+  now and DuckDB runs in CI.
+
 - **2.20.3 — a one-column `uniques` found nothing on IndexedDB.**
   `{ uniques: [['pendingId']] }` compiled to a *compound* IDB index, whose
   keys are arrays — while the planner looked it up with a scalar. The row
