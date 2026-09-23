@@ -343,8 +343,8 @@ From `dialect.ts` (`columnType()`):
 
 | forge field kind | SQLite column type | Notes |
 |---|---|---|
-| `f.id({ idType: 'bigserial' })` | `INTEGER` | rowid-aliased; PK + AUTOINCREMENT inlined |
-| `f.id({ idType: 'uuid' })` | `TEXT` | application-generated UUID |
+| `f.id({ type: 'bigserial' })` | `INTEGER` | rowid-aliased; PK + AUTOINCREMENT inlined |
+| `f.id({ type: 'uuid' })` | `TEXT` | application-generated UUID |
 | `f.string()` / `f.text()` | `TEXT` | |
 | `f.int()` | `INTEGER` | 64-bit |
 | `f.bigint()` | `INTEGER` | better-sqlite3 returns BigInt when `safeIntegers: true` |
@@ -776,7 +776,7 @@ SQLite has no native UUID type. Options:
   Pick when you have hundreds of millions of rows and the storage win
   matters.
 
-forge's `f.id({ idType: 'uuid' })` emits `TEXT`. The application
+forge's `f.id({ type: 'uuid' })` emits `TEXT`. The application
 provides the value (`crypto.randomUUID()`). If you want v7, supply
 your own generator:
 

@@ -336,7 +336,7 @@ const out = await db.$runCommandRaw({
   createIndexes: 'users',
   indexes: [
     {
-      key: { email: 1 },
+      keys: { email: 1 },
       name: 'email_unique_case_insensitive',
       unique: true,
       collation: { locale: 'en', strength: 2 },
@@ -398,7 +398,7 @@ await db.$runCommandRaw({
   createIndexes: 'users',
   indexes: [
     {
-      key: { email: 1 },
+      keys: { email: 1 },
       name: 'email_ci_unique',
       unique: true,
       collation: { locale: 'en', strength: 2 },  // strength 2 = case-insensitive

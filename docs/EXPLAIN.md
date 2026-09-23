@@ -204,7 +204,7 @@ console.log(r.toString());
 
 ```ts
 const User = model('users', { … }, {
-  indexes: [{ fields: { name: 1 } }],
+  indexes: [{ keys: { name: 1 } }],
 });
 ```
 

@@ -175,7 +175,7 @@ The columns named in `where` must correspond to one of:
 * the primary key,
 * a column marked `.unique()`,
 * a compound unique declared via `uniques: […]`,
-* a `UNIQUE INDEX` declared via `indexes: [{ on: […], unique: true }]`.
+* a `UNIQUE INDEX` declared via `indexes: [{ keys: { … }, unique: true }]`.
 
 On Postgres / SQLite / DuckDB the dialect itself enforces this — the
 optimiser refuses `ON CONFLICT (col)` if `col` is not part of a unique
@@ -817,7 +817,7 @@ constraint off.
 
 The rule is: every upsert `where` column-set must be DB-enforced unique.
 Either declare `.unique()` on the column, `uniques: [['col1', 'col2']]`
-on the model, or `indexes: [{ on: […], unique: true }]` if the
+on the model, or `indexes: [{ keys: { … }, unique: true }]` if the
 constraint needs a partial filter. See
 [`docs/INDEXES.md`](./INDEXES.md#4-partial-filter-indexes).
 

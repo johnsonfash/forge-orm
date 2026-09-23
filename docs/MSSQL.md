@@ -1127,7 +1127,7 @@ which throttles throughput.
 
 * [DRIVERS](./DRIVERS.md#mssqldriver) — the `MssqlDriver` port contract, common bugs (`@p1` unbound), wire-compatible swaps (Azure SQL Edge).
 * [QUERIES](./QUERIES.md) — `findMany`, `findFirst`, `where`, `orderBy`, `groupBy`, cursor pagination — adapter-agnostic.
-* [INDEXES](./INDEXES.md) — `f.index()` / `f.unique()` shape and what the MSSQL DDL writes (partial-filter via `WHERE`, computed-column tricks).
+* [INDEXES](./INDEXES.md) — the `indexes: [{ keys: { … } }]` model option and field-level `.unique()`, and what the MSSQL DDL writes (partial-filter via `WHERE`, computed-column tricks).
 * [FTS](./FTS.md#duckdb-and-mssql) — full-text deep dive across all six dialects; MSSQL catalog provisioning recipes.
 * [GEO](./GEO.md#dialect-feature-matrix) — spatial type / WKT axis conventions / withinPolygon / MultiPolygon.
 * [JSON-PATH](./JSON-PATH.md#mssql-2016) — typed JSON path access, OPENJSON projections, computed-column indexing.

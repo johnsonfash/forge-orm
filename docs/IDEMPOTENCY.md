@@ -123,8 +123,8 @@ export const IdempotencyRecord = model('idempotency_records', {
 }, {
   uniques: [['scope', 'idempotency_key']],
   indexes: [
-    { fields: ['expires_at'] },           // TTL pruner
-    { fields: ['state', 'created_at'] },  // stuck-pending sweeper
+    { keys: { expires_at: 1 } },                 // TTL pruner
+    { keys: { state: 1, created_at: 1 } },       // stuck-pending sweeper
   ],
 });
 ```

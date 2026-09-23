@@ -94,9 +94,10 @@ const Chunk = model('chunks', {
   created_at: f.dateTime().default('now'),
 }, {
   indexes: [
-    { keys: { embedding: 1 }, method: 'vector',
-      // pgvector HNSW knobs — see "Index tuning" below.
-      options: { m: 16, ef_construction: 64 } },
+    // method: 'vector' emits USING hnsw with the metric's opclass. The
+    // pgvector build knobs (m / ef_construction) are NOT settable from the
+    // schema — see "Index tuning" below.
+    { keys: { embedding: 1 }, method: 'vector' },
     { keys: { doc_id: 1, ord: 1 } },
   ],
 });
@@ -435,16 +436,26 @@ expensive, query is fast, recall is high. Two parameters:
 - `ef_search` (runtime) — `SET hnsw.ef_search = 100;`. Default 40.
   Larger = better recall at query time, slower. Tune per query.
 
+**Forge cannot set the build knobs.** `IndexDef` has no `options` field —
+`method: 'vector'` emits `CREATE INDEX … USING hnsw (col vector_cosine_ops)`
+and nothing more, so `m` / `ef_construction` stay at pgvector's defaults.
+To set them, create the index yourself in a migration and leave it out of
+the schema. The runtime knobs (`ef_search`, `probes`) are reachable through
+`$queryRaw` and are unaffected.
+
 ```ts
 const Chunk = model('chunks', {
   id: f.id(),
   embedding: f.vector(1536, { metric: 'cosine' }),
 }, {
   indexes: [
-    { keys: { embedding: 1 }, method: 'vector',
-      options: { m: 16, ef_construction: 64 } },
+    { keys: { embedding: 1 }, method: 'vector' },
   ],
 });
+
+// Build knobs go in a migration, not the schema:
+//   CREATE INDEX chunks_embedding_hnsw ON chunks
+//     USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
 
 // At query time, push ef_search up for high-recall paths.
 await db.$queryRaw`SET LOCAL hnsw.ef_search = 100`;
@@ -466,12 +477,16 @@ for latency live.
 - `probes` (runtime) — how many lists to scan per query. Default 1
   (recall ~0.7-0.8). Bump to 10 for recall ~0.95, 20 for ~0.98.
 
-```ts
-indexes: [
-  { keys: { embedding: 1 }, method: 'vector',
-    options: { lists: 316 } },  // 100k rows
-];
+`lists` is a build knob, so it goes in a migration — the schema can only
+ask for the dialect's default vector index family:
 
+```sql
+-- up
+CREATE INDEX chunks_embedding_ivf ON chunks
+  USING ivfflat (embedding vector_cosine_ops) WITH (lists = 316);  -- 100k rows
+```
+
+```ts
 await db.$queryRaw`SET LOCAL ivfflat.probes = 10`;
 ```
 
@@ -512,18 +527,26 @@ dim) variants. Storage drops 2x and 32x respectively. Recall drops too.
 typically <0.5 points on nDCG@10. Storage halves; index build is 30-40%
 faster.
 
+`f.vector(dims, { metric })` is the whole option surface — there is no
+`precision` option, and forge never emits `halfvec`. A half-precision
+column has to be declared outside the schema:
+
 ```ts
 const Chunk = model('chunks', {
   id:        f.id(),
-  embedding: f.vector(1536, { metric: 'cosine', precision: 'half' }),
+  embedding: f.vector(1536, { metric: 'cosine' }),   // emits vector(1536)
 }, {
   indexes: [{ keys: { embedding: 1 }, method: 'vector' }],
 });
 ```
 
-Forge emits `halfvec(1536)` for Postgres when `precision: 'half'` is set
-and falls back to `vector(N)` on dialects that don't support it. The
-`near` / `nearTo` API is identical.
+```sql
+-- up: switch the column to fp16 after push
+ALTER TABLE chunks ALTER COLUMN embedding TYPE halfvec(1536);
+```
+
+The `near` / `nearTo` API is unaffected either way, since the operator
+is the same.
 
 **Binary.** Cosine collapses to Hamming distance on a binary vector,
 which is a single XOR + popcount per pair. 100x faster scans, 32x smaller.

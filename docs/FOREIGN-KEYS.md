@@ -495,14 +495,16 @@ const Tenant = model('tenants', {
   scope: f.string(),
   key:   f.string(),
   // Generated column — concatenation of scope + key, used as the FK target.
-  compound: f.string().generated((c) => `${c.scope}|${c.key}`),
-}).index({ name: 'tenants_compound_uniq', fields: ['compound'], unique: true });
+  compound: f.string().dbgenerated(`"scope" || '|' || "key"`),
+}, {
+  indexes: [{ name: 'tenants_compound_uniq', keys: { compound: 1 }, unique: true }],
+});
 
 const Resource = model('resources', {
   id:           f.id(),
   tenant_scope: f.string(),
   tenant_key:   f.string(),
-  tenant_ref:   f.string().generated((c) => `${c.tenant_scope}|${c.tenant_key}`),
+  tenant_ref:   f.string().dbgenerated(`"tenant_scope" || '|' || "tenant_key"`),
 }).relate(() => ({
   tenant: rel.one('tenant', { on: 'tenant_ref', refs: 'compound', onDelete: 'Cascade' }),
 }));
@@ -598,8 +600,9 @@ Declare an explicit index on the FK column:
 const Post = model('posts', {
   id:        f.id(),
   author_id: f.objectId(),
+}, {
+  indexes: [{ name: 'posts_author_id_idx', keys: { author_id: 1 } }],
 })
-  .index({ name: 'posts_author_id_idx', fields: ['author_id'] })
   .relate(() => ({
     author: rel.one('user', { on: 'author_id', refs: 'id', onDelete: 'Cascade' }),
   }));
@@ -614,7 +617,8 @@ The index name follows the `<table>_<col>_idx` convention. See
 column. Postgres / SQLite / MSSQL do not; declare manually. DuckDB
 doesn't index for OLTP-style point lookups anyway. **Mongo** — the
 walker uses `find({ <fk>: { $in: [...] } })`; declare via
-`.index({ keys: { <fk>: 1 } })` on any non-tiny child collection.
+`indexes: [{ keys: { <fk>: 1 } }]` in the model options on any non-tiny
+child collection.
 
 There is no probe for this — `forge doctor` reports driver and
 capability state, not index coverage (see
@@ -801,8 +805,9 @@ const Post = model('posts', {
   id: f.id(), author_id: f.objectId(),
   title: f.string(), body: f.text(),
   created_at: f.dateTime().default('now'),
+}, {
+  indexes: [{ name: 'posts_author_id_idx', keys: { author_id: 1 } }],
 })
-  .index({ name: 'posts_author_id_idx', fields: ['author_id'] })
   .relate(() => ({
     author: rel.one('user', { on: 'author_id', refs: 'id', onDelete: 'Cascade' }),
   }));
@@ -831,8 +836,9 @@ const Category = model('categories', {
   id:        f.id(),
   parent_id: f.objectId().optional(),
   name:      f.string(),
+}, {
+  indexes: [{ name: 'categories_parent_id_idx', keys: { parent_id: 1 } }],
 })
-  .index({ name: 'categories_parent_id_idx', fields: ['parent_id'] })
   .relate(() => ({
     parent:   rel.one('category',  { on: 'parent_id', refs: 'id', onDelete: 'SetNull' }),
     children: rel.many('category', { on: 'parent_id', refs: 'id' }),

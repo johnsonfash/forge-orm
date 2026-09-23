@@ -513,7 +513,8 @@ into the filter pipeline. Use `aggregate` with an explicit `$lookup`
 **N+1 gotcha.** `EXISTS` correlates against the outer table, so the
 planner runs the subquery once per outer row in the worst case.
 Wherever you join on a relation, make sure the relation's foreign key
-column is indexed — `f.string().index()` on the FK, or a compound
+column is indexed — an `indexes: [{ keys: { <fk>: 1 } }]` entry on the
+model, or a compound
 index if the inner filter touches more columns. Without an index the
 EXISTS becomes a sequential scan inside a sequential scan and the
 query collapses on tables over a few thousand rows.

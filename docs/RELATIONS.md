@@ -312,8 +312,9 @@ const PostTag = model('post_tags', {
   id:      f.id(),
   post_id: f.objectId(),
   tag_id:  f.objectId(),
+}, {
+  indexes: [{ name: 'post_tag_unique', keys: { post_id: 1, tag_id: 1 }, unique: true }],
 })
-  .index({ name: 'post_tag_unique', fields: ['post_id', 'tag_id'], unique: true })
   .relate(() => ({
     post: rel.one('post', { on: 'post_id', refs: 'id', onDelete: 'Cascade' }),
     tag:  rel.one('tag',  { on: 'tag_id',  refs: 'id', onDelete: 'Cascade' }),
@@ -502,8 +503,9 @@ const Comment = model('comments', {
   post_id:      f.objectId().optional(),
   photo_id:     f.objectId().optional(),
   video_id:     f.objectId().optional(),
+}, {
+  indexes: [{ name: 'comment_target', keys: { target_kind: 1, post_id: 1, photo_id: 1, video_id: 1 } }],
 })
-  .index({ name: 'comment_target', fields: ['target_kind', 'post_id', 'photo_id', 'video_id'] })
   .relate(() => ({
     post:  rel.one('post',  { on: 'post_id',  refs: 'id', onDelete: 'Cascade' }),
     photo: rel.one('photo', { on: 'photo_id', refs: 'id', onDelete: 'Cascade' }),
@@ -1185,8 +1187,9 @@ prevents duplicate grants.
 const Membership = model('memberships', {
   id: f.id(), org_id: f.objectId(), user_id: f.objectId(), role_id: f.objectId(),
   invited_at: f.dateTime().default('now'),
+}, {
+  indexes: [{ name: 'mem_org_user_role', keys: { org_id: 1, user_id: 1, role_id: 1 }, unique: true }],
 })
-  .index({ name: 'mem_org_user_role', fields: ['org_id', 'user_id', 'role_id'], unique: true })
   .relate(() => ({
     org:  rel.one('org',  { on: 'org_id',  refs: 'id', onDelete: 'Cascade' }),
     user: rel.one('user', { on: 'user_id', refs: 'id', onDelete: 'Cascade' }),
@@ -1210,8 +1213,9 @@ products: self-referential many-to-many with a quantity payload.
 const Bom = model('bom', {
   id: f.id(), parent_id: f.objectId(), child_id: f.objectId(),
   quantity: f.decimal({ scale: 4 }),
+}, {
+  indexes: [{ name: 'bom_unique', keys: { parent_id: 1, child_id: 1 }, unique: true }],
 })
-  .index({ name: 'bom_unique', fields: ['parent_id', 'child_id'], unique: true })
   .relate(() => ({
     parent: rel.one('product', { on: 'parent_id', refs: 'id', onDelete: 'Cascade' }),
     child:  rel.one('product', { on: 'child_id',  refs: 'id', onDelete: 'Restrict' }),
@@ -1313,8 +1317,9 @@ by it. Forge has no native tenant-scope hook; the pattern is small
 enough to wrap as a helper.
 
 ```ts
-const User = model('users', { id: f.id(), org_id: f.objectId(), email: f.string() })
-  .index({ name: 'user_email_per_org', fields: ['org_id', 'email'], unique: true })
+const User = model('users', { id: f.id(), org_id: f.objectId(), email: f.string() }, {
+  indexes: [{ name: 'user_email_per_org', keys: { org_id: 1, email: 1 }, unique: true }],
+})
   .relate(() => ({
     org: rel.one('org', { on: 'org_id', refs: 'id', onDelete: 'Cascade' }),
   }));

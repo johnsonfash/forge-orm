@@ -139,7 +139,8 @@ available), `$match` + `$group` on Mongo — stamped onto
 `row._count` afterwards. (Not a correlated subquery in the SELECT list,
 and not a `$lookup` + `$size`; earlier revisions of this page said
 otherwise.) It wants an index on the relation's foreign-key column —
-`f.string().index()` on `author_id`, or part of a compound. Without one,
+an `indexes: [{ keys: { author_id: 1 } }]` entry on the model, or `author_id`
+as the leading column of a compound index. Without one,
 each counted relation is a sequential scan of the child table and the
 query collapses past a few thousand parents. See
 [N+1](./N-PLUS-ONE.md).
@@ -891,9 +892,9 @@ is the optimal shape when both clauses are present:
 
 ```ts
 const Order = model('order', {
-  id: f.id(), org_id: f.string().index(), status: f.string(), total: f.int(),
+  id: f.id(), org_id: f.string(), status: f.string(), total: f.int(),
 }, {
-  indexes: [{ on: ['org_id', 'status'] }],                 // covers per-org GROUP BY status
+  indexes: [{ keys: { org_id: 1, status: 1 } }],           // covers per-org GROUP BY status
 });
 ```
 

@@ -184,7 +184,7 @@ export function irToZod<M extends AnyModel>(model: M) {
 What this *doesn't* know:
 
 * That `f.id()` is filled in by the wrapper at create time — your `Create` schema should `.omit(['id'])`.
-* That `f.dateTime({ default: 'now' })` should be omitted from `Create` (server-set), required on `Read`.
+* That `f.dateTime().default('now')` should be omitted from `Create` (server-set), required on `Read`.
 * That `f.enumOf('a', 'b', 'c')` should be `z.enum(['a','b','c'])`, not `z.string()`.
 * That `f.objectId()` should be a brand type, not a raw string (see [Brand types](#brand-types)).
 

@@ -135,8 +135,8 @@ export const AuditLog = model('audit_log', {
   semantic_op: f.string().optional(),
 }, {
   indexes: [
-    ['model', 'entity_id'], ['actor_id', 'at'],
-    ['at'],                 ['action', 'at'],
+    { keys: { model: 1, entity_id: 1 } }, { keys: { actor_id: 1, at: 1 } },
+    { keys: { at: 1 } },                 { keys: { action: 1, at: 1 } },
   ],
 });
 ```
@@ -185,7 +185,11 @@ export const PostHistory = model('post_history', {
 
   changed:      f.json().optional(),   // which fields changed
 }, {
-  indexes: [['post_id', 'at'], ['actor_id', 'at'], ['status', 'at']],
+  indexes: [
+    { keys: { post_id: 1, at: 1 } },
+    { keys: { actor_id: 1, at: 1 } },
+    { keys: { status: 1, at: 1 } },
+  ],
 });
 ```
 
@@ -229,7 +233,7 @@ export const OrderEvent = model('order_events', {
   payload:   f.json(),
 }, {
   uniques: [['order_id', 'seq']],
-  indexes: [['order_id', 'seq', { name: 'order_events_order_seq_idx' }]],
+  indexes: [{ keys: { order_id: 1, seq: 1 }, name: 'order_events_order_seq_idx' }],
 });
 ```
 

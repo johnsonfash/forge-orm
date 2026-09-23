@@ -194,7 +194,7 @@ import { createDb, raw } from 'forge-orm';
 
 const db = await createDb({ url: process.env.DATABASE_URL! });
 const rows = await db.$queryRaw<{ name: string; applied_at: string }>(
-  raw`SELECT name, applied_at FROM _forge_migrations ORDER BY applied_at DESC`,
+  forgeSql.sql`SELECT name, applied_at FROM _forge_migrations ORDER BY applied_at DESC`,
 );
 console.table(rows);
 await db.$disconnect();
@@ -523,7 +523,7 @@ if (!since) { console.error('usage: rollback-if-recent.ts <iso-timestamp>'); pro
 
 const db = await createDb({ url: process.env.DATABASE_URL! });
 const rows = await db.$queryRaw<{ name: string; applied_at: string }>(
-  raw`SELECT name, applied_at FROM _forge_migrations WHERE applied_at >= ${since} ORDER BY applied_at DESC`,
+  forgeSql.sql`SELECT name, applied_at FROM _forge_migrations WHERE applied_at >= ${since} ORDER BY applied_at DESC`,
 );
 await db.$disconnect();
 
@@ -688,7 +688,7 @@ npx forge diff --check
 # ✓ no drift
 
 # 7. Fix the schema, re-apply
-#    (in schema.ts: f.json({ default: () => ({}) }))
+#    (in schema.ts: f.json().default({}))
 git add src/schema.ts
 git commit -m "Fix users.preferences default cast"
 npx forge diff apply

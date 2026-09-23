@@ -210,7 +210,7 @@ sequential scan and the page-N pattern is as slow as offset. See
 
 ```ts
 const post = model('post', { /* … */ }, {
-  indexes: [{ fields: ['created_at', 'id'] }],
+  indexes: [{ keys: { created_at: 1, id: 1 } }],
 });
 ```
 
@@ -744,7 +744,7 @@ the scan reads them, and the filter discards them downstream:
 
 ```ts
 const post = model('post', { /* … */ }, {
-  indexes: [{ fields: ['created_at', 'id'], where: { deleted_at: null } }],
+  indexes: [{ keys: { created_at: 1, id: 1 }, where: 'deleted_at IS NULL' }],
 });
 ```
 
@@ -838,8 +838,8 @@ in-filter equality, then the sort tuple:
 ```ts
 const post = model('post', { /* … */ }, {
   indexes: [{
-    fields: ['org_id', 'status', 'created_at', 'id'],
-    where:  { deleted_at: null },
+    keys:  { org_id: 1, status: 1, created_at: 1, id: 1 },
+    where: 'deleted_at IS NULL',
   }],
 });
 ```

@@ -597,7 +597,7 @@ avoid the sort:
 ```ts
 // In the model file:
 indexes: [
-  { fields: { user_id: 1, placed_at: 1 } },
+  { keys: { user_id: 1, placed_at: 1 } },
 ],
 ```
 

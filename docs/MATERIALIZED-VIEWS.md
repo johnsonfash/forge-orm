@@ -166,26 +166,34 @@ HINT:  Create a unique index with no WHERE clause on one or more columns of the 
 
 The unique index has to cover columns that uniquely identify a result
 row — typically the grouping keys (`author_id` in the example above,
-or `(author_id, day)` for a daily rollup). Forge does not auto-emit
-this index; declare it via `.indexes` on the model:
+or `(author_id, day)` for a daily rollup).
+
+**Forge does not emit indexes on a view of any kind.** There is no
+`.indexes()` method on a model, and the `indexes:` model option is
+skipped for view-marked models (`src/adapters/postgres/ddl.ts` — the
+constraint/index pass does `if (!m || m.view) continue`). So the unique
+index a concurrent refresh needs has to come from a hand-written
+migration, the same path as custom CHECKs
+([CHECKS.md](./CHECKS.md#custom-checks--the-migration-file-path)):
 
 ```ts
 const PostStats = model('post_stats', {
   author_id:   f.objectId(),
   post_count:  f.bigint(),
   total_views: f.bigint(),
-})
-  .asView({
-    materialised: true,
-    sql: `SELECT author_id, COUNT(*) AS post_count, …`,
-  })
-  .indexes(t => [
-    t.unique(['author_id']),    // required for REFRESH CONCURRENTLY
-  ]);
+}).asView({
+  materialised: true,
+  sql: `SELECT author_id, COUNT(*) AS post_count, …`,
+});
 ```
 
-`forge push` emits a `CREATE UNIQUE INDEX` on the matview alongside
-the matview itself.
+```sql
+-- up   (migrations/<ts>_post_stats_unique.sql)
+CREATE UNIQUE INDEX IF NOT EXISTS post_stats_author_id_uniq
+  ON post_stats (author_id);
+-- down
+DROP INDEX IF EXISTS post_stats_author_id_uniq;
+```
 
 Concurrent refresh is slower than non-concurrent (it has to build the
 new copy plus diff plus apply), and writes locks during the swap. The
@@ -394,10 +402,9 @@ const PostStats = model('post_stats', {
       GROUP BY author_id
     `,
     refreshEvery: '5m',
-  })
-  .indexes(t => [
-    t.unique(['author_id']),    // Postgres CONCURRENTLY refresh requirement
-  ]);
+  });
+// The unique index Postgres' CONCURRENTLY refresh requires is NOT emitted
+// by push — add it in a migration (see "Concurrent refresh" above).
 ```
 
 What changes versus a plain view:
@@ -587,17 +594,18 @@ Indexes on a matview are independent of indexes on the source tables.
 The source indexes speed up the refresh; the matview indexes speed up
 reads off the matview. Both matter.
 
-```ts
-.asView({ materialised: true, sql: … })
-.indexes(t => [
-  t.unique(['author_id']),                     // REFRESH CONCURRENTLY + lookup
-  t.index(['total_views'], { sort: 'desc' }),  // ORDER BY total_views DESC
-])
+```sql
+-- up
+CREATE UNIQUE INDEX IF NOT EXISTS post_stats_author_uniq
+  ON post_stats (author_id);                      -- REFRESH CONCURRENTLY + lookup
+CREATE INDEX IF NOT EXISTS post_stats_total_views_idx
+  ON post_stats (total_views DESC);               -- ORDER BY total_views DESC
 ```
 
-`forge push` emits the index DDL alongside the matview DDL. On
-Postgres, `REINDEX MATERIALIZED VIEW` rebuilds the indexes (useful
-after a bloat-heavy period); forge does not call it automatically.
+`forge push` does not emit index DDL for a view — declare matview
+indexes in a migration. On Postgres, `REINDEX MATERIALIZED VIEW`
+rebuilds them (useful after a bloat-heavy period); forge does not call
+it automatically.
 
 ---
 
@@ -740,9 +748,9 @@ What `diff` does **not** currently report:
   flag "the body changed since last push".
 * Whether the matview is up to date. Staleness is a runtime concern,
   not a schema concern.
-* Whether the matview's indexes match what `.indexes()` declared.
-  Index drift on the matview is tracked under the same code path as
-  index drift on a table; `diff` reports it normally.
+* Any index on the matview. Forge never declares one (see
+  [Concurrent refresh](#concurrent-refresh)), so an index added by a
+  migration is invisible to the schema and `diff` does not compare it.
 
 What `push` does on a matview body change:
 
@@ -830,11 +838,10 @@ export const DashboardStats = model('dashboard_stats', {
         AND placed_at >= NOW() - INTERVAL '90 days'
       GROUP BY 1, 2
     `,
-  })
-  .indexes(t => [
-    t.unique(['day', 'org_id']),                 // CONCURRENTLY refresh
-    t.index(['org_id', 'day'], { sort: 'desc' }),
-  ]);
+  });
+// Declare in a migration (push emits no indexes for a view):
+//   CREATE UNIQUE INDEX … ON daily_sales (day, org_id);   -- CONCURRENTLY refresh
+//   CREATE INDEX        … ON daily_sales (org_id, day DESC);
 ```
 
 Schedule via `pg_cron` (one-time setup, runs in the database):
@@ -879,9 +886,9 @@ export const PostStats = model('post_stats', {
     FROM posts
     GROUP BY author_id
   `,
-}).indexes(t => [
-  t.unique(['author_id']),
-]);
+});
+// UNIQUE KEY below comes from the emulating CREATE TABLE, not from an
+// index declaration — push emits no index DDL for a view model.
 ```
 
 `forge push` emits:

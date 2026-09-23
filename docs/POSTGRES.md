@@ -251,7 +251,7 @@ total: f.decimal().dbgenerated('"unit_price" * "qty"'),
 
 ### Materialized views
 
-A model with `view: { sql: '…', materialised: true }` emits `CREATE
+A model declared with `.asView({ sql: '…', materialised: true })` emits `CREATE
 MATERIALIZED VIEW IF NOT EXISTS`. Refresh is a `REFRESH MATERIALIZED VIEW
 <name>` issued via `adapter.refreshView(model, { concurrently? })`.
 `CONCURRENTLY` needs a unique index on the matview, so it's opt-in —
@@ -294,7 +294,7 @@ preserve precision, which is by design.
 | `f.geoPoint()` | `geography(Point, 4326)` | `{ lng, lat }` | needs PostGIS; falls back to `jsonb` with `{ fallback: true }` |
 | `f.geoPoint({ dims: 3 })` | `geography(PointZ, 4326)` | `{ lng, lat, alt }` | 3D point on the WGS84 sphere |
 | `f.geoPoint({ srid: 3857 })` | `geometry(Point, 3857)` | `{ lng, lat }` | non-WGS84 falls off `geography` onto `geometry` |
-| `f.vector({ dims: 1536 })` | `vector(1536)` | `number[]` | needs `CREATE EXTENSION vector` |
+| `f.vector(1536)` | `vector(1536)` | `number[]` | needs `CREATE EXTENSION vector` |
 
 ### Numeric returning as string
 

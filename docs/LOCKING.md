@@ -372,7 +372,7 @@ None of the three have a native advisory-lock primitive. Model the lock as a row
 
 ```ts
 const Lease = model('_leases', {
-  key:        f.string().id(),
+  key:        f.id({ type: 'string' }),   // app-supplied natural key
   holder:     f.string(),
   expires_at: f.dateTime(),
 }, {
@@ -837,7 +837,7 @@ const Job = model('job', {
   indexes: [
     // Partial index so the pending-scan only touches pending rows.
     { keys: { created_at: 1 }, name: 'idx_job_pending',
-      partialFilter: { status: 'pending' } },
+      where: "status = 'pending'" },
   ],
 });
 

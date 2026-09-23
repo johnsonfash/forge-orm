@@ -369,7 +369,7 @@ The differ is in `src/scripts/diff-core.ts` and is dialect-aware. The rules belo
 | `index` | `extra` | **Unique-only** — extra non-unique indexes don't drift (engines create their own). Extra unique indexes do. |
 | `index` | `mismatch` | Named index in both, but `method`, `where`, `include`, `expression`, `partialFilterExpression`, `collation`, `wildcardProjection`, or per-key direction tokens differ. |
 | `foreignKey` | `missing` | Relation declared in schema with a non-id `on` column, but no FK with matching `column → refTable.refColumn` in DB. |
-| `view` | `missing` | `model('…', { … }, { view: { … } })` in schema but neither a view nor a table with that name in DB. |
+| `view` | `missing` | `model('…', { … }).asView({ … })` in schema but neither a view nor a table with that name in DB. |
 
 ### What forge does NOT consider drift
 
@@ -705,7 +705,7 @@ import { createDb, raw } from 'forge-orm';
 import { schema } from '../../src/schema';
 
 const db = await createDb({ url: process.env.DATABASE_URL!, schema });
-await db.$executeRaw(raw`UPDATE users SET handle = username WHERE handle IS NULL`);
+await db.$executeRaw(forgeSql.sql`UPDATE users SET handle = username WHERE handle IS NULL`);
 await db.$disconnect();
 ```
 
@@ -783,7 +783,9 @@ When multiple services share a database, each service should declare only the mo
 
 ```ts
 // packages/shared/src/schema.ts — read-only model refs
-export const Users = model('users', { id: f.id(), email: f.string() }, { readonly: true });
+// There is no `readonly` model option. "Someone else owns this table" is
+// expressed by how you wire the model up, not by a flag on it.
+export const Users = model('users', { id: f.id(), email: f.string() });
 ```
 
 ```ts
@@ -792,14 +794,18 @@ import { Users } from '@org/db-shared';
 
 export const Invoice = model('invoices', {
   id:     f.id(),
-  userId: f.string().refs(() => Users),
+  userId: f.objectId(),
   total:  f.decimal(),
-});
+}).relate(() => ({
+  // Relations target a schema KEY by string, so the target model has to be
+  // in the same schema map — an imported model object is not a valid target.
+  user: rel.one('user', { on: 'userId', refs: 'id' }),
+}));
 
-export const schema = { Invoice } as const;   // does NOT include Users
+export const schema = { Invoice, user: Users } as const;
 ```
 
-When `billing-service` runs `forge push`, the differ only sees `Invoice`. It won't try to create or drop `users`. The shared `Users` model still gives you typed FKs and join queries; it just doesn't participate in `push`.
+`forge push` never creates, drops or alters tables — it only syncs indexes — so it will not create or drop `users`. It will still try to reconcile `users`' indexes, and `forge diff` will report drift on it, so exclude it from drift checks with `forge diff --ignore=users` (or `FORGE_DIFF_IGNORE=users`). Keeping `Users` in the schema map is what makes the typed FK and the join work: relation targets are resolved by schema key at runtime, so a model left out of the map cannot be joined.
 
 There is no `forge push --exclude` flag — the way to exclude tables is to not include them in the schema you pass. This is intentional: an exclude flag on the CLI would let a deploy accidentally drop tables it doesn't own. The schema being the source of truth means the boundary is in code review.
 
@@ -832,13 +838,13 @@ const MIGRATION_NAME = '20260624-backfill-handle';
 const db = await createDb({ url: process.env.DATABASE_URL!, schema });
 
 // Idempotency: skip if already applied. Reuse the forge ledger table.
-await db.$executeRaw(raw`
+await db.$executeRaw(forgeSql.sql`
   CREATE TABLE IF NOT EXISTS _forge_migrations (
     name VARCHAR(255) PRIMARY KEY, applied_at VARCHAR(64)
   )
 `);
 const [{ count }] = await db.$queryRaw<{ count: number }>(
-  raw`SELECT COUNT(*)::int AS count FROM _forge_migrations WHERE name = ${MIGRATION_NAME}`,
+  forgeSql.sql`SELECT COUNT(*)::int AS count FROM _forge_migrations WHERE name = ${MIGRATION_NAME}`,
 );
 if (count > 0) {
   console.log(`[migrate] ${MIGRATION_NAME} already applied`);
@@ -846,8 +852,8 @@ if (count > 0) {
 }
 
 await db.$transaction(async (tx) => {
-  await tx.$executeRaw(raw`UPDATE users SET handle = username WHERE handle IS NULL`);
-  await tx.$executeRaw(raw`
+  await tx.$executeRaw(forgeSql.sql`UPDATE users SET handle = username WHERE handle IS NULL`);
+  await tx.$executeRaw(forgeSql.sql`
     INSERT INTO _forge_migrations (name, applied_at)
     VALUES (${MIGRATION_NAME}, ${new Date().toISOString()})
   `);

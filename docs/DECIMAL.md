@@ -668,7 +668,7 @@ const Invoice = model('invoices', {
   id:     f.id(),
   amount: f.decimal({ precision: 12, scale: 2 }),
 }, {
-  indexes: [{ fields: { amount: 'asc' } }],
+  indexes: [{ keys: { amount: 1 } }],
 });
 
 await db.invoice.findMany({

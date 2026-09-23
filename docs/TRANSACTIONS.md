@@ -1365,7 +1365,7 @@ const Outbox = model('outbox_events', {
 }, {
   indexes: [
     { keys: { delivered_at: 1, created_at: 1 }, name: 'idx_outbox_pending',
-      partialFilter: { delivered_at: null } },
+      where: 'delivered_at IS NULL' },
   ],
 });
 

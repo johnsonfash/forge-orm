@@ -240,7 +240,7 @@ import { createDb, raw } from 'forge-orm';
 import { schema } from '../../src/schema';
 
 const db = await createDb({ url: process.env.DATABASE_URL!, schema });
-await db.$executeRaw(raw`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_created_at ON events (created_at DESC)`);
+await db.$executeRaw(forgeSql.sql`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_created_at ON events (created_at DESC)`);
 await db.$disconnect();
 ```
 
@@ -249,7 +249,7 @@ Then add the matching `indexes: [...]` entry to the schema, run `forge push` —
 **MySQL 8 — `ALGORITHM=INPLACE, LOCK=NONE`.** Online DDL for most index types. forge's emitted `CREATE INDEX` is blocking by default; same escape hatch — emit it manually:
 
 ```ts
-await db.$executeRaw(raw`
+await db.$executeRaw(forgeSql.sql`
   ALTER TABLE events
   ADD INDEX idx_events_created_at (created_at),
   ALGORITHM=INPLACE, LOCK=NONE

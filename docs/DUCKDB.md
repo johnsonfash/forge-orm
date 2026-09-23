@@ -206,7 +206,7 @@ the `columnType()` method. The full table:
 | `f.stringArray()` | `VARCHAR[]` | DuckDB has native list types — no JSON marshalling at read time |
 | `f.intArray()` | `INTEGER[]` | same |
 | `f.geoPoint()` | `GEOMETRY` | from the `spatial` extension; `JSON` in fallback mode |
-| `f.vector({ dims: N })` | `FLOAT[N]` | fixed-size list; `vss` extension uses these |
+| `f.vector(N)` | `FLOAT[N]` | fixed-size list; `vss` extension uses these |
 
 Three points worth flagging:
 
@@ -443,7 +443,7 @@ those arrays. Forge's `f.vector(N, { metric })` maps directly:
 const Document = m({
   id:     f.id('cuid'),
   text:   f.text(),
-  embedding: f.vector({ dims: 1536, metric: 'cosine' }),
+  embedding: f.vector(1536, { metric: 'cosine' }),
 });
 
 await db.document.create({ data: { text, embedding } });
@@ -473,7 +473,7 @@ await db.$executeRaw`LOAD vss`;
 ```
 
 Then push the schema. The forge DDL emits `USING HNSW` for any
-`indexes: [{ on: 'embedding', method: 'vector' }]` declaration; DuckDB
+`indexes: [{ keys: { embedding: 1 }, method: 'vector' }]` declaration; DuckDB
 takes it from there.
 
 A working-set caveat: HNSW indexes in `vss` are in-memory. The
@@ -580,7 +580,7 @@ JSON-specific notes for DuckDB:
   extension is bundled and loaded on first use — no `INSTALL json`
   call needed.
 - **Expression indexes on JSON paths work.** A declaration like
-  `indexes: [{ expr: { duckdb: `(json_extract(meta, '$.tier'))` } }]`
+  `indexes: [{ keys: {}, expression: `json_extract(meta, '$.tier')` }]`
   builds a real index, and the planner uses it for equality matches.
   See [JSON-PATH.md → DuckDB — expression indexes](./JSON-PATH.md#duckdb--expression-indexes-analytics-workloads).
 - **`STRUCT`-style dot access works on JSON.** `meta.profile.age`

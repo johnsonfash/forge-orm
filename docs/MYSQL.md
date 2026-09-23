@@ -169,8 +169,8 @@ defaults err on the safe side for InnoDB row-format limits.
 | Schema field | Emit |
 |---|---|
 | `f.id()` (default) | `VARCHAR(64) NOT NULL` (app-side gen) |
-| `f.id({ idType: 'bigserial' })` | `BIGINT NOT NULL AUTO_INCREMENT` |
-| `f.id({ idType: 'uuid' })` | `CHAR(36) NOT NULL DEFAULT (UUID())` |
+| `f.id({ type: 'bigserial' })` | `BIGINT NOT NULL AUTO_INCREMENT` |
+| `f.id({ type: 'uuid' })` | `CHAR(36) NOT NULL DEFAULT (UUID())` |
 | `f.objectId()` | `VARCHAR(64)` |
 | `f.string()` | `VARCHAR(255)` |
 | `f.text()` | `TEXT` |
@@ -205,15 +205,18 @@ declare a plain `UNIQUE` on it without a key-length prefix (`UNIQUE (col(255))`)
 
 ### TEXT, MEDIUMTEXT, LONGTEXT
 
-The default `f.text()` emits `TEXT` (64 KB). Override the emit when
-you need the bigger forms:
+`f.text()` emits `TEXT` (64 KB) and there is no schema-level override —
+forge has no raw-column-type escape hatch. If you need a bigger class,
+widen the column in a hand-written migration
+([CHECKS.md](./CHECKS.md#custom-checks--the-migration-file-path) covers
+the same path):
 
-| Storage class | Bytes | Schema |
+| Storage class | Bytes | How to get it |
 |---|---|---|
-| `TINYTEXT` | 255 | rare; use `VARCHAR` instead |
+| `TINYTEXT` | 255 | not emitted; use `f.string()` (`VARCHAR(255)`) |
 | `TEXT` | 64 KB | `f.text()` |
-| `MEDIUMTEXT` | 16 MB | `f.text({ raw: 'MEDIUMTEXT' })` |
-| `LONGTEXT` | 4 GB | `f.text({ raw: 'LONGTEXT' })` |
+| `MEDIUMTEXT` | 16 MB | `ALTER TABLE t MODIFY col MEDIUMTEXT` in a migration |
+| `LONGTEXT` | 4 GB | `ALTER TABLE t MODIFY col LONGTEXT` in a migration |
 
 Picking the right size matters for `ROW_FORMAT=DYNAMIC` overflow
 behaviour: TEXT / BLOB columns get their first 768 bytes stored
@@ -884,10 +887,10 @@ The override matrix:
 
 ```ts
 // bigserial — BIGINT NOT NULL AUTO_INCREMENT. lastInsertId comes back via insertId.
-const Audit = model('audit', { id: f.id({ idType: 'bigserial' }) });
+const Audit = model('audit', { id: f.id({ type: 'bigserial' }) });
 
 // uuid — CHAR(36) NOT NULL DEFAULT (UUID()). DB-side gen via the UUID() function.
-const Doc = model('docs',  { id: f.id({ idType: 'uuid' }) });
+const Doc = model('docs',  { id: f.id({ type: 'uuid' }) });
 ```
 
 ### When to pick each
@@ -907,14 +910,16 @@ collapses.
 
 The fix is `UUID_TO_BIN(UUID(), 1)` — the `1` flag rearranges the
 timestamp components so consecutive UUIDs land on adjacent pages.
-forge does not emit this by default because not every workload
-benefits; if you need it, override:
+forge does not emit this, and there is no raw-column-type override in
+the schema language. Getting it means altering the column in a
+hand-written migration after `push`:
 
-```ts
-const Order = model('orders', {
-  // BINARY(16) instead of CHAR(36) — half the size, ordered inserts.
-  id: f.id({ idType: 'uuid' }).raw('BINARY(16) NOT NULL DEFAULT (UUID_TO_BIN(UUID(), 1))'),
-});
+```sql
+-- up
+ALTER TABLE orders
+  MODIFY id BINARY(16) NOT NULL DEFAULT (UUID_TO_BIN(UUID(), 1));
+-- down
+ALTER TABLE orders MODIFY id CHAR(36) NOT NULL DEFAULT (UUID());
 ```
 
 The tradeoff is that the column is now binary — every read needs

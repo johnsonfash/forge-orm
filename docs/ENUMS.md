@@ -16,7 +16,7 @@ Related deep-dives:
 
 * [MODEL.md](./MODEL.md#enums) — the enum surface and the field-type catalogue.
 * [TYPES.md](./TYPES.md#rowtypeof-model) — how `f.enumOf(...)` lands as a literal union on `Row`.
-* [CHECKS.md](./CHECKS.md) — `f.check(expr)` for predicates that aren't shaped as a fixed set.
+* [CHECKS.md](./CHECKS.md) — how to get CHECK predicates that aren't shaped as a fixed set (there is no `f.check(expr)` builder; they go through a hand-written migration).
 * [VERSIONING.md](./VERSIONING.md) — expand/contract schema patterns.
 * [MIGRATIONS.md](./MIGRATIONS.md) — what `forge push` does with a schema change.
 * [INDEXES.md](./INDEXES.md) — indexing an enum column (a normal scalar index).

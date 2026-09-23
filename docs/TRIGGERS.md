@@ -491,11 +491,11 @@ async function ensureTriggers(db: Db) {
   `;
   if (exists) return;
 
-  await db.$executeRaw(raw`
+  await db.$executeRaw(forgeSql.sql`
     CREATE OR REPLACE FUNCTION fn_users_audit() RETURNS TRIGGER LANGUAGE plpgsql AS $$
     BEGIN ... END $$
   `);
-  await db.$executeRaw(raw`
+  await db.$executeRaw(forgeSql.sql`
     CREATE TRIGGER trg_users_audit
     AFTER INSERT OR UPDATE OR DELETE ON users
     FOR EACH ROW EXECUTE FUNCTION fn_users_audit()
@@ -531,7 +531,7 @@ For a stronger guarantee, add a healthcheck endpoint that introspects the trigge
 import { raw } from 'forge-orm';
 
 export async function checkAuditTrigger(db: Db): Promise<boolean> {
-  const [{ exists }] = await db.$queryRaw<{ exists: boolean }>(raw`
+  const [{ exists }] = await db.$queryRaw<{ exists: boolean }>(forgeSql.sql`
     SELECT EXISTS (
       SELECT 1 FROM pg_trigger WHERE tgname = 'trg_users_audit'
     ) AS exists
@@ -697,7 +697,7 @@ beforeAll(async () => {
   db = await createDb({ url: process.env.TEST_DATABASE_URL!, schema });
   // forge push creates tables.
   // The trigger migration must be applied separately:
-  await db.$executeRaw(raw`<the trigger DDL>`);
+  await db.$executeRaw(forgeSql.sql`<the trigger DDL>`);
 });
 
 afterAll(async () => {
@@ -725,7 +725,7 @@ describe('trg_users_audit', () => {
 
   it('writes an audit row for raw-SQL updates too', async () => {
     const u = await db.user.create({ data: { email: 'c@x.co', name: 'C' } });
-    await db.$executeRaw(raw`UPDATE users SET name = 'C2' WHERE id = ${u.id}`);
+    await db.$executeRaw(forgeSql.sql`UPDATE users SET name = 'C2' WHERE id = ${u.id}`);
     const audits = await db.auditLog.findMany({
       where: { table_name: 'users', row_id: u.id, action: 'update' },
     });
@@ -903,7 +903,7 @@ The actor (`v_who`) comes from a session-local GUC the app sets at the start of 
 
 ```ts
 await db.$transaction(async (tx) => {
-  await tx.$executeRaw(raw`SELECT set_config('forge.current_user', ${userId}, true)`);
+  await tx.$executeRaw(forgeSql.sql`SELECT set_config('forge.current_user', ${userId}, true)`);
   // The third arg `true` makes it transaction-scoped, so it dies with the tx.
   await tx.user.update({ where: { id: userId }, data: { name } });
 });

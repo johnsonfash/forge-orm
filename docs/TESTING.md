@@ -676,7 +676,7 @@ const near = await db.cafe.findMany({
 
 **FTS.** Forge's FTS5 layer compiles to `MATCH` against an SQLite virtual table. better-sqlite3 ships FTS5, so the in-memory test path is identical to production-on-SQLite. For Postgres-shaped FTS (`tsvector`/`tsquery`), use Testcontainers — see [INTEGRATION-TESTING.md](./INTEGRATION-TESTING.md).
 
-**JSON path.** `f.jsonPath('$.address.city')` compiles to SQLite `json_extract`. Modern better-sqlite3 ships JSON1 — no setup needed.
+**JSON path.** A `where: { address: { path: 'city', eq: 'SF' } }` filter on an `f.json()` column compiles to SQLite `json_extract`. Modern better-sqlite3 ships JSON1 — no setup needed.
 
 ---
 

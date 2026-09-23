@@ -547,7 +547,7 @@ stopping is much worse than the cost of slightly larger indexes.
 
 ## Searchable + soft-delete
 
-`f.text().searchable()` on a model with `softDelete: 'deleted_at'`
+`f.text().searchable()` on a model with a `.softDeleteAt()` column
 creates a problem: the FTS index keeps tokenizing rows that should be
 hidden. The fix is a partial-filter index excluding the soft-deleted
 rows.
@@ -558,9 +558,8 @@ rows.
 const Post = model('posts', {
   id:         f.id(),
   body:       f.text(),
-  deleted_at: f.dateTime().optional(),
+  deleted_at: f.dateTime().optional().softDeleteAt(),
 }, {
-  softDelete: { field: 'deleted_at' },
   indexes: [
     {
       name:       'idx_posts_body_live',
@@ -572,9 +571,9 @@ const Post = model('posts', {
 });
 ```
 
-Forge's read path adds `deleted_at IS NULL` automatically when
-`softDelete` is set, so the partial-filter and the runtime filter line
-up. The index is roughly half the size of an unfiltered one on a
+Forge's read path adds `deleted_at IS NULL` automatically for the
+column marked `.softDeleteAt()`, so the partial-filter and the runtime
+filter line up. The index is roughly half the size of an unfiltered one on a
 typical 30%-deleted archive table.
 
 ### MySQL
@@ -678,7 +677,7 @@ column you mark `.searchable()`:
 ```ts
 const Order = model('orders', {
   id:          f.id(),
-  addr:        f.embed({ street: f.string(), city: f.string(), country: f.string() }),
+  addr:        f.embed(() => embed('Addr', { street: f.string(), city: f.string(), country: f.string() })),
   addr_search: f.text().searchable(),    // derived; populate in beforeWrite hook
 });
 
@@ -961,7 +960,7 @@ const Email = model('emails', {
   org_id:  f.string(),
   subject: f.string(),
   body:    f.text(),
-  sender:  f.embed({ name: f.string(), email: f.string() }),
+  sender:  f.embed(() => embed('Sender', { name: f.string(), email: f.string() })),
 });
 ```
 

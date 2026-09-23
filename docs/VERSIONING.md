@@ -319,7 +319,7 @@ const User = model('users', {
 
 Run `npx forge diff apply`. The diff preview shows `drop users.email`. Confirm. Done.
 
-Now the schema is in its final state. Optionally rename `newEmail` → `email` in the *application code* (the database column is `new_email` — that's a separate concern from the field name, which forge maps via `f.string().column('new_email')` if you want to align them).
+Now the schema is in its final state. If you want the field called `email` again, rename it in the schema and mark it `.renamedFrom('newEmail')` so the next diff emits a `RENAME COLUMN` instead of a drop-and-add. Note that forge has no field-name-to-column-name mapping: the column is named exactly what the field is named (the one exception is `id`, which is `_id` on Mongo), so the field name and the column name always move together.
 
 ### Compressed rename table
 
@@ -349,7 +349,7 @@ import { createDb, raw } from 'forge-orm';
 import { schema } from '../../src/schema';
 
 const db = await createDb({ url: process.env.DATABASE_URL!, schema });
-await db.$executeRaw(raw`ALTER TABLE users ALTER COLUMN bio TYPE TEXT`);
+await db.$executeRaw(forgeSql.sql`ALTER TABLE users ALTER COLUMN bio TYPE TEXT`);
 await db.$disconnect();
 ```
 
@@ -509,7 +509,7 @@ Forge's `forge push` emits plain `CREATE INDEX` (locking on the write side). For
 
 ```ts
 // scripts/migrate/20260624-add-events-idx.ts
-await db.$executeRaw(raw`
+await db.$executeRaw(forgeSql.sql`
   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_created_at
   ON events (created_at DESC)
 `);
@@ -529,7 +529,7 @@ CREATE INDEX CONCURRENTLY idx_events_created_at ON events (created_at DESC);
 MySQL 8 supports online index creation via `ALGORITHM=INPLACE, LOCK=NONE` for most index types:
 
 ```ts
-await db.$executeRaw(raw`
+await db.$executeRaw(forgeSql.sql`
   ALTER TABLE events ADD INDEX idx_events_created_at (created_at),
   ALGORITHM=INPLACE, LOCK=NONE
 `);
@@ -550,7 +550,7 @@ For schema operations that *do* need a rebuild (e.g. `DROP COLUMN` on SQLite < 3
 ### MSSQL — `WITH (ONLINE = ON)`
 
 ```ts
-await db.$executeRaw(raw`
+await db.$executeRaw(forgeSql.sql`
   CREATE INDEX idx_events_created_at ON events (created_at) WITH (ONLINE = ON)
 `);
 ```
@@ -581,7 +581,9 @@ When apps share a DB, each app declares only its own models in its `schema.ts`. 
 
 ```ts
 // packages/shared/src/schema.ts — read-only model refs
-export const Users = model('users', { id: f.id(), email: f.string() }, { readonly: true });
+// There is no `readonly` model option. "Someone else owns this table" is
+// expressed by how you wire the model up, not by a flag on it.
+export const Users = model('users', { id: f.id(), email: f.string() });
 ```
 
 ```ts
@@ -590,14 +592,18 @@ import { Users } from '@org/db-shared';
 
 export const Invoice = model('invoices', {
   id:     f.id(),
-  userId: f.string().refs(() => Users),
+  userId: f.objectId(),
   total:  f.decimal(),
-});
+}).relate(() => ({
+  // Relations target a schema KEY by string, so the target model has to be
+  // in the same schema map — an imported model object is not a valid target.
+  user: rel.one('user', { on: 'userId', refs: 'id' }),
+}));
 
-export const schema = { Invoice } as const;   // does NOT include Users
+export const schema = { Invoice, user: Users } as const;
 ```
 
-`billing-service`'s `forge push` only sees `Invoice`; the differ won't touch `users`. The shared `Users` model still gives typed FKs and join queries. The version of `@org/db-shared` is the cross-app contract: when it bumps, every consuming service has to acknowledge the bump (either by upgrading their package version or by pinning to the old one).
+`forge push` only syncs indexes, so it never creates or drops `users`; keep it out of drift checks with `forge diff --ignore=users` (or `FORGE_DIFF_IGNORE=users`). `Users` stays in the schema map because relation targets are resolved by schema key at runtime — a model left out of the map cannot be joined. The version of `@org/db-shared` is the cross-app contract: when it bumps, every consuming service has to acknowledge the bump (either by upgrading their package version or by pinning to the old one).
 
 ### SemVer of the shared schema package
 
@@ -622,13 +628,17 @@ When two apps need incompatible shapes for the same logical entity, the table-ve
 const OrderV1 = model('orders_v1', { id: f.id(), customer: f.string(), total: f.decimal() });
 const OrderV2 = model('orders_v2', { id: f.id(), customerId: f.string(), totals: f.json() });
 
-// A view bridges the two for read-only consumers:
-const OrderRead = model('order_read', { id: f.id(), customer_id: f.string(), total: f.decimal() }, {
-  view: { definition: raw`
+// A view bridges the two for read-only consumers. Views are declared with
+// `.asView({ sql })` — there is no `view:` model option, and the body is a
+// plain string (no `raw` tag), without the `CREATE VIEW name AS` prefix:
+const OrderRead = model('order_read', {
+  id: f.id(), customer_id: f.string(), total: f.decimal(),
+}).asView({
+  sql: `
     SELECT id, customer AS customer_id, total FROM orders_v1
     UNION ALL
     SELECT id, customer_id, CAST(totals->>'subtotal' AS DECIMAL) FROM orders_v2
-  ` },
+  `,
 });
 ```
 

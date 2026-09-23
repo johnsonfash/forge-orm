@@ -91,10 +91,10 @@ the value is stamped onto `data` if it is missing. This means:
   waiting on the database round-trip.
 * `createMany` does not need `RETURNING` to learn the IDs — they were
   generated locally and are visible on the input rows.
-* Sequential / auto-increment columns (declared with
-  `f.int().autoincrement()`) are the exception — those are assigned by the
-  database, and `create` reads them back via `RETURNING` / `OUTPUT` / the
-  follow-up SELECT.
+* Auto-incrementing primary keys (declared with
+  `f.id({ type: 'bigserial' })`) are the exception — those are assigned by
+  the database, and `create` reads them back via `RETURNING` / `OUTPUT` /
+  the follow-up SELECT.
 
 See [Picking a primary-key strategy](../README.md#picking-a-primary-key-strategy)
 for when to use which.

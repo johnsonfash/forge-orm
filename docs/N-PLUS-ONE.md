@@ -610,7 +610,7 @@ of tag names per post, denormalise:
 const Post = model('posts', {
   id: f.id(),
   title: f.string(),
-  tag_names: f.string().array().default([]),    // PG/SQLite/DuckDB native array;
+  tag_names: f.stringArray().default([]),       // PG/SQLite/DuckDB native array;
                                                 // JSON on MySQL/MSSQL/Mongo
 });
 ```

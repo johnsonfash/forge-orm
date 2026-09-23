@@ -1,12 +1,12 @@
 # CHECK constraints
 
-DB-enforced row predicates — declarative, cheap, always-on. Use for invariants you want true regardless of which client wrote the row. This page covers `f.check(expr)`, the per-dialect support matrix (Postgres NOT VALID + VALIDATE, MySQL 8 enforcement, SQLite always, Mongo `$jsonSchema`), NULL semantics, and the patterns that compose with zod / triggers / enums.
+DB-enforced row predicates — declarative, cheap, always-on. Use for invariants you want true regardless of which client wrote the row. Forge has no `f.check(expr)` builder — this page covers what it emits on its own, the three paths for everything else, the per-dialect support matrix (Postgres NOT VALID + VALIDATE, MySQL 8 enforcement, SQLite always, Mongo `$jsonSchema`), NULL semantics, and the patterns that compose with zod / triggers / enums.
 
 Related deep-dives:
 
 * [MODEL.md](./MODEL.md) — `f.enumOf(...)` (the one CHECK forge emits today on its own).
 * [MIGRATIONS.md](./MIGRATIONS.md) — `forge diff apply` and the hand-edit migration path, which is how custom CHECK predicates land.
-* [INDEXES.md](./INDEXES.md) — partial indexes (`filter`) and the "unique partial index as cross-row check" pattern.
+* [INDEXES.md](./INDEXES.md) — partial indexes (`where`) and the "unique partial index as cross-row check" pattern.
 * [MONGO.md](./MONGO.md) — collection validators on Mongo.
 
 ---
@@ -81,7 +81,7 @@ const Membership = model('memberships', {
 
 The constraint name is derived deterministically (`<table>_<col>_enum_chk` or the dialect's equivalent), so introspection round-trips it and drift detection notices when the set drifts from the schema. Add a value to the tuple, `forge push`, and the constraint gets dropped and recreated with the new list.
 
-**(2) Partial unique indexes — for "this row is the only one of its kind".** Lots of "CHECK"-shaped invariants are really *uniqueness with a predicate*, and forge expresses these directly via the index `filter`:
+**(2) Partial unique indexes — for "this row is the only one of its kind".** Lots of "CHECK"-shaped invariants are really *uniqueness with a predicate*, and forge expresses these directly via the index `where` predicate:
 
 ```ts
 const Subscription = model('subscriptions', {
@@ -91,7 +91,7 @@ const Subscription = model('subscriptions', {
 }, {
   indexes: [
     // "at most one active subscription per org" — DB-enforced.
-    { keys: { org_id: 1 }, unique: true, filter: "status = 'active'" },
+    { keys: { org_id: 1 }, unique: true, where: "status = 'active'" },
   ],
 });
 ```
@@ -386,7 +386,7 @@ What people actually want when they ask for a cross-row CHECK:
 
 | Want | Right tool |
 |---|---|
-| "At most one active row per group" | Partial unique index — `indexes: [{ keys: { group_id: 1 }, unique: true, filter: "status = 'active'" }]` |
+| "At most one active row per group" | Partial unique index — `indexes: [{ keys: { group_id: 1 }, unique: true, where: "status = 'active'" }]` |
 | "FK to a row meeting some condition" | Compose: FK column + plain CHECK on a denormalised column, refreshed by trigger |
 | "Total balance across the table is zero" | `BEFORE INSERT/UPDATE` trigger, or an application-side ledger |
 | "This is the only row of its kind for this tenant" | Composite unique — `uniques: [['tenant_id', 'kind']]` |

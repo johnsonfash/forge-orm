@@ -812,7 +812,7 @@ const Order = model('orders', {
   placedAt: f.dateTime(),
 }, {
   indexes: [
-    { name: 'orders_placed_at_idx', fields: ['placedAt'] },
+    { name: 'orders_placed_at_idx', keys: { placedAt: 1 } },
   ],
 });
 ```
@@ -832,7 +832,7 @@ const Audit = model('audit', {
   indexes: [
     {
       name: 'audit_ts_brin',
-      fields: ['ts'],
+      keys: { ts: 1 },
       method: 'brin',                // PG-only — gracefully falls back on other dialects
     },
   ],
@@ -850,7 +850,7 @@ Composite indexes on `(date_col, other_col)` are the standard fix for
 
 ```ts
 indexes: [
-  { name: 'orders_user_placed', fields: ['customerId', 'placedAt'] },
+  { name: 'orders_user_placed', keys: { customerId: 1, placedAt: 1 } },
 ]
 ```
 
@@ -963,7 +963,7 @@ const Order = model('orders', {
   shippedAt:  f.dateTime().optional(),
 }, {
   indexes: [
-    { name: 'orders_placed_at_idx', fields: ['placedAt'] },
+    { name: 'orders_placed_at_idx', keys: { placedAt: 1 } },
   ],
 });
 
@@ -1003,8 +1003,8 @@ const Meeting = model('meetings', {
   durationMin:  f.int(),
 }, {
   indexes: [
-    { name: 'meetings_start_instant', fields: ['startInstant'] },
-    { name: 'meetings_owner_start', fields: ['ownerId', 'startInstant'] },
+    { name: 'meetings_start_instant', keys: { startInstant: 1 } },
+    { name: 'meetings_owner_start', keys: { ownerId: 1, startInstant: 1 } },
   ],
 });
 
@@ -1094,7 +1094,7 @@ const Holiday = model('holidays', {
   name:     f.string(),
 }, {
   uniques: [['tenantId', 'date']],
-  indexes: [{ name: 'holidays_tenant_date', fields: ['tenantId', 'date'] }],
+  indexes: [{ name: 'holidays_tenant_date', keys: { tenantId: 1, date: 1 } }],
 });
 
 import { DateTime } from 'luxon';

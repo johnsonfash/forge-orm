@@ -558,7 +558,7 @@ or detached fragments. Workflow:
 
    ```ts
    const Postcode = model('postcodes', {
-     code:    f.string().primaryKey(),
+     code:    f.id({ type: 'string' }),   // natural key — app supplies it
      polygon: f.json(),   // raw GeoJSON MultiPolygon
    });
    ```
@@ -883,7 +883,7 @@ const Vehicle = model('vehicles', {
       keys: { location: 1 },
       method: 'spatial',
       name: 'idx_vehicles_active_geo',
-      where: { active: { eq: true } },
+      where: 'active = true',   // raw SQL; the Mongo form is { active: { $eq: true } }
     },
   ],
 });
