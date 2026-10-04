@@ -216,6 +216,6 @@
     "typescript": "^5.9.3"
   },
   "bin": {
-    "forge": "./dist/scripts/forge-cli.js"
+    "forge": "dist/scripts/forge-cli.js"
   }
 }
