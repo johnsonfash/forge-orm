@@ -64,6 +64,10 @@ export interface IntrospectedIndex {
   include?: string[];
   /** Postgres expression body (when ix.indexprs is non-null). Null otherwise. */
   expression?: string;
+  /** Mongo TTL — seconds after the indexed date at which a document expires.
+   *  `0` is legal and meaningful (expire exactly at the stored date), so
+   *  presence is tested with `!== undefined`, never for truthiness. */
+  expireAfterSeconds?: number;
   /** Mongo partial filter — same shape as the IndexDef field. */
   partialFilterExpression?: Record<string, unknown>;
   /** Mongo collation (echoed by listIndexes). */

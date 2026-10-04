@@ -2363,6 +2363,60 @@ const report = await applySqliteMigration(driver, ddl, { logger: console.log });
 const report2 = await runMigrate(driver);
 ```
 
+#### On Mongo, `$migrate()` is the index set (2.20.5)
+
+A Mongo collection needs no DDL — it springs into existence on first write —
+so there, `$migrate()` means the **indexes**: the same
+listIndexes-diff-then-createIndex pass `forge push` runs, against the
+connection your app already holds.
+
+```ts
+const db = await createDb({ url: process.env.DATABASE_URL!, type: 'mongo', schema });
+await db.$migrate();        // declared indexes are now present
+```
+
+That is the call to make at boot, before the server accepts traffic. It is
+idempotent: one `listIndexes()` per collection, a fingerprint diff, and a
+`createIndex` only for what is new or changed. Against an in-sync database it
+writes nothing.
+
+```ts
+const report = await db.$migrate();
+// {
+//   applied:  ['idx_Session_token_uq', 'idx_sessions_ttl'],  // created or rebuilt
+//   skipped:  ['idx_Session_orgId_createdAt'],               // already matched
+//   failures: [],                                            // { name, error }
+//   alteredColumns: [],                                      // n/a on Mongo
+//   pending:  [{ kind: 'index', direction: 'extra', table: 'sessions',
+//                detail: "index 'idx_stale' in DB but not in schema" }],
+// }
+```
+
+Two Mongo-only options:
+
+```ts
+await db.$migrate({ dryRun: true });   // report the plan, write nothing
+await db.$migrate({ prune: true });    // also DROP undeclared indexes
+```
+
+`prune` is off by default and should usually stay off. Mongo index names are
+not namespaced, so an index a person added by hand is indistinguishable from
+one an older schema version created — prune takes both. Without it, undeclared
+indexes are listed under `pending` and left alone.
+
+A failing index never throws: a unique index over data that already has
+duplicates lands in `report.failures` so a boot does not die of it.
+
+If you hold a `MongoClient` rather than a `ForgeDb`, the same pass is exported
+directly:
+
+```ts
+import { applyIndexes } from 'forge-orm';
+
+const report = await applyIndexes(mongoClient.db('app'), { schema });
+const plan   = await applyIndexes(mongoClient.db('app'), { schema, dryRun: true });
+```
+
 **Drift detection** (since 2.5.1). After the create-pass, `$migrate()`
 introspects the live DB and diffs it against the active schema:
 
@@ -2521,7 +2575,7 @@ build (custom-compiled with R-Tree + sqlite-vec, see next section):
 | `f.vector()` + `near` / `nearTo` | Fallback (brute-force JS) | **Native (sqlite-vec HNSW)** | Native (sqlite-vec) |
 | Atomic upsert (`INSERT … ON CONFLICT`) | ✓ | ✓ | ✓ |
 | `$queryRaw` / `$executeRaw` | ✓ | ✓ | ✓ |
-| Migrations | `db.$migrate()` (runtime) | `db.$migrate()` (runtime) | `forge push` (CLI) |
+| Migrations | `db.$migrate()` (runtime) | `db.$migrate()` (runtime) | `forge push` (CLI) or `db.$migrate()` on Mongo |
 | Doctor probe | `browserDoctor()` | `browserDoctor()` | `forge doctor` (CLI) |
 | Drift detection (`forge diff`) | Roadmap (2.5) | Roadmap (2.5) | ✓ |
 

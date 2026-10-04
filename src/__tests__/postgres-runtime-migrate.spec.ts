@@ -120,6 +120,6 @@ describe('$migrate() on postgres', () => {
       close: async () => {},
     } as any;
     const db = (await createDb({ driver: mysqlish, schema: appSchema })) as any;
-    await expect(db.$migrate()).rejects.toThrow(/only supported on sqlite, postgres and indexeddb/);
+    await expect(db.$migrate()).rejects.toThrow(/only supported on mongo, sqlite, postgres and indexeddb/);
   });
 });

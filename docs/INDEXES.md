@@ -652,6 +652,7 @@ is read back where the database stores it:
 | `expression` | `pg_get_indexdef` | `INDEX_DEF` | `sqlite_master.sql` | n/a |
 | `include` | `pg_index.indnkeyatts` vs `indnatts` | n/a | n/a | n/a |
 | `partialFilterExpression` | n/a (use `where`) | n/a | n/a | `listIndexes().partialFilterExpression` |
+| `expireAfterSeconds` | n/a | n/a | n/a | `listIndexes().expireAfterSeconds` (2.20.5) |
 | `collation` | n/a (per-column) | n/a | n/a | `listIndexes().collation` |
 | `wildcardProjection` | n/a | n/a | n/a | `listIndexes().wildcardProjection` |
 
@@ -690,6 +691,78 @@ table, name, detail }`.
   created where you expected and points at the manual path.
 * `where:` object form with operators outside the translator coverage —
   warns the filter won't reach SQL dialects.
+
+## 13a. Applying indexes at runtime (Mongo)
+
+`forge push` is a CLI: it needs a shell, its own connection, and somebody to
+remember to run it. A server that wants its indexes guaranteed present before
+it accepts a request needs an in-process call, and on Mongo that is
+`db.$migrate()` (since 2.20.5):
+
+```ts
+const db = await createDb({ url: process.env.DATABASE_URL!, type: 'mongo', schema });
+await db.$migrate();         // declared indexes are now present
+app.listen(3000);
+```
+
+It is the same engine `forge push` drives — `applyIndexes()` in
+`src/adapters/mongo/apply-indexes.ts` — pointed at the connection the app
+already holds rather than at the process-global default client. Idempotent:
+one `listIndexes()` per collection, a fingerprint diff, and a `createIndex`
+only for what is new or changed. Against an in-sync database it writes
+nothing, so it is safe on every boot.
+
+The report says what happened:
+
+| Field | Meaning |
+|---|---|
+| `applied` | index names created, or dropped-and-recreated because the spec drifted |
+| `skipped` | already present with a matching spec |
+| `failures` | `{ name, error }` — e.g. a unique index over data that already has duplicates. Reported, never thrown: a boot must not die of it |
+| `pending` | live indexes the schema does not declare |
+| `alteredColumns` | always empty on Mongo — there are no columns |
+
+Two Mongo-only options:
+
+```ts
+await db.$migrate({ dryRun: true });   // plan only — write nothing
+await db.$migrate({ prune: true });    // also DROP undeclared indexes
+```
+
+`prune` is **off by default and should usually stay off.** Mongo index names
+are not namespaced, so an index a person created by hand is indistinguishable
+from one an older schema version created; prune takes both. Leave it off and
+read `pending` instead.
+
+On the CLI the same two are `forge push --dry-run` and `forge push --prune`.
+
+Holding a `MongoClient` instead of a `ForgeDb` is fine — the engine is
+exported:
+
+```ts
+import { applyIndexes } from 'forge-orm';
+
+const report = await applyIndexes(client.db('app'), { schema });
+const plan   = await applyIndexes(client.db('app'), { schema, dryRun: true });
+```
+
+### Do not hand-roll this
+
+A boot-time `createIndex` loop written by hand is the thing this replaces, and
+it goes wrong in the same three ways every time:
+
+* **No diff.** `createIndex` on an identical index is a Mongo no-op, so a
+  blind loop looks idempotent — but it issues N round trips on every boot, and
+  it cannot tell you that an index has drifted rather than being absent.
+* **A second source of truth.** The hand-written list and the schema's
+  `indexes:` drift apart, and nothing compares them. The usual outcome is two
+  indexes over the same keys under different names — one unique, one not —
+  which Mongo accepts without complaint because the names differ.
+* **Invisible to `forge diff`.** An index the schema does not declare is drift
+  by definition, so the thing meant to keep you safe reports it as a problem
+  forever.
+
+Declare the index in the model's `indexes:` and call `db.$migrate()`.
 
 ## 14. Performance
 

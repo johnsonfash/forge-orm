@@ -187,6 +187,19 @@ export type {
   IgnoreSpec,
 } from './scripts/diff-core';
 
+// ─── Mongo index apply (the engine behind `forge push` on Mongo) ────────────
+// `db.$migrate()` is the ordinary way in. This is the same pass over a raw
+// `Db` handle, for code that holds a MongoClient rather than a ForgeDb:
+//   await applyIndexes(mongoDb, { schema })                 // ensure
+//   await applyIndexes(mongoDb, { schema, dryRun: true })   // report only
+// Imported from the engine module, never from scripts/push — that one calls
+// dotenv.config() at load, which `import 'forge-orm'` must not do.
+export { applyIndexes, collectIndexSpecs } from './adapters/mongo/apply-indexes';
+export type {
+  MongoIndexApplyOptions, MongoIndexApplyReport, MongoIndexRef,
+} from './adapters/mongo/apply-indexes';
+export { indexNameFor as mongoIndexNameFor } from './adapters/mongo/index-name';
+
 // ─── Runtime DDL apply (browser/wasm replacement for `forge push`) ──────────
 // Also available as `db.$migrate()` on any sqlite-adapter ForgeDb. Since 2.5.1
 // also applies non-destructive drift (ADD COLUMN for missing columns) and

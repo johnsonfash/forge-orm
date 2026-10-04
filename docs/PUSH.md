@@ -74,16 +74,33 @@ For Postgres specifically: `[forge:push] <summary>` prints the planner output be
 
 ## Flags
 
-`push` ships exactly two flags. The deliberate omissions are spelled out below.
+`push` ships four flags, two of them Mongo-only. The deliberate omissions are
+spelled out below.
 
 | Flag | Effect |
 |---|---|
 | `--enable-extensions` | Emit the dialect's `CREATE EXTENSION` (or equivalent) when the schema declares geo / vector / FTS features that need it. See [`--enable-extensions`](#--enable-extensions). |
 | `--schema=<path>` | Override the schema-resolution cascade. `--schema=./src/schema.ts` or `--schema ./src/schema.ts`. `FORGE_SCHEMA_PATH=<path>` does the same. |
+| `--dry-run` | **Mongo only** (2.20.5). Report every index that would be created, rebuilt or dropped, and write nothing. |
+| `--prune` | **Mongo only** (2.20.5). Also drop indexes the schema does not declare. Off by default. |
+
+### `--prune`, and why it is not the default
+
+A Mongo collection's index names are not namespaced: there is no `forge_`
+prefix convention to tell an index forge created from one a person added by
+hand, so `--prune` drops both. Without it, undeclared indexes are listed at
+the end of the push and left alone — which is what you want almost always:
+
+```
+ℹ 2 indexes in the database are not declared in the schema:
+   · sessions.idx_left_over
+   · payment_history.idx_pay_flw_tx_ref
+  Run 'forge push --prune' to drop them.
+```
 
 ### What's not a flag, and why
 
-* **No `--dry-run`.** The dry-run is `forge diff` — a separate, read-only command that prints exactly what `push` would apply, in the same kind/direction/detail shape. See [DIFF.md](./DIFF.md).
+* **No `--dry-run` on the SQL dialects.** There the dry-run is `forge diff` — a separate, read-only command that prints exactly what `push` would apply, in the same kind/direction/detail shape. See [DIFF.md](./DIFF.md). Mongo gained a real `--dry-run` in 2.20.5 because `diff` cannot stand in for it there: a Mongo index's name is usually auto-generated, so the diff can say a column-set is missing but not which index push will create, nor whether it would be a create or a drop-and-rebuild.
 * **No `--accept-data-loss`.** `push` is additive-only. It never drops columns or tables. The destructive operations live in `forge diff apply`, which shows them in a preview before running.
 * **No `--verbose` / `--quiet`.** The output is always one line per statement on apply, plus a summary. Pipe through `jq` or `grep` if you want a quieter view.
 * **No `--exclude` / `--ignore`.** Excluding tables on push would let a deploy accidentally drop tables it doesn't own. The way to exclude is to leave the model out of the schema map — see the monorepo partial-schema pattern in [MIGRATIONS.md](./MIGRATIONS.md#migration-in-monorepos).
@@ -369,6 +386,8 @@ for each model: {
 * No advisory lock — the server's `createIndex` is idempotent. Two concurrent pushes might race on `dropIndex`/`createIndex` for a drifted index, but Mongo serialises index ops at the collection level.
 * View models are handled first, before regular index push, because matviews populate themselves via the aggregation pipeline (`$out` / `$merge`).
 * `bigserial` IDs are rejected at the top: `[forge:push:mongo] model '<m>' uses f.id({ type: 'bigserial' }) on field '<f>', which has no Mongo equivalent. Use 'auto' or 'uuid' for Mongo-compatible schemas.`
+* Indexes the schema does not declare are listed at the end and left in place; `--prune` drops them. `_id_` and `*_fts` shadows are never counted as undeclared.
+* **In-process equivalent.** `db.$migrate()` runs this exact pass against the connection your app already holds (2.20.5), which is what a server wants at boot rather than a CLI invocation it has to remember. The engine is `applyIndexes()` in `src/adapters/mongo/apply-indexes.ts`, exported as `applyIndexes` for code that holds a `MongoClient` instead of a `ForgeDb`. See [INDEXES.md § 13a](./INDEXES.md#13a-applying-indexes-at-runtime-mongo).
 
 ---
 

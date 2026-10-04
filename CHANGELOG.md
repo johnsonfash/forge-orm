@@ -4,6 +4,116 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.20.5 — Mongo indexes had no runtime path
+
+**Minor.** `forge push` was the only way to create a declared Mongo index.
+That is a CLI: it needs a shell, its own connection, and somebody to remember
+to run it. A server that wants its indexes guaranteed present before it
+accepts a request had nowhere to call — `db.$migrate()` threw:
+
+```
+[forge] $migrate() is only supported on sqlite, postgres and indexeddb
+adapters today. For mongo use the CLI: 'npx forge push'.
+```
+
+So applications wrote their own boot-time `createIndex` loop, and a
+hand-rolled loop goes wrong the same three ways every time: no `listIndexes`
+diff, so it re-issues every index on every boot and cannot distinguish "absent"
+from "drifted"; a second list of indexes that drifts away from the schema's own
+`indexes:` with nothing comparing them; and every index it creates that the
+schema does not declare is drift `forge diff` then reports forever.
+
+**`db.$migrate()` now works on Mongo.** A collection needs no DDL, so there it
+means the index set — the same listIndexes-diff-then-createIndex pass push
+runs, against the connection the app already holds:
+
+```ts
+const db = await createDb({ url: process.env.DATABASE_URL!, type: 'mongo', schema });
+await db.$migrate();        // declared indexes are now present
+app.listen(3000);
+```
+
+Idempotent, so it is safe on every boot: against an in-sync database it issues
+one `listIndexes()` per collection and writes nothing. `applied` and `skipped`
+hold index names; a failing index (a unique over data that already has
+duplicates, say) lands in `failures` rather than killing the boot.
+
+**Two new Mongo-only options**, on `$migrate()` and as `forge push` flags:
+
+```ts
+await db.$migrate({ dryRun: true });   // forge push --dry-run
+await db.$migrate({ prune: true });    // forge push --prune
+```
+
+`dryRun` reports every index that would be created, rebuilt or dropped and
+writes nothing — the plan that `forge diff` cannot give you on Mongo, where
+index names are usually auto-generated. `prune` drops indexes the schema does
+not declare; it is **off by default** because Mongo index names are not
+namespaced, so an index a person added by hand is indistinguishable from one an
+older schema version created and prune takes both. Without it those indexes
+are reported (`report.pending`, or a trailing list on the CLI) and left alone.
+`_id_` and `*_fts` shadows never count as undeclared.
+
+**The engine is exported.** For code that holds a `MongoClient` rather than a
+`ForgeDb`:
+
+```ts
+import { applyIndexes } from 'forge-orm';
+const report = await applyIndexes(client.db('app'), { schema });
+```
+
+It moved to `src/adapters/mongo/apply-indexes.ts` — dependency-free, no
+`console`, no process-global client. `scripts/push.ts` is now the CLI face on
+top of it and re-exports the whole module, so every existing
+`adapters/mongo/scripts/push` import path still resolves and `pushAllIndexes`
+keeps its signature and its output. `src/index.ts` deliberately exports from
+the engine, not from `scripts/push`: that one calls `dotenv.config()` at load,
+which `import 'forge-orm'` must not do.
+
+### Also fixed, in the drift detector
+
+**A Mongo primary key reported as both missing and extra.** The schema calls it
+`id` and Mongo stores it as `_id`, and nothing reconciled the two for the
+primary key itself, for a composite unique containing it, or for a per-field
+unique. Every collection produced two permanent drift items no push could ever
+clear:
+
+```
+− [index] widgets: index u:id
++ [index] widgets: unique index u:_id in DB but not in schema
+```
+
+Expected signatures are now grouped per index, holding every spelling that
+would satisfy it, and the missing-index pass accepts any one of them. Adding
+both spellings to the flat set — which is what the declared-index path already
+did — was the bug: it made the check demand *both*.
+
+**TTL drift was invisible.** `expireAfterSeconds` was pushed but never read
+back: it was missing from `IntrospectedIndex`, from `MongoAdapter.introspect()`
+and from the diff comparator, so a changed retention window — or a TTL that had
+gone missing entirely, which is the worse direction, since documents just
+quietly stop expiring — was drift `forge diff` could not see. All three now
+carry it.
+
+**The deep per-index comparison never ran on Mongo.** It matched a declared
+index to a live one by the declared `name` only, and Mongo schemas rarely name
+their indexes — push auto-names them. So the partial filter, collation,
+wildcard projection, key directions and (now) TTL of a typical Mongo index were
+never compared at all. The comparison now falls back to the name push would
+have generated, resolving `id` → `_id` and `method: 'spatial'` → `2dsphere`
+first so it compares what push actually created rather than what the schema
+literally said. SQL dialects are untouched: their index names derive from the
+table, not the schema key, so an unnamed declaration stays out of the deep pass
+there.
+
+**`method: 'vector'` was reported missing on Mongo.** Push warns and skips it —
+Atlas Vector Search is a separate Search Index API, not `createIndex` — but the
+differ still expected it, which was permanent drift with no way to clear it.
+
+The auto-name rule now lives in one place,
+`src/adapters/mongo/index-name.ts`, shared by push and the differ instead of
+each keeping a copy, and is exported as `mongoIndexNameFor`.
+
 ## 2.20.4 — `f.bytes()` never worked on DuckDB
 
 **Patch.** Storing binary on DuckDB threw on every write, and a stored value

@@ -8,7 +8,8 @@ import { loadConsumerSchema } from './load-consumer-schema';
 // Dialect-agnostic schema sync. Adapter is picked from DATABASE_URL.
 // Schema resolution lives in load-consumer-schema.ts.
 //
-//   mongo    → idempotent index push
+//   mongo    → idempotent index push (--dry-run to plan, --prune to drop
+//              indexes the schema no longer declares)
 //   postgres → DDL diff + apply, with pg_advisory_xact_lock against races
 //   mysql    → DDL apply
 //   sqlite   → DDL apply
@@ -45,7 +46,10 @@ async function main() {
   switch (kind) {
     case 'mongo': {
       const { pushAllIndexes } = await import('../adapters/mongo/scripts/push');
-      await pushAllIndexes(schema);
+      await pushAllIndexes(schema, {
+        dryRun: process.argv.includes('--dry-run'),
+        prune: process.argv.includes('--prune'),
+      });
       return;
     }
     case 'postgres': {

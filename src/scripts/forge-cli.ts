@@ -14,6 +14,8 @@ Usage:
   forge generate              Write a migration from the last snapshot (no DB)
   forge migrate status        What has run, what has not, what should not have
   forge push                  Idempotently sync your schema to the live DB
+  forge push --dry-run        Report what push WOULD do; write nothing (Mongo)
+  forge push --prune          Also drop indexes the schema no longer declares
   forge diff                  Show drift between the live DB and your schema
   forge diff --json           Same, machine-readable
   forge diff --check          Exit non-zero (3) if drift is found (for CI)
@@ -92,7 +94,20 @@ const SUBCOMMAND_HELP: Record<string, string> = {
 
   Creates and rebuilds INDEXES to match the schema. It does not create,
   drop or alter tables/collections, and it never touches rows.
-  Reads DATABASE_URL.`,
+  Reads DATABASE_URL.
+
+  On Mongo:
+    --dry-run       plan only — report every index that would be created,
+                    rebuilt or dropped, and write nothing
+    --prune         ALSO drop indexes the schema does not declare. Off by
+                    default: Mongo index names are not namespaced, so an
+                    index a human added by hand is indistinguishable from
+                    one an older schema version created, and prune takes
+                    both. Without it, undeclared indexes are listed and
+                    left alone.
+
+  In-process equivalent: db.$migrate() runs the same pass against the
+  connection your app already has, which is what a server wants at boot.`,
   diff: `forge diff — report drift between the live database and the schema.
 
   Read-only. Nothing is written.

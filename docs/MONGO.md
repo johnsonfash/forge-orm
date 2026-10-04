@@ -328,7 +328,7 @@ stricter needs a coordinated stop-the-world migration.
 
 forge's [`IndexDef`](./INDEXES.md#1-indexdef-shape) is a single shape
 that covers every dialect's index family. The Mongo emitter in
-`src/adapters/mongo/scripts/push.ts` maps each field to the matching
+`src/adapters/mongo/apply-indexes.ts` maps each field to the matching
 `createIndex` call.
 
 | IndexDef field | Mongo emit |
@@ -369,9 +369,33 @@ with a `↻` log line:
    ✓ idx_orders_items_sku_text       (new)
 ```
 
-The `fingerprint` in `push.ts` preserves byte equality with the
+The `fingerprint` in `apply-indexes.ts` preserves byte equality with the
 pre-2.2 form, which is why a pure-version-bump push does not
 unnecessarily rebuild your indexes.
+
+**Apply them from the app, not the CLI.** `db.$migrate()` runs this same
+pass against the connection you already hold (2.20.5), so a server can
+guarantee its indexes before it accepts traffic:
+
+```ts
+const db = await createDb({ url: process.env.DATABASE_URL!, type: 'mongo', schema });
+await db.$migrate();                   // idempotent; writes nothing when in sync
+await db.$migrate({ dryRun: true });   // plan only
+await db.$migrate({ prune: true });    // also drop undeclared indexes
+```
+
+Do not write your own boot-time `createIndex` loop — see
+[INDEXES.md § 13a](./INDEXES.md#13a-applying-indexes-at-runtime-mongo) for
+the three ways that goes wrong.
+
+**Undeclared indexes.** Anything live that the schema does not declare is
+reported (`report.pending` from `$migrate()`, a trailing list from the CLI)
+and left alone. `prune` drops it. `_id_` and the `*_fts` shadow never count.
+
+**TTL drift is visible since 2.20.5.** `expireAfterSeconds` is read back by
+`introspect()`, so `forge diff` / `db.$diff()` now report a changed retention
+window — and, more usefully, a TTL that has silently gone missing, which
+otherwise shows up only as documents that stop expiring.
 
 **Searchable fields collapse into one text index.** Mongo allows
 exactly one text index per collection, so every field marked

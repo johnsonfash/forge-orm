@@ -3,7 +3,10 @@ import type {
   DbIntrospection,
   IntrospectedTable,
 } from '../adapters/types';
-import type { FieldDef, ModelDef, RelationDef } from '../schema/types';
+import type { FieldDef, IndexDef, ModelDef, RelationDef } from '../schema/types';
+// Dependency-free by design — importing push.ts here would pull dotenv and the
+// Mongo client into every dialect's bundle.
+import { indexNameFor } from '../adapters/mongo/index-name';
 
 // Pure (no-IO) drift comparator.
 //
@@ -85,12 +88,23 @@ export function parseIgnoreList(raw: string | undefined | null): IgnoreSpec {
 
 interface ExpectedIndexDecl {
   name?: string;
+  /**
+   * The name `forge push` gives this index on Mongo when the schema set none.
+   *
+   * The deep per-field comparison below can only run on an index it can FIND,
+   * and it looked indexes up by the declared name only. Mongo schemas rarely
+   * name their indexes — push auto-names them — so in practice the TTL,
+   * partial filter, collation and key directions of a Mongo index were never
+   * deep-compared at all.
+   */
+  mongoName: string;
   unique: boolean;
   keys: Record<string, unknown>;
   method?: string;
   where?: Record<string, unknown> | string;
   include?: string[];
   expression?: string;
+  expireAfterSeconds?: number;
   partialFilterExpression?: Record<string, unknown>;
   collation?: Record<string, unknown>;
   wildcardProjection?: Record<string, unknown>;
@@ -99,18 +113,46 @@ interface ExpectedIndexDecl {
 interface ExpectedTable {
   name: string;
   columns: Map<string, FieldDef>;
-  // normalized index signatures: `u:col1,col2` (unique) / `n:col1,col2`
+  // normalized index signatures: `u:col1,col2` (unique) / `n:col1,col2`.
+  // Flat set of every acceptable spelling — see indexSigGroups.
   indexSigs: Set<string>;
+  // The same signatures grouped per expected index: one entry per declared
+  // index, holding the spellings that would satisfy it (`u:id` and `u:_id`
+  // are the same primary key). The missing-index pass needs the grouping —
+  // asking the flat set for EVERY spelling meant a Mongo primary key was
+  // reported both missing as `u:id` and extra as `u:_id`, on every
+  // collection, forever.
+  indexSigGroups: string[][];
+  // Signatures that are declared but which `forge push` deliberately does NOT
+  // create on Mongo, so reporting them as missing there would be permanent
+  // drift nobody can clear. Today: `method: 'vector'`, which lives in Atlas
+  // Search rather than createIndex.
+  mongoSkippedSigs: Set<string>;
   // Full per-index declarations for deep-field drift detection (method,
-  // where, include, expression, collation, etc.). Only entries with an
-  // explicit `name` participate in the deep comparison so unnamed indexes
-  // don't false-positive.
+  // where, include, expression, collation, etc.). Matched to a live index by
+  // the declared `name`, or on Mongo by the name push would have generated.
   indexDecls: ExpectedIndexDecl[];
   fks: { column: string; refTable: string; refColumn: string }[];
 }
 
 function indexSig(unique: boolean, cols: string[]): string {
   return `${unique ? 'u' : 'n'}:${[...cols].sort().join(',')}`;
+}
+
+/**
+ * The key map `forge push` actually hands `createIndex` on Mongo: `id` becomes
+ * `_id`, and `method: 'spatial'` resolves every key to a `2dsphere` token.
+ * Kept in step with `collectIndexSpecs` in adapters/mongo/apply-indexes.ts.
+ */
+function mongoPushKeys(
+  keys: Record<string, unknown>,
+  method?: IndexDef['method'],
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(keys)) {
+    out[k === 'id' ? '_id' : k] = method === 'spatial' ? '2dsphere' : v;
+  }
+  return out;
 }
 
 // Stable JSON for cross-side comparison — sorts keys recursively so
@@ -148,33 +190,57 @@ export function expectedFromSchema(schema: Record<string, any>): {
     }
 
     const indexSigs = new Set<string>();
+    const indexSigGroups: string[][] = [];
+    const mongoSkippedSigs = new Set<string>();
     const indexDecls: ExpectedIndexDecl[] = [];
-    if (idCol) indexSigs.add(indexSig(true, [idCol]));            // primary key
+
+    // One expected index, and every spelling that would satisfy it. The
+    // schema calls the primary key `id`; Mongo stores it as `_id`, so an
+    // index over it has two legitimate column lists and EITHER is a match.
+    //
+    // All the spellings also land in the flat `indexSigs` set, because the
+    // extra-index pass asks "is this live index accounted for anywhere" and
+    // the shape of that set is part of expectedFromSchema's return.
+    const addSig = (unique: boolean, cols: string[]): string[] => {
+      const primary = indexSig(unique, cols);
+      const asMongo = indexSig(unique, cols.map((c) => (c === 'id' ? '_id' : c)));
+      indexSigs.add(primary);
+      indexSigs.add(asMongo);
+      const group = primary === asMongo ? [primary] : [primary, asMongo];
+      indexSigGroups.push(group);
+      return group;
+    };
+
+    if (idCol) addSig(true, [idCol]);                             // primary key
     for (const [name, fdef] of Object.entries(m.fields)) {
       const fd = fdef as FieldDef;
-      if (fd.unique && fd.kind !== 'id') indexSigs.add(indexSig(true, [name]));
+      if (fd.unique && fd.kind !== 'id') addSig(true, [name]);
     }
-    for (const cols of m.uniques ?? []) indexSigs.add(indexSig(true, cols));
+    for (const cols of m.uniques ?? []) addSig(true, cols);
     for (const idx of m.indexes ?? []) {
       // Expression indexes have no column list — comparing them by column-set
       // would treat every expression index as a duplicate of every other one
       // (all "empty cols"). They still participate in the deep per-name
       // comparison below; only the column-set signature skips them.
       if (!idx.expression) {
-        indexSigs.add(indexSig(idx.unique === true, Object.keys(idx.keys)));
-        // …and under Mongo's own name for the primary key, so the signature
-        // matches whichever spelling the schema used.
-        const asMongo = Object.keys(idx.keys).map((k) => (k === 'id' ? '_id' : k));
-        indexSigs.add(indexSig(idx.unique === true, asMongo));
+        const group = addSig(idx.unique === true, Object.keys(idx.keys));
+        // `method: 'vector'` is an Atlas Search index, not a createIndex one.
+        // push warns and skips it, so on Mongo it must not be reported missing.
+        if (idx.method === 'vector') for (const sig of group) mongoSkippedSigs.add(sig);
       }
+      // Mirror push's own key resolution before deriving the name, or an
+      // index declared `{ loc: 1, method: 'spatial' }` / `{ id: -1 }` would
+      // be looked up — and key-compared — under a spelling push never used.
       indexDecls.push({
         name: idx.name,
+        mongoName: indexNameFor(key, mongoPushKeys(idx.keys, idx.method), idx.unique),
         unique: idx.unique === true,
         keys: idx.keys,
         method: idx.method,
         where: idx.where,
         include: idx.include,
         expression: idx.expression,
+        expireAfterSeconds: idx.expireAfterSeconds,
         partialFilterExpression: idx.partialFilterExpression,
         collation: idx.collation as Record<string, unknown> | undefined,
         wildcardProjection: idx.wildcardProjection,
@@ -192,22 +258,13 @@ export function expectedFromSchema(schema: Record<string, any>): {
       fks.push({ column: r.on, refTable: target.collection, refColumn: r.refs });
     }
 
-    tables.set(m.collection, { name: m.collection, columns, indexSigs, indexDecls, fks });
+    tables.set(m.collection, {
+      name: m.collection, columns, indexSigs, indexSigGroups, mongoSkippedSigs,
+      indexDecls, fks,
+    });
   }
 
   return { tables, views };
-}
-
-/** `id` in a schema index key is Mongo's `_id`. Only on Mongo — every SQL
- *  dialect has a column genuinely called whatever the schema says. */
-function mongoKeys(
-  keys: Record<string, unknown>,
-  dialect: AdapterKind,
-): Record<string, unknown> {
-  if (dialect !== 'mongo' || !('id' in keys)) return keys;
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(keys)) out[k === 'id' ? '_id' : k] = v;
-  return out;
 }
 
 // Coarse categories so type comparison survives dialect quirks. Returns
@@ -289,8 +346,10 @@ export function diffIntrospection(
       actSigs.add(indexSig(ix.unique, ix.columns));
       actByName.set(ix.name, ix);
     }
-    for (const sig of exp.indexSigs) {
-      if (!actSigs.has(sig)) items.push({ kind: 'index', direction: 'missing', table: name, detail: `index ${sig}` });
+    for (const group of exp.indexSigGroups) {
+      if (group.some((sig) => actSigs.has(sig))) continue;
+      if (dialect === 'mongo' && group.some((sig) => exp.mongoSkippedSigs.has(sig))) continue;
+      items.push({ kind: 'index', direction: 'missing', table: name, detail: `index ${group[0]}` });
     }
     // Extra indexes are common (engine-created); only report extra UNIQUE ones,
     // which usually signal a real divergence.
@@ -305,8 +364,15 @@ export function diffIntrospection(
     // operator can see exactly which property drifted instead of just
     // "something changed".
     for (const decl of exp.indexDecls) {
-      if (!decl.name) continue;
-      const ix = actByName.get(decl.name);
+      // An explicit name wins. Failing that, on Mongo the index is findable
+      // under the name push generates — which is the usual case there, since
+      // naming Mongo indexes by hand is rare. On SQL dialects an unnamed decl
+      // stays out of the deep pass: the per-dialect DDL name is derived from
+      // the TABLE, not the schema key, and the column-set pass already covers
+      // the only thing those dialects could report here.
+      const lookup = decl.name ?? (dialect === 'mongo' ? decl.mongoName : undefined);
+      if (!lookup) continue;
+      const ix = actByName.get(lookup);
       if (!ix) continue; // already reported by the column-set pass
 
       // Method — only compare when the adapter actually read it back. On
@@ -315,7 +381,7 @@ export function diffIntrospection(
       if (ix.method !== undefined) {
         const expM = decl.method ?? 'btree';
         if (expM !== ix.method) {
-          items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${decl.name}' method: schema=${expM} db=${ix.method}` });
+          items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${lookup}' method: schema=${expM} db=${ix.method}` });
         }
       }
 
@@ -328,19 +394,19 @@ export function diffIntrospection(
         const norm = (s: string) => s.replace(/\s+/g, ' ').toLowerCase().trim().replace(/^\(+|\)+$/g, '').trim();
         const a = norm(expWhereStr || '');
         const b = norm(String(ix.where));
-        if (a !== b) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${decl.name}' where: schema=${a || '∅'} db=${b}` });
+        if (a !== b) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${lookup}' where: schema=${a || '∅'} db=${b}` });
       }
       if (ix.partialFilterExpression !== undefined) {
         const a = expPfe ? JSON.stringify(canonOrdered(expPfe)) : '∅';
         const b = JSON.stringify(canonOrdered(ix.partialFilterExpression));
-        if (a !== b) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${decl.name}' partialFilter: schema=${a} db=${b}` });
+        if (a !== b) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${lookup}' partialFilter: schema=${a} db=${b}` });
       }
 
       // INCLUDE — PG covering columns.
       if (ix.include !== undefined) {
         const a = (decl.include ?? []).join(',');
         const b = (ix.include ?? []).join(',');
-        if (a !== b) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${decl.name}' include: schema=[${a}] db=[${b}]` });
+        if (a !== b) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${lookup}' include: schema=[${a}] db=[${b}]` });
       }
 
       // Expression — strings can differ in whitespace / case (PG echoes
@@ -352,7 +418,7 @@ export function diffIntrospection(
         // PG often wraps with extra parens; tolerate.
         const ap = a.replace(/^\(+|\)+$/g, '');
         const bp = b.replace(/^\(+|\)+$/g, '');
-        if (ap !== bp) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${decl.name}' expression: schema='${a}' db='${b}'` });
+        if (ap !== bp) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${lookup}' expression: schema='${a}' db='${b}'` });
       }
 
       // Collation (Mongo) — project the DB's echoed defaults down to the
@@ -363,26 +429,46 @@ export function diffIntrospection(
         for (const k of dk) projected[k] = (ix.collation as any)[k];
         const a = JSON.stringify(canonOrdered(decl.collation));
         const b = JSON.stringify(canonOrdered(projected));
-        if (a !== b) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${decl.name}' collation: schema=${a} db=${b}` });
+        if (a !== b) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${lookup}' collation: schema=${a} db=${b}` });
       }
 
       // Wildcard projection (Mongo).
       if (ix.wildcardProjection !== undefined && (decl.wildcardProjection || ix.wildcardProjection)) {
         const a = JSON.stringify(canonOrdered(decl.wildcardProjection ?? {}));
         const b = JSON.stringify(canonOrdered(ix.wildcardProjection ?? {}));
-        if (a !== b) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${decl.name}' wildcardProjection: schema=${a} db=${b}` });
+        if (a !== b) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${lookup}' wildcardProjection: schema=${a} db=${b}` });
+      }
+
+      // TTL (Mongo). `0` is a real value — "expire at the stored date" — so
+      // both sides are tested for presence, not truthiness. Catches a changed
+      // retention window AND a TTL that has silently gone missing, which is
+      // the worse of the two: documents stop expiring and nothing complains.
+      if (ix.expireAfterSeconds !== undefined || decl.expireAfterSeconds !== undefined) {
+        const a = decl.expireAfterSeconds;
+        const b = ix.expireAfterSeconds;
+        // Only mongo reads TTL back, so an undefined db-side on a SQL dialect
+        // means "cannot tell", not "absent".
+        if (dialect === 'mongo' && a !== b) {
+          items.push({
+            kind: 'index', direction: 'mismatch', table: name,
+            detail: `index '${lookup}' expireAfterSeconds: schema=${a ?? '∅'} db=${b ?? '∅'}`,
+          });
+        }
       }
 
       // Per-key Mongo direction tokens (1, -1, 'text', '2dsphere', '2d',
       // 'hashed'). Only checked when the introspect adapter populated
       // keySpec (Mongo).
       if (ix.keySpec) {
-        // The schema calls the primary key `id`; Mongo stores it as `_id`,
-        // and the push adapter now translates it. Compare like for like or
-        // every such index reports as permanent drift.
-        const a = JSON.stringify(canonOrdered(mongoKeys(decl.keys, dialect)));
+        // Compare what push would actually have CREATED, not what the schema
+        // literally says: `id` is stored as `_id`, and `method: 'spatial'`
+        // becomes a 2dsphere token. Comparing the literal declaration made
+        // every such index report as permanent drift.
+        const a = JSON.stringify(canonOrdered(
+          dialect === 'mongo' ? mongoPushKeys(decl.keys, decl.method as IndexDef['method']) : decl.keys,
+        ));
         const b = JSON.stringify(canonOrdered(ix.keySpec));
-        if (a !== b) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${decl.name}' keys: schema=${a} db=${b}` });
+        if (a !== b) items.push({ kind: 'index', direction: 'mismatch', table: name, detail: `index '${lookup}' keys: schema=${a} db=${b}` });
       }
     }
 

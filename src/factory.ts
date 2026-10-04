@@ -121,7 +121,7 @@ export type ForgeDb<S extends SchemaShape = SchemaMap> = Collections<S> & {
     (fragment: SqlFragment): Promise<number>;
   };
   $disconnect(): Promise<void>;
-  // Runtime DDL apply — the browser/wasm replacement for `forge push`. Reads
+  // Runtime schema apply — the in-process replacement for `forge push`. Reads
   // the active schema, emits dialect DDL, applies what's missing inside a
   // transaction. Idempotent — already-existing tables/indexes are skipped.
   // sqlite, indexeddb and postgres (2.15+, which covers PGlite — an
@@ -130,7 +130,25 @@ export type ForgeDb<S extends SchemaShape = SchemaMap> = Collections<S> & {
   // have a constant default) get `ALTER TABLE … ADD COLUMN` emitted; destructive
   // drift (column drops, type changes, extra tables) is surfaced under `pending`.
   // Returns: { applied, skipped, failures, alteredColumns, pending }.
-  $migrate(opts?: { logger?: (line: string) => void; alter?: boolean }): Promise<import('./wasm/migrate').RuntimeApplyReport>;
+  //
+  // Mongo since 2.20.5. A collection needs no DDL, so there `$migrate()` is
+  // the INDEX set: the same listIndexes-diff-then-createIndex pass `forge
+  // push` runs, against this db's own connection. Safe on every boot —
+  // nothing is written when the live indexes already match. `applied` and
+  // `skipped` hold index names; `pending` holds live indexes the schema does
+  // not declare (reported, never dropped, unless `prune: true`).
+  //
+  //   await db.$migrate();                 // ensure declared indexes exist
+  //   await db.$migrate({ dryRun: true }); // report only, write nothing
+  //
+  // `alter` is SQL-only; `dryRun` and `prune` are Mongo-only. Each is
+  // ignored by the adapters it does not apply to.
+  $migrate(opts?: {
+    logger?: (line: string) => void;
+    alter?: boolean;
+    dryRun?: boolean;
+    prune?: boolean;
+  }): Promise<import('./wasm/migrate').RuntimeApplyReport>;
   // Runtime capability probe — the browser/wasm replacement for `forge doctor`.
   // On sqlite adapters (including the wasm one) returns the rich
   // BrowserDoctorReport (environment + sqlite + capabilities + notes); on
@@ -724,7 +742,45 @@ function makeDb(
 
   // Runtime DDL apply for the wasm path. Lazy-imports the migrator so the
   // mongo/pg/mysql bundles never pull in the sqlite DDL emitter.
-  async function $migrate(opts?: { logger?: (line: string) => void }) {
+  async function $migrate(opts?: {
+    logger?: (line: string) => void;
+    alter?: boolean;
+    dryRun?: boolean;
+    prune?: boolean;
+  }) {
+    // Mongo has no tables to create — a collection springs into existence on
+    // first write — so "migrate" here is the index set, which is exactly what
+    // `forge push` does. Until 2.20.5 this threw and pointed at the CLI, which
+    // is no use to a server that wants its indexes guaranteed present before
+    // it serves a request: the CLI needs a shell, its own connection, and
+    // somebody to remember to run it. Applications hand-rolled a boot-time
+    // createIndex loop instead, and a hand-rolled loop skips the listIndexes
+    // diff, so it re-issues every index on every boot.
+    if (adapter.kind === 'mongo') {
+      const { applyIndexes } = await import('./adapters/mongo/apply-indexes');
+      const r = await applyIndexes(mongoDbOf(adapter), {
+        schema: models as Record<string, unknown>,
+        logger: opts?.logger,
+        dryRun: opts?.dryRun,
+        prune: opts?.prune,
+      });
+      return {
+        // An index that had to be dropped and recreated was still applied.
+        applied: [...r.created, ...r.rebuilt],
+        skipped: r.skipped,
+        failures: r.failures,
+        alteredColumns: [],
+        // Live indexes the schema does not declare. Reported, never dropped,
+        // unless `prune: true` — same contract as the destructive SQL drift
+        // this field already carries.
+        pending: r.extra.map((e) => ({
+          kind: 'index' as const,
+          direction: 'extra' as const,
+          table: e.collection,
+          detail: `index '${e.name}' in DB but not in schema`,
+        })),
+      };
+    }
     if (adapter.kind === 'sqlite') {
       const { runMigrate } = await import('./wasm/migrate');
       // adapter.db is the SqliteDriver after connect; the sqlite adapter exposes
@@ -777,8 +833,8 @@ function makeDb(
       return { ...report, alteredColumns: [], pending: [] };
     }
     throw new Error(
-      `[forge] $migrate() is only supported on sqlite, postgres and indexeddb ` +
-      `adapters today. For ${adapter.kind} use the CLI: 'npx forge push'.`,
+      `[forge] $migrate() is only supported on mongo, sqlite, postgres and ` +
+      `indexeddb adapters today. For ${adapter.kind} use the CLI: 'npx forge push'.`,
     );
   }
 

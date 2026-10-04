@@ -214,6 +214,12 @@ export class MongoAdapter implements Adapter {
           // and the per-key direction tokens (1, -1, 'text', '2dsphere',
           // '2d', 'hashed'). When listIndexes doesn't echo a field back,
           // we leave it undefined and diff treats it as "not declared".
+          //
+          // TTL joined them in 2.20.5. Before that a declared
+          // expireAfterSeconds was pushed but never read back, so a changed
+          // retention window — or a TTL that had gone missing entirely —
+          // was drift `forge diff` could not see.
+          expireAfterSeconds: i.expireAfterSeconds,
           partialFilterExpression: i.partialFilterExpression,
           collation: i.collation,
           wildcardProjection: i.wildcardProjection,
