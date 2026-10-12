@@ -4,6 +4,35 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.22.2 — Fix: forge would not load in a browser
+
+**`object-id.ts`, added in 2.21.0, imported `randomBytes` from
+`node:crypto` and built the id with a `Buffer`.** Both are Node-only,
+and that module is reachable from ANY import of forge — `src/index.ts`
+exports `objectIdHex` and `builder/collection.ts` imports it. Both calls
+run at MODULE SCOPE, so a browser app using the IndexedDB adapter did
+not get broken ids; it got a bundle that threw on import:
+
+    (0 , node_crypto_1.randomBytes) is not a function
+
+Measured in a real application: the UI never finished booting — the
+splash sat there and then showed its chunk-load fallback, because the
+error lands before any of the app's own code runs.
+
+It is `globalThis.crypto.getRandomValues` and a `Uint8Array` now, which
+exist in browsers, workers, Deno, Bun and Node 18+. The id layout is
+unchanged: 4-byte seconds, 5-byte per-process random, 3-byte counter,
+still sorting by time and still ordering ids minted in the same second.
+
+**A guard now walks the static import graph from `src/index.ts` and
+fails on any top-level `node:*` import.** None of the 1,083 existing
+tests could have caught this — they all run under Node, where the
+import resolves perfectly — and the consuming app's typecheck passed
+too, because types cannot see a missing runtime global. A DYNAMIC
+`await import('node:…')` is still allowed and is how the server
+adapters pull in their drivers: it is not in the static graph, so a
+bundler never follows it into a browser build.
+
 ## 2.22.1 — Path filters: three things that were silently half-wired
 
 All three were found by pointing a real application at Postgres, and all

@@ -1,5 +1,3 @@
-import { randomBytes } from 'node:crypto';
-
 /**
  * A 24-hex id with the same layout as a MongoDB ObjectId, generated
  * without the BSON driver.
@@ -39,16 +37,65 @@ import { randomBytes } from 'node:crypto';
  * by the order they were minted.
  */
 
+/*
+ * ---- WEB CRYPTO, NOT `node:crypto` ---------------------------------
+ *
+ * The first version of this file imported `randomBytes` from
+ * `node:crypto` and built the id with a `Buffer`. Both are Node-only,
+ * and this module is NOT Node-only: forge ships an IndexedDB adapter,
+ * so a browser app importing forge loads this file too — and these two
+ * calls run at MODULE SCOPE, so the failure is not "ids are broken", it
+ * is the whole bundle throwing on import:
+ *
+ *     (0 , node_crypto_1.randomBytes) is not a function
+ *
+ * Measured in a real app: the operator UI never finished booting. The
+ * splash sat there and then showed its chunk-load fallback, because the
+ * error happens before anything of the app's own has run. Nothing in
+ * this library's own tests caught it — they all run under Node, where
+ * the import resolves perfectly.
+ *
+ * `globalThis.crypto.getRandomValues` is the one that exists in every
+ * runtime forge targets: browsers, workers, Deno, Bun, and Node 18+
+ * (where Web Crypto is global and no longer behind a flag). The hex is
+ * built from a `Uint8Array` for the same reason — `Buffer` is Node's,
+ * and a bundler that does not polyfill it fails exactly as loudly.
+ */
+function randomBytes(n: number): Uint8Array {
+  const out = new Uint8Array(n);
+  const webcrypto = (globalThis as { crypto?: Crypto }).crypto;
+  if (webcrypto?.getRandomValues) {
+    webcrypto.getRandomValues(out);
+    return out;
+  }
+  // No Web Crypto at all. Not a runtime forge supports, but an id that
+  // is weakly random beats throwing at import time in one that slips
+  // through — the counter and the timestamp still order correctly.
+  for (let i = 0; i < n; i += 1) out[i] = Math.floor(Math.random() * 256);
+  return out;
+}
+
 const PROCESS_RANDOM = randomBytes(5);
-let counter = randomBytes(3).readUIntBE(0, 3);
+const seed = randomBytes(3);
+let counter = ((seed[0]! << 16) | (seed[1]! << 8) | seed[2]!) >>> 0;
+
+const HEX = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'));
 
 export function objectIdHex(now: number = Date.now()): string {
   counter = (counter + 1) % 0x1000000;
-  const buf = Buffer.allocUnsafe(12);
-  buf.writeUInt32BE(Math.floor(now / 1000), 0);
-  PROCESS_RANDOM.copy(buf, 4);
-  buf.writeUIntBE(counter, 9, 3);
-  return buf.toString('hex');
+  const b = new Uint8Array(12);
+  const secs = Math.floor(now / 1000);
+  b[0] = (secs >>> 24) & 0xff;
+  b[1] = (secs >>> 16) & 0xff;
+  b[2] = (secs >>> 8) & 0xff;
+  b[3] = secs & 0xff;
+  b.set(PROCESS_RANDOM, 4);
+  b[9] = (counter >>> 16) & 0xff;
+  b[10] = (counter >>> 8) & 0xff;
+  b[11] = counter & 0xff;
+  let out = '';
+  for (let i = 0; i < 12; i += 1) out += HEX[b[i]!];
+  return out;
 }
 
 /** The shape, for anything that has to recognise one. */
