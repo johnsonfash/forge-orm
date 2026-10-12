@@ -26,7 +26,9 @@ const appSchema = { account: Account } as any;
  * A single-session postgres driver, the shape PGlite and Neon-over-HTTP
  * present: `query` and nothing else. No pool, so no `connect()`.
  */
-function fakePgDriver(existing: { tables?: string[]; constraints?: string[] } = {}) {
+function fakePgDriver(
+  existing: { tables?: string[]; constraints?: string[]; columns?: string[] } = {},
+) {
   const sql: string[] = [];
   const driver = {
     kind: 'postgres',
@@ -39,6 +41,18 @@ function fakePgDriver(existing: { tables?: string[]; constraints?: string[] } = 
       if (/pg_constraint|constraint_name/.test(text)) {
         return {
           rows: (existing.constraints ?? []).map((c) => ({ conname: c, constraint_name: c })),
+          rowCount: 0,
+        };
+      }
+      // "<table>.<column>", the shape the planner keys ADD COLUMN on. A
+      // listed table with no columns is not a state a real database can be
+      // in, so a caller that declares `tables` declares its columns too.
+      if (/information_schema\.columns/.test(text)) {
+        return {
+          rows: (existing.columns ?? []).map((c) => {
+            const [table_name, column_name] = c.split('.');
+            return { table_name, column_name };
+          }),
           rowCount: 0,
         };
       }
@@ -87,6 +101,10 @@ describe('$migrate() on postgres', () => {
     const { driver } = fakePgDriver({
       tables: ['accounts'],
       constraints: ['forge_accounts_uq_owner'],
+      // The columns the table already has. Without these the planner would
+      // rightly want to ADD them: a table is not "already there" if its
+      // columns are missing, which is the gap buildAddColumns closes.
+      columns: ['accounts.id', 'accounts.owner', 'accounts.balance'],
     });
     const db = (await createDb({ driver, schema: appSchema })) as any;
     const r = await db.$migrate();
@@ -121,5 +139,52 @@ describe('$migrate() on postgres', () => {
     } as any;
     const db = (await createDb({ driver: mysqlish, schema: appSchema })) as any;
     await expect(db.$migrate()).rejects.toThrow(/only supported on mongo, sqlite, postgres and indexeddb/);
+  });
+});
+
+/**
+ * THE COLUMN THAT NEVER ARRIVED.
+ *
+ * `forge push` used to decide "already applied?" per statement, and a CREATE
+ * TABLE counts as applied the moment the TABLE exists. So adding a field to a
+ * model and pushing against a database that already had the table did
+ * NOTHING: push printed `applied 1, skipped 703`, exited 0, and the column was
+ * not there. The first query naming it failed at runtime instead, a long way
+ * from the push that was supposed to have created it.
+ *
+ * Caught on a real schema — `media_tags.assetCreatedAt` was added, pushed, and
+ * reported as a success against a database without the column.
+ */
+describe('$migrate() adds a column to a table that already exists', () => {
+  it('ALTERs in the missing column instead of reporting success', async () => {
+    const { driver, sql } = fakePgDriver({
+      tables: ['accounts'],
+      constraints: ['forge_accounts_uq_owner'],
+      // `balance` is absent — the field was added to the model after this
+      // database was first pushed.
+      columns: ['accounts.id', 'accounts.owner'],
+    });
+    const db = (await createDb({ driver, schema: appSchema })) as any;
+    const r = await db.$migrate();
+    expect(sql.join('\n')).toMatch(
+      /ALTER TABLE "accounts" ADD COLUMN IF NOT EXISTS "balance"/,
+    );
+    expect(r.applied).toContain('accounts.balance');
+    expect(r.failures).toEqual([]);
+    // The two it already has are left alone.
+    expect(r.applied).not.toContain('accounts.id');
+    expect(r.applied).not.toContain('accounts.owner');
+  });
+
+  it('leaves a fully-migrated database completely alone', async () => {
+    const { driver } = fakePgDriver({
+      tables: ['accounts'],
+      constraints: ['forge_accounts_uq_owner'],
+      columns: ['accounts.id', 'accounts.owner', 'accounts.balance'],
+    });
+    const db = (await createDb({ driver, schema: appSchema })) as any;
+    const r = await db.$migrate();
+    expect(r.applied).toEqual([]);
+    expect(r.failures).toEqual([]);
   });
 });

@@ -617,6 +617,56 @@ export function hasNoUpdatePayload(node: UpdateNode): boolean {
     !node.unset?.length;
 }
 
+// The single-row idiom for UPDATE / DELETE, which Postgres has no `LIMIT` for.
+//
+// IT USED TO BE `ctid`, AND THAT WAS A CONCURRENCY BUG.
+//
+//   UPDATE t SET … WHERE ctid = (SELECT ctid FROM t WHERE … LIMIT 1)
+//
+// `ctid` is a tuple's PHYSICAL address, and an UPDATE does not change a row
+// in place — MVCC writes a new version at a new ctid and leaves the old one
+// dead. So with two writers on the same row: A reads ctid (0,5); B commits
+// its own update, moving the live version to (0,9); A's statement then looks
+// for (0,5), matches NOTHING, and forge reports zero rows. The caller sees
+// `updateFirst` return null and raises "not found" for a row that is sitting
+// right there. It never showed up on Mongo, where `findOneAndUpdate` takes
+// the row lock itself, and it is not rare under load — it is whichever write
+// arrives second.
+//
+// The primary key is stable across versions, so it is the right identity.
+// `FOR UPDATE` on the subselect is the other half: it locks the row it picked,
+// so the second writer waits for the first instead of choosing from a snapshot
+// that is already stale. Under READ COMMITTED, Postgres then re-reads the
+// locked row and the enclosing statement proceeds against the new version.
+//
+// Without a primary key there is nothing stable to name, so `ctid` stays —
+// the race is still there, but a keyless table cannot be matched any other
+// way, and every model forge generates DDL for has an `id`.
+//
+// ONLY POSTGRES CHANGES SHAPE HERE, and that is deliberate rather than
+// cautious. This function is the single place the other SQL adapters get
+// their single-row clause from: each one REWRITES the emitted `ctid` text
+// into its own spelling (mssql/compile-from-ir.ts, mysql, sqlite, duckdb).
+// Checked one at a time, none of them has the bug:
+//
+//   • mssql  → `[pk] IN (SELECT TOP 1 [pk] …)` — already keyed on the pk.
+//   • mysql  → `UPDATE … LIMIT 1`, one statement, nothing to go stale.
+//   • sqlite → `rowid`, which SQLite does not move on an update.
+//   • duckdb → `rowid`, and it has one writer.
+//
+// So Postgres was the only dialect where the identity could move under a
+// concurrent writer, and leaving the marker untouched for the rest keeps
+// their output byte-identical instead of rewriting four adapters to fix one.
+function singleRowWhere(d: Dialect, m: ModelDef<any>, table: string, where: string): string {
+  const filter = where ? ` WHERE ${where}` : '';
+  const ctidForm = `WHERE ctid = (SELECT ctid FROM ${table}${filter} LIMIT 1)`;
+  if (d.name !== 'postgres') return ctidForm;
+  const pk = Object.entries(m.fields).find(([, f]) => (f as FieldDef).kind === 'id')?.[0];
+  if (!pk) return ctidForm;
+  const col = d.quoteIdent(pk);
+  return `WHERE ${col} = (SELECT ${col} FROM ${table}${filter} LIMIT 1 FOR UPDATE)`;
+}
+
 export function compileUpdate(
   node: UpdateNode,
   modelOverride?: ModelDef<any>,
@@ -764,10 +814,9 @@ export function compileUpdate(
 
   const where = compileWhere(ctx, node.where);
   const whereClause = where ? `WHERE ${where}` : '';
-  const limitClause = node.many ? '' : 'WHERE ctid = (SELECT ctid FROM ' + table + (where ? ' WHERE ' + where : '') + ' LIMIT 1)';
-  // For updateOne (many=false), we constrain to a single row via ctid — PG's
-  // standard idiom since UPDATE … LIMIT isn't valid SQL on its own.
-  const finalWhere = node.many ? whereClause : limitClause;
+  // For updateOne (many=false) the statement is constrained to one row by
+  // primary key — see singleRowWhere, and why it is not `ctid`.
+  const finalWhere = node.many ? whereClause : singleRowWhere(dialect, m, table, where);
   const returning = node.returning?.exclusive && node.returning.fields.length
     ? ` RETURNING ${node.returning.fields.map((f) => dialect.quoteIdent(f)).join(', ')}`
     : ' RETURNING *';
@@ -788,10 +837,7 @@ export function compileDelete(
   const ctx: CompileCtx = { d: dialect, model: m, table, params, aliasCount: { n: 0 }, schemaOverride };
   const where = compileWhere(ctx, node.where);
   const whereClause = where ? `WHERE ${where}` : '';
-  const limitClause = node.many
-    ? whereClause
-    : `WHERE ctid = (SELECT ctid FROM ${table}${where ? ' WHERE ' + where : ''} LIMIT 1)`;
-  const finalWhere = node.many ? whereClause : limitClause;
+  const finalWhere = node.many ? whereClause : singleRowWhere(dialect, m, table, where);
   const sql = `DELETE FROM ${table} ${finalWhere} RETURNING *`;
   return { kind: 'sql', dialect: dialect.name, sql, params };
 }

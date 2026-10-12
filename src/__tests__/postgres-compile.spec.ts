@@ -170,9 +170,11 @@ describe('PG compile — UPDATE', () => {
     const a = compileUpdate(buildUpdate('user', User, {
       where: { email: 'a@b.co' }, data: { active: true }, many: false,
     }), User);
-    // Single-row idiom via ctid subquery.
+    // Single-row idiom, keyed on the primary key and locking the row it
+            // picks. NOT `ctid` — see singleRowWhere in the PG compiler.
     expect(a.sql).toMatch(/UPDATE "users" SET "active" = \$1/);
-    expect(a.sql).toMatch(/WHERE ctid = \(SELECT ctid FROM "users" WHERE "users"\."email" = \$2 LIMIT 1\)/);
+    expect(a.sql).toMatch(/WHERE "id" = \(SELECT "id" FROM "users" WHERE "users"\."email" = \$2 LIMIT 1 FOR UPDATE\)/);
+    expect(a.sql).not.toMatch(/ctid/);
     expect(a.params).toEqual([true, 'a@b.co']);
   });
 
@@ -204,9 +206,10 @@ describe('PG compile — UPDATE', () => {
 });
 
 describe('PG compile — DELETE', () => {
-  it('deleteOne uses ctid idiom', () => {
+  it('deleteOne is keyed on the pk, not ctid', () => {
     const a = compileDelete(buildDelete('user', User, { where: { email: 'a@b.co' }, many: false }), User);
-    expect(a.sql).toMatch(/DELETE FROM "users" WHERE ctid = \(SELECT ctid FROM "users" WHERE "users"\."email" = \$1 LIMIT 1\) RETURNING \*/);
+    expect(a.sql).toMatch(/DELETE FROM "users" WHERE "id" = \(SELECT "id" FROM "users" WHERE "users"\."email" = \$1 LIMIT 1 FOR UPDATE\) RETURNING \*/);
+    expect(a.sql).not.toMatch(/ctid/);
     expect(a.params).toEqual(['a@b.co']);
   });
 

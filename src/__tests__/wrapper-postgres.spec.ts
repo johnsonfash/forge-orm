@@ -81,12 +81,16 @@ describe('CollectionWrapper + PostgresAdapter — write path', () => {
     expect(pool.log[0].sql).toMatch(/INSERT INTO "users" \("id", "email"\) VALUES \(\$1, \$2\) RETURNING \*/);
   });
 
-  it('update single → findOneAndUpdate-equivalent with ctid idiom', async () => {
+  it('update single → findOneAndUpdate-equivalent, keyed on the pk', async () => {
     const pool = mkFakePool([{ rows: [{ id: 'u1', active: true }], rowCount: 1 }]);
     const w = new CollectionWrapper(User, undefined, adapterWithPool(pool));
     const out = await w.update({ where: { id: 'u1' }, data: { active: true } });
     expect(out).toMatchObject({ id: 'u1', active: true });
-    expect(pool.log[0].sql).toMatch(/UPDATE "users" SET "active" = \$1 WHERE ctid = \(SELECT ctid FROM "users" WHERE/);
+    expect(pool.log[0].sql).toMatch(/UPDATE "users" SET "active" = \$1 WHERE "id" = \(SELECT "id" FROM "users" WHERE/);
+    // Not `ctid`: an update moves the tuple, so a second concurrent writer
+    // would look for an address that no longer holds the row.
+    expect(pool.log[0].sql).not.toMatch(/ctid/);
+    expect(pool.log[0].sql).toMatch(/FOR UPDATE\)/);
   });
 
   it('updateMany returns count only', async () => {
@@ -103,7 +107,8 @@ describe('CollectionWrapper + PostgresAdapter — write path', () => {
     expect(out).toMatchObject({ id: 'u1' });
     // Single DELETE statement, no follow-up cascade walker queries.
     expect(pool.log.length).toBe(1);
-    expect(pool.log[0].sql).toMatch(/DELETE FROM "users" WHERE ctid =/);
+    expect(pool.log[0].sql).toMatch(/DELETE FROM "users" WHERE "id" = \(SELECT "id" FROM "users"/);
+    expect(pool.log[0].sql).not.toMatch(/ctid/);
   });
 });
 

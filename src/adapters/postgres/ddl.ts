@@ -14,13 +14,20 @@ import { mongoToSqlWhere } from '../shared/mongo-to-sql-where';
 //     pg_constraint to skip when already present (see migrate.ts).
 
 export interface DDLStatement {
-  kind: 'table' | 'unique' | 'foreignKey' | 'check' | 'index';
+  kind: 'table' | 'column' | 'unique' | 'foreignKey' | 'check' | 'index';
   sql: string;
   // Deterministic name for the object this statement creates. Used by the
   // migrator to look up "is this already applied?" in pg_class/pg_constraint.
   name: string;
   table: string;
   dropSql?: string;
+  // Set on an ADD COLUMN for a required field with no default: the column has
+  // to go on NULLABLE, because Postgres has nothing to put in rows that
+  // already exist. Carries the statement that finishes the job once the
+  // column is backfilled. The migrator warns when it actually runs one of
+  // these — NOT when the DDL is built, because a first-time push gets its
+  // NOT NULL from CREATE TABLE and has nothing to warn about.
+  relaxedNotNull?: { setNotNullSql: string };
 }
 
 const RESERVED_INDEX_PREFIX = 'forge_';
@@ -52,6 +59,17 @@ export function buildSchemaDDL(
     if (!m) continue;
     if (m.view) continue;
     out.push(buildCreateTable(d, m));
+  }
+
+  // Pass 1b: ADD COLUMN for every field, which the migrator skips when the
+  // column is already there. CREATE TABLE alone was never enough — see
+  // buildAddColumns. Its own pass, after ALL the tables: a column can be the
+  // target of a pass-2 foreign key, and interleaving these with the CREATE
+  // TABLEs would also break the "tables first" ordering the FK pass needs.
+  for (const key of Object.keys(schema)) {
+    const m = (schema as any)[key] as ModelDef<any>;
+    if (!m || m.view) continue;
+    out.push(...buildAddColumns(d, m));
   }
 
   // Pass 2: constraints (unique, FK, check) + indexes — tables only.
@@ -107,6 +125,68 @@ function buildSearchableIndexes(d: Dialect, m: ModelDef<any>): DDLStatement[] {
       kind: 'index', name, table: m.collection,
       sql: `CREATE INDEX IF NOT EXISTS ${d.quoteIdent(name)} ON ${d.quoteIdent(m.collection)} USING gin(to_tsvector('simple', ${d.quoteIdent(fieldName)}))`,
       dropSql: `DROP INDEX IF EXISTS ${d.quoteIdent(name)}`,
+    });
+  }
+  return out;
+}
+
+/**
+ * ADD COLUMN, one statement per field.
+ *
+ * WHY THIS EXISTS: the planner decides "is this already applied?" per
+ * statement, and a CREATE TABLE is applied only when the TABLE is absent. So
+ * on any database that already had the table, a field added to the schema was
+ * never created — and `forge push` said `applied 1, skipped 703` and exited 0.
+ * The column simply was not there, and the first query to name it failed at
+ * runtime, far away from the push that was supposed to have made it.
+ *
+ * Found on a real schema: `media_tags.assetCreatedAt` was added, pushed, and
+ * reported as success against a database where the column did not exist.
+ *
+ * NULLABILITY IS THE AWKWARD PART. `ADD COLUMN … NOT NULL` with no default is
+ * rejected outright by Postgres on a table that has rows — there is nothing to
+ * put in the existing ones. Three cases, so:
+ *
+ *   • has a default        → `ADD COLUMN … NOT NULL DEFAULT …` is safe; every
+ *                            existing row gets the default.
+ *   • optional             → nullable, nothing to think about.
+ *   • required, no default → added NULLABLE, with a warning. The alternative
+ *                            is a push that cannot succeed at all. Backfill
+ *                            the column, then `ALTER … SET NOT NULL` by hand;
+ *                            a fresh database gets NOT NULL from CREATE TABLE
+ *                            either way, so only an existing one is affected.
+ *
+ * The warning is deliberately loud: a required column sitting nullable is a
+ * difference between the schema and the database, and silence is how that
+ * turns into a surprise months later.
+ */
+function buildAddColumns(d: Dialect, m: ModelDef<any>): DDLStatement[] {
+  const out: DDLStatement[] = [];
+  const table = m.collection;
+  for (const [fieldName, fieldRaw] of Object.entries(m.fields)) {
+    const field = fieldRaw as FieldDef;
+    // A bigserial id owns its sequence; re-adding it to a live table is not a
+    // migration forge should be inventing.
+    if (field.kind === 'id' && field.idType === 'bigserial') continue;
+    let col = renderColumn(d, fieldName, field);
+    const mustRelax =
+      !field.optional && !field.dbGenerated && !renderDefault(field);
+    if (mustRelax) col = col.replace(/ NOT NULL$/, '');
+    out.push({
+      kind: 'column',
+      sql: `ALTER TABLE ${d.quoteIdent(table)} ADD COLUMN IF NOT EXISTS ${col}`,
+      name: `${table}.${fieldName}`,
+      table,
+      dropSql: `ALTER TABLE ${d.quoteIdent(table)} DROP COLUMN IF EXISTS ${d.quoteIdent(fieldName)}`,
+      ...(mustRelax
+        ? {
+            relaxedNotNull: {
+              setNotNullSql:
+                `ALTER TABLE ${d.quoteIdent(table)} ` +
+                `ALTER COLUMN ${d.quoteIdent(fieldName)} SET NOT NULL`,
+            },
+          }
+        : {}),
     });
   }
   return out;

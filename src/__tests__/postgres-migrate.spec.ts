@@ -66,7 +66,14 @@ describe('PG migrate — plan', () => {
     const ddl = buildSchemaDDL(SCHEMA);
     const plan = await planMigration(handle, ddl);
     expect(plan.toSkip.length).toBe(0);
-    expect(plan.toApply.length).toBe(ddl.length);
+    // Every statement EXCEPT the per-field ADD COLUMNs, which are dropped
+    // rather than applied or skipped when the table does not exist yet — the
+    // CREATE TABLE in this same batch already carries those columns. Counting
+    // them as "already in place" is what would make a first-time push report
+    // several hundred phantom skips.
+    const nonColumn = ddl.filter((s) => s.kind !== 'column');
+    expect(plan.toApply.length).toBe(nonColumn.length);
+    expect(ddl.length).toBeGreaterThan(nonColumn.length);
     expect(plan.summary).toMatch(/\d+ statements? to apply, 0 already in place/);
   });
 

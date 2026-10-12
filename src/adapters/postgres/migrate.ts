@@ -12,6 +12,11 @@ import type { PgPoolHandle } from './execute';
 //     another emits DROP + CREATE; data is preserved only when the name is kept.
 //   • Column type changes (ALTER TABLE … ALTER COLUMN). Existing columns are
 //     left alone; type drift surfaces at first failing query.
+//
+// ADDING a column IS implemented, and used not to be — a field added to the
+// schema never reached a database that already had the table, because the
+// planner only ever asked whether the TABLE existed. See buildAddColumns in
+// ddl.ts for what that cost and how nullability is handled.
 
 // Stable lock id, frozen so all forge:push invocations share the same lock.
 const ADVISORY_LOCK_HI = 0x6f6f7267; // "forg"
@@ -34,15 +39,24 @@ export async function planMigration(
   ddl: DDLStatement[],
 ): Promise<MigrationPlan> {
   const existingTables    = await listTables(pool);
+  const existingColumns   = await listColumns(pool);
   const existingConstraints = await listConstraints(pool);
   const existingIndexes   = await listIndexes(pool);
 
   const toApply: DDLStatement[] = [];
   const toSkip: DDLStatement[] = [];
   for (const stmt of ddl) {
+    // A column on a table this batch is about to CREATE is neither applied
+    // nor skipped — the CREATE TABLE already carries it, so the ALTER is not
+    // a statement about this database at all. Dropping it rather than
+    // skipping it keeps a first-time push honest: "0 already in place",
+    // instead of several hundred phantom columns.
+    if (stmt.kind === 'column' && !existingTables.has(stmt.table)) continue;
     const present = (() => {
       switch (stmt.kind) {
         case 'table':      return existingTables.has(stmt.name);
+        // `stmt.name` is "<table>.<column>".
+        case 'column':     return existingColumns.has(stmt.name);
         case 'unique':
         case 'foreignKey':
         case 'check':      return existingConstraints.has(stmt.name);
@@ -88,6 +102,17 @@ export async function applyMigration(
         await client.query(`RELEASE SAVEPOINT ${savepoint}`);
         applied.push(stmt.name);
         log(`  ✓ ${stmt.kind.padEnd(11)} ${stmt.name}`);
+        // Only now, because only now is it true: the column really was
+        // missing from a table that really did already exist, so it went on
+        // nullable while the schema says it is required.
+        if (stmt.relaxedNotNull) {
+          console.warn(
+            `[forge:push:postgres] added '${stmt.name}' NULLABLE even though ` +
+            `the schema declares it required — Postgres has nothing to put ` +
+            `in the rows that are already there. Backfill it, then run: ` +
+            `${stmt.relaxedNotNull.setNotNullSql}`,
+          );
+        }
       } catch (err: any) {
         await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
         await client.query(`RELEASE SAVEPOINT ${savepoint}`);
@@ -119,6 +144,15 @@ async function listTables(pool: PgPoolHandle): Promise<Set<string>> {
     `SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()`,
   );
   return new Set(rows.map((r) => r.table_name));
+}
+
+/** Every column in the schema, keyed "<table>.<column>". */
+async function listColumns(pool: PgPoolHandle): Promise<Set<string>> {
+  const { rows } = await pool.query(
+    `SELECT table_name, column_name FROM information_schema.columns
+      WHERE table_schema = current_schema()`,
+  );
+  return new Set(rows.map((r) => `${r.table_name}.${r.column_name}`));
 }
 
 async function listConstraints(pool: PgPoolHandle): Promise<Set<string>> {
