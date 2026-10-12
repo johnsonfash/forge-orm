@@ -190,6 +190,13 @@ export function buildWhereTree(
         const path = parseJsonPath(key.slice(dot + 1));
         if (isPlainObject(value)) {
           for (const op of Object.keys(value)) {
+            // `mode` is a MODIFIER, not an operator — it qualifies
+            // `contains` rather than being one. The scalar form has
+            // always accepted it; the dotted form threw
+            // "unsupported operator 'mode'", so the obvious way to ask
+            // for a case-insensitive search inside a json blob was a
+            // hard error instead of a search.
+            if (op === 'mode') continue;
             const subOp = PATH_SUB_OPS[op];
             if (!subOp) {
               throw new Error(
@@ -200,6 +207,9 @@ export function buildWhereTree(
             children.push({
               kind: 'leaf', field: head, op: 'jsonPath', value: value[op],
               jsonPath: { path, subOp },
+              // Same reason as the explicit `path:` form below.
+              caseInsensitive:
+                (value as any).mode === 'insensitive' || undefined,
             });
           }
         } else {
@@ -329,15 +339,43 @@ export function buildWhereTree(
         const pathArr: string[] = typeof value.path === 'string'
           ? parseJsonPath(value.path)
           : value.path.map(String);
+        /*
+         * THE OPERATOR NAMES HERE ARE THE USER'S, NOT THE IR'S.
+         *
+         * This used to scan for the INTERNAL spellings — 'eq', 'ne' — so
+         * the form forge's own error message tells people to write,
+         * `{ meta: { path: 'a', equals: 5 } }`, matched nothing: `subOp`
+         * stayed at its 'eq' default and `subValue` stayed NULL, and the
+         * filter compiled to `meta->>'a' IS NULL`. Not an error — the
+         * wrong rows, silently, for the documented syntax.
+         *
+         * `PATH_SUB_OPS` is the mapping from what a caller writes to what
+         * the IR carries, and it is the same table the dotted form
+         * (`'meta.a'`) already went through. The internal names keep
+         * working as aliases so nothing written against the old
+         * behaviour breaks.
+         */
         type JsonSubOp = 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte' | 'contains' | 'in' | 'has';
         let subOp: JsonSubOp = 'eq';
         let subValue: any = null;
-        const subOpKeys: JsonSubOp[] = ['eq', 'ne', 'lt', 'lte', 'gt', 'gte', 'contains', 'in', 'has'];
-        for (const k of subOpKeys) {
-          if (k in value) {
-            subOp = k;
-            subValue = (value as any)[k];
+        let found = false;
+        for (const [userOp, irSubOp] of Object.entries(PATH_SUB_OPS)) {
+          if (userOp in value) {
+            subOp = irSubOp as JsonSubOp;
+            subValue = (value as any)[userOp];
+            found = true;
             break;
+          }
+        }
+        if (!found) {
+          const internal: JsonSubOp[] = ['eq', 'ne', 'lt', 'lte', 'gt', 'gte', 'contains', 'in', 'has'];
+          for (const k of internal) {
+            if (k in value) {
+              subOp = k;
+              subValue = (value as any)[k];
+              found = true;
+              break;
+            }
           }
         }
         children.push({
@@ -346,6 +384,11 @@ export function buildWhereTree(
           op: 'jsonPath',
           value: subValue,
           jsonPath: { path: pathArr, subOp },
+          // `mode: 'insensitive'` belongs to the path form too. Without
+          // it a path `contains` emitted LIKE where the same operator on
+          // a scalar column emits ILIKE, so a case-insensitive search
+          // inside a json blob quietly matched only exact case.
+          caseInsensitive: (value as any).mode === 'insensitive' || undefined,
         });
         continue;
       }

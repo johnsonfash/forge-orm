@@ -192,8 +192,12 @@ function compileLeaf(ctx: CompileCtx, leaf: Extract<WhereTree, { kind: 'leaf' }>
         case 'gt':  return `${rendered} > ${ph(coerceJsonOperand(leaf.value))}`;
         case 'gte': return `${rendered} >= ${ph(coerceJsonOperand(leaf.value))}`;
         case 'contains': {
+          // `likeOp`, not a bare LIKE: a path `contains` has to honour
+          // `mode: 'insensitive'` exactly as the scalar form does, or a
+          // case-insensitive search inside a json blob silently matches
+          // only the case it was given.
           const v = String(leaf.value);
-          return `${rendered} LIKE ${ph('%' + escapeForLike(v) + '%')}`;
+          return likeOp(ctx, rendered, `%${escapeForLike(v)}%`, !!leaf.caseInsensitive);
         }
         case 'in': {
           const arr = leaf.value as unknown[];

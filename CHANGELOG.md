@@ -4,6 +4,30 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.22.1 — Path filters: three things that were silently half-wired
+
+All three were found by pointing a real application at Postgres, and all
+three were silent — no error, just the wrong rows.
+
+**`{ meta: { path: 'a', equals: 5 } }` compiled to `meta->>'a' IS
+NULL`.** The builder scanned for the INTERNAL operator spellings (`eq`,
+`ne`), so the form forge's own error message tells people to write
+matched nothing: the sub-op stayed at its `eq` default and the value
+stayed `null`. The public vocabulary (`equals`, `not`, `gte`, `in`, …)
+now works, mapped through the same table the dotted form already used,
+and the internal names keep working as aliases.
+
+**`mode: 'insensitive'` never reached a path `contains`.** It emitted a
+bare `LIKE` where the same operator on a scalar column emits `ILIKE`, so
+a case-insensitive search inside a json blob matched only the case it
+was handed — searching `BOLA` found nothing for a row holding
+`bola@example.com`.
+
+**`mode` on the DOTTED form threw.** `{ 'meta.email': { contains: 'x',
+mode: 'insensitive' } }` raised `unsupported operator 'mode'`, because
+the loop treated every key as an operator. It is a modifier that
+qualifies `contains`, and it is skipped as one now.
+
 ## 2.22.0 — Postgres: five things Mongo was hiding
 
 Found by pointing a real application's 8,700-test suite at the Postgres

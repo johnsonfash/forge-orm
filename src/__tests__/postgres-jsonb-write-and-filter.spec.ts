@@ -109,3 +109,55 @@ describe('array filters on a json column', () => {
     expect(where({ labels: { isEmpty: true } })).toMatch(/array_length\(.*"labels", 1\)/);
   });
 });
+
+/**
+ * THE PATH FORM'S OPERATORS, which were half wired.
+ *
+ * Both of these were silent: no error, just the wrong rows.
+ */
+describe('a path filter speaks the public operator vocabulary', () => {
+  const Doc = model('docs', { id: f.id(), meta: f.json() }) as unknown as ModelDef<any>;
+  const sql = (w: Record<string, unknown>) =>
+    compileSelect(buildSelect('doc', Doc, { where: w }, 'many') as any, Doc).sql;
+  const params = (w: Record<string, unknown>) =>
+    compileSelect(buildSelect('doc', Doc, { where: w }, 'many') as any, Doc).params;
+
+  it('`equals` works — it used to compile to IS NULL', () => {
+    // The builder scanned for the INTERNAL spellings ('eq', 'ne'), so the
+    // form forge's own error message tells people to write matched
+    // nothing: subOp stayed at its 'eq' default and the value stayed
+    // null, giving `meta->>'a' IS NULL` for `equals: 5`.
+    expect(sql({ meta: { path: ['a'], equals: 5 } })).toMatch(/->>'a'\)::numeric = \$1/);
+    expect(params({ meta: { path: ['a'], equals: 5 } })).toEqual([5]);
+    expect(sql({ meta: { path: ['a'], equals: 5 } })).not.toMatch(/IS NULL/);
+  });
+
+  it('the other public names work too', () => {
+    expect(sql({ meta: { path: ['a'], not: 5 } })).toMatch(/<> \$1/);
+    expect(sql({ meta: { path: ['a'], gte: 5 } })).toMatch(/>= \$1/);
+    expect(sql({ meta: { path: ['a'], in: [1, 2] } })).toMatch(/IN \(\$1, \$2\)/);
+  });
+
+  it('the internal spellings still work, so nothing written before breaks', () => {
+    expect(params({ meta: { path: ['a'], eq: 5 } })).toEqual([5]);
+  });
+
+  it('`equals: null` still means IS NULL, which is a real question', () => {
+    expect(sql({ meta: { path: ['a'], equals: null } })).toMatch(/IS NULL/);
+  });
+
+  it('`mode: insensitive` reaches a path `contains`', () => {
+    // It emitted a bare LIKE while the same operator on a scalar column
+    // emitted ILIKE, so a case-insensitive search inside a json blob
+    // matched only the case it was handed. Measured on a live database:
+    // searching 'BOLA' found nothing for a row holding
+    // 'bola@example.com'.
+    expect(sql({ meta: { path: ['email'], contains: 'X', mode: 'insensitive' } })).toMatch(/ILIKE/);
+    expect(sql({ meta: { path: ['email'], contains: 'X' } })).toMatch(/LIKE/);
+    expect(sql({ meta: { path: ['email'], contains: 'X' } })).not.toMatch(/ILIKE/);
+  });
+
+  it('and reaches the dotted form as well', () => {
+    expect(sql({ 'meta.email': { contains: 'X', mode: 'insensitive' } })).toMatch(/ILIKE/);
+  });
+});
