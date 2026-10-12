@@ -4,6 +4,47 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.21.0 — One id shape on every engine
+
+**Minor.** `f.id()` mints an ObjectId on Mongo and a UUID v4 on SQL.
+Each is the native thing on its own engine and that is the right
+default — but it is the wrong default for a codebase that has to run on
+both. Old rows keep 24-hex ids, new rows get UUIDs, and everything that
+knew what an id looks like quietly stops being true.
+
+Measured on a real port, before a single row moved:
+
+- a regex gate on background-job ids rejected **every** id and skipped
+  the whole queue, one warn line per job;
+- an inbound-email parser stopped recognising the thread id that the
+  same module generates;
+- an assistant answered "I can't find that" about a row it was holding
+  by its key;
+- `orderBy: { assetId: 'desc' }`, standing in for "newest first" via
+  ObjectId's timestamp prefix, started returning an arbitrary 20 rows.
+
+None of them threw.
+
+```ts
+f.id({ type: 'objectId' })                  // per field
+createDb({ url, schema, defaultIdType: 'objectId' })   // whole connection
+```
+
+The connection-level default matters more than it looks: a schema with
+hundreds of models should not repeat itself on every `f.id()`, and a
+model added next year must not get the other shape because somebody
+forgot. A field's own `idType` still wins, and a caller-supplied id
+still wins over both.
+
+The generator is `objectIdHex()`, exported — 4-byte seconds, 5-byte
+per-process random, 3-byte counter, MongoDB's own layout, no BSON
+dependency. Two properties come with it and both are the reason to
+choose it over a UUID: ids **sort by time**, which a v4 UUID cannot do
+at all, and they insert at the right-hand edge of a btree instead of
+scattering across it.
+
+Nothing changes unless you ask for it. `f.id()` is still a UUID on SQL.
+
 ## 2.20.7 — A dropped TTL index said nothing
 
 **Patch.** `expireAfterSeconds` tells Mongo to delete a row once a date

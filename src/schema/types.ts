@@ -127,13 +127,20 @@ export interface FieldDef {
   // Primary-key strategy; only meaningful when `kind === 'id'`. Drives DDL
   // emission (string column vs auto-incrementing integer) and whether the client
   // generates an app-side id at create time.
-  //   'auto'      — default. App-generated ObjectId on Mongo / UUID on SQL. JS: string.
+  //   'auto'      — default. App-generated ObjectId on Mongo / UUID v4 on SQL.
+  //                 ⚠️ NOTE THE TWO SHAPES. A codebase that moves between the
+  //                 two gets 24-hex ids for its old rows and UUIDs for its new
+  //                 ones, and anything that knew what an id looks like — a
+  //                 regex, an `orderBy` standing in for "by time" — quietly
+  //                 stops being true. Use 'objectId' to keep one shape. JS: string.
   //   'uuid'      — DB-side UUID default (PG gen_random_uuid(), MySQL UUID());
   //                 SQLite + Mongo behave like 'auto'. JS: string.
   //   'bigserial' — DB-side auto-incrementing integer (PG BIGSERIAL, MySQL BIGINT
   //                 AUTO_INCREMENT, SQLite INTEGER PRIMARY KEY AUTOINCREMENT).
   //                 Throws on Mongo at push. JS: number.
-  idType?: 'auto' | 'uuid' | 'bigserial' | 'string';
+  //   'objectId'  — app-generated 24-hex ObjectId on EVERY dialect, not just
+  //                 Mongo. See below. JS: string.
+  idType?: 'auto' | 'uuid' | 'objectId' | 'bigserial' | 'string';
  /** The column's previous name, so a migration emits RENAME COLUMN
   *  instead of a drop and an add. Generation-time only. */
   renamedFrom?: string;

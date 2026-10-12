@@ -122,6 +122,7 @@ export { buildPostgresCompileApi } from './adapters/postgres/compile';
 // Tagged template + composition helpers — safe by default (values become
 // placeholders, never interpolated).
 export { pgliteDriver, pgliteDataDir } from './adapters/postgres/pglite-driver';
+export { objectIdHex, OBJECT_ID_PATTERN } from './object-id';
 export { forgeSql, isSqlFragment, compileSqlFragment } from './raw-sql';
 export type { SqlFragment, CompiledRawSql } from './raw-sql';
 

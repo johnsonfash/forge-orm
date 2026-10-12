@@ -1,4 +1,5 @@
 import type { ClientSession, Collection, Document } from 'mongodb';
+import { objectIdHex } from '../object-id';
 // Use the WebCrypto global — present in browsers, Node 16+, Deno, Bun, Workers.
 // Falls back to a Math.random v4 layout only if WebCrypto is missing entirely
 // (which is exotic — older Node without --experimental-global-webcrypto). The
@@ -105,6 +106,15 @@ export class CollectionWrapper<
     private _session?: unknown,
     private _adapter?: Adapter,
     private _strict: boolean = false,
+    /*
+     * The shape to mint for an auto id when the FIELD does not say.
+     *
+     * Set once on `createDb({ defaultIdType: 'objectId' })` so a schema
+     * with hundreds of models does not have to repeat it on every
+     * `f.id()` — and, more to the point, so a model added later cannot
+     * quietly get the other shape. A field's own `idType` still wins.
+     */
+    private _defaultIdType?: 'auto' | 'objectId',
   ) {}
 
   protected get adapter(): Adapter {
@@ -464,21 +474,45 @@ export class CollectionWrapper<
     }
   }
 
-  // Auto-generate the primary key when the caller didn't supply one. Mongo mints
-  // an ObjectId in coerceInbound; SQL dialects have no server default for forge's
-  // string id, so we generate a UUID here. Only fills when the id field has an
-  // autoId default and no value was provided.
+  /*
+   * Auto-generate the primary key when the caller didn't supply one.
+   * Mongo mints an ObjectId in coerceInbound; SQL dialects have no
+   * server default for forge's string id, so it is generated here.
+   * Only fills when the id field has an autoId default and no value was
+   * provided.
+   *
+   * WHICH SHAPE depends on the field's `idType`:
+   *
+   *   'auto'     — a UUID v4. The native thing on SQL, and the default.
+   *   'objectId' — the same 24-hex ObjectId layout Mongo would mint, on
+   *                every dialect. For a schema that has to move between
+   *                engines without every id changing underneath it, and
+   *                for anything relying on ids sorting by time — see
+   *                the header of `src/object-id.ts`.
+   */
   private _autoIdName?: string | null;
+  private _autoIdKind?: 'uuid' | 'objectId';
   private _fillAutoId(data: any): any {
     if (this.adapter.kind === 'mongo' || !data || typeof data !== 'object') return data;
     if (this._autoIdName === undefined) {
       this._autoIdName = null;
       for (const [name, fd] of Object.entries(this.model.fields)) {
-        if ((fd as any).kind === 'id' && (fd as any).default?.kind === 'autoId') { this._autoIdName = name; break; }
+        if ((fd as any).kind === 'id' && (fd as any).default?.kind === 'autoId') {
+          this._autoIdName = name;
+          const declared = (fd as any).idType;
+          // A field that asks for a shape gets it; otherwise the
+          // connection's default; otherwise the native SQL shape.
+          this._autoIdKind =
+            declared === 'objectId' || (declared === 'auto' && this._defaultIdType === 'objectId')
+              ? 'objectId'
+              : 'uuid';
+          break;
+        }
       }
     }
     if (this._autoIdName && data[this._autoIdName] == null) {
-      return { ...data, [this._autoIdName]: randomUUID() };
+      const id = this._autoIdKind === 'objectId' ? objectIdHex() : randomUUID();
+      return { ...data, [this._autoIdName]: id };
     }
     return data;
   }

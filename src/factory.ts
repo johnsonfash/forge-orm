@@ -43,6 +43,20 @@ export interface CreateDbOptionsUrl {
   // the bundled sample schema. The map is bound to this connection, so several
   // dbs with different schemas can be open at once.
   schema?: SchemaShape;
+  /**
+   * The shape of an auto-generated primary key on SQL dialects.
+   *
+   * `f.id()` mints an ObjectId on Mongo and a UUID v4 on SQL, each
+   * being the native thing on its own engine. For a schema that has to
+   * run on both, that means two shapes — old rows 24-hex, new rows
+   * UUID — and everything that knew what an id looks like quietly stops
+   * being true. Set `'objectId'` and every engine mints the same thing.
+   *
+   * Set here rather than per field so a schema with hundreds of models
+   * says it once, and so a model added next year cannot get the other
+   * shape by omission. A field's own `idType` still wins.
+   */
+  defaultIdType?: 'auto' | 'objectId';
 }
 
 export interface CreateDbOptionsStructured {
@@ -279,7 +293,13 @@ export async function createDb<S extends SchemaShape = SchemaMap>(
   // anything reads the schema. Defaults to the bundled sample otherwise.
   if (opts.schema) setActiveSchema(opts.schema);
   const { adapter, url } = await pickAndConnect(opts);
-  return makeDb(adapter, url, { strict: opts.strict === true, models: opts.schema }) as unknown as ForgeDb<S>;
+  return makeDb(adapter, url, {
+    strict: opts.strict === true,
+    models: opts.schema,
+    ...((opts as { defaultIdType?: 'auto' | 'objectId' }).defaultIdType
+      ? { defaultIdType: (opts as { defaultIdType?: 'auto' | 'objectId' }).defaultIdType }
+      : {}),
+  }) as unknown as ForgeDb<S>;
 }
 
 async function pickAndConnect(opts: CreateDbOptions): Promise<{ adapter: Adapter; url: string }> {
@@ -389,7 +409,7 @@ interface PgPoolLike {
 function makeDb(
   adapter: Adapter,
   _url: string,
-  runtime: { strict: boolean; models?: SchemaShape } = { strict: false },
+  runtime: { strict: boolean; models?: SchemaShape; defaultIdType?: 'auto' | 'objectId' } = { strict: false },
 ): ForgeDb<any> {
   const cache: Partial<Record<keyof SchemaMap, CollectionWrapper<any>>> = {};
 
@@ -423,7 +443,7 @@ function makeDb(
         // Wrapper takes the active adapter so every execute / coerce / decode /
         // cascade call dispatches through the right dialect — otherwise every
         // wrapper would silently fall back to the Mongo singleton.
-        cache[key as keyof SchemaMap] = new CollectionWrapper(model, undefined, adapter, runtime.strict);
+        cache[key as keyof SchemaMap] = new CollectionWrapper(model, undefined, adapter, runtime.strict, runtime.defaultIdType);
       }
       // Inside a synchronous $explain() window, hand back the capturing
       // shim instead of the live wrapper, so `db.user.findMany(...)` in
@@ -539,7 +559,7 @@ function makeDb(
         const model = models[key] as ModelDef<any> | undefined;
         if (!model) throw unknownModel(key, models);
         if (!cache[key as keyof SchemaMap]) {
-          cache[key as keyof SchemaMap] = new CollectionWrapper(model, undefined, adapter, runtime.strict);
+          cache[key as keyof SchemaMap] = new CollectionWrapper(model, undefined, adapter, runtime.strict, runtime.defaultIdType);
         }
         return captureWrapper(key, cache[key as keyof SchemaMap]!, sink);
       },
@@ -940,7 +960,7 @@ function makeDb(
         if (!txCache[key]) {
           // Tx wrapper: same adapter, plus the opaque session from
           // adapter.$transaction (ClientSession / PoolClient / ...).
-          txCache[key] = new CollectionWrapper(model, session, adapter, runtime.strict);
+          txCache[key] = new CollectionWrapper(model, session, adapter, runtime.strict, runtime.defaultIdType);
         }
         return txCache[key];
       },

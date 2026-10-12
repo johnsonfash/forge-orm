@@ -109,7 +109,7 @@ const make = <T, K extends FieldKind>(kind: K): Field<T, K> =>
 // that must be updated atomically by a single upsert. Without it such a
 // collection cannot be declared at all, so it stays invisible to push,
 // diff and doctor.
-export type IdTypeName = 'auto' | 'uuid' | 'bigserial' | 'string';
+export type IdTypeName = 'auto' | 'uuid' | 'objectId' | 'bigserial' | 'string';
 export type IdJsType<T extends IdTypeName> = T extends 'bigserial' ? number : string;
 export interface IdFactory {
   (): Field<string, 'id'>;
