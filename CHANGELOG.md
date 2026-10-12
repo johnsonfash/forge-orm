@@ -4,7 +4,13 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
-## 2.20.6 — An index could not carry both dialects
+## 2.20.6 — Dual-dialect indexes, json paths in index keys, and `$ping`
+
+Three things, all found by taking one real 277-model Mongo schema and
+pushing it at PostgreSQL for the first time.
+
+### A dotted index key over a json column is a PATH
+
 
 **Minor.** An index may need a different SPELLING per dialect and mean
 exactly the same thing in both. The case that found this is a compound
@@ -37,6 +43,23 @@ having to know about the other.
 
 An index that carries only `expression` is unaffected, and so is one
 that carries only `keys`.
+
+### `$ping()` — "is the database answering", asked the same way
+
+Every engine can be asked and none of them agree on how: Mongo takes
+`{ ping: 1 }` on the command channel, SQL takes `SELECT 1`. There was no
+portable form, so a health endpoint had to know which engine it was
+talking to — the one place an application should not have to, because a
+healthcheck is the thing that runs *before* anyone has worked out what
+is wrong.
+
+```ts
+await db.$ping();   // resolves if the database answers, rejects if not
+```
+
+It REJECTS rather than returning a boolean, so the caller can time it and
+log the real error. IndexedDB has no server to be unreachable, so there
+it resolves. Available inside a transaction too.
 
 ## 2.20.5 — Mongo indexes had no runtime path
 

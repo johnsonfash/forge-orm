@@ -7,7 +7,7 @@ import { setActiveSchema, type SchemaShape } from './schema/active';
 import { ModelFields, ModelRelations, TypedModel } from './schema/core';
 import type { ModelDef } from './schema/types';
 import type { Adapter, AdapterKind } from './adapters/types';
-import type { SqlFragment } from './raw-sql';
+import { forgeSql, type SqlFragment } from './raw-sql';
 import type { CompiledArtifact } from './compile';
 import {
   explainPrefix,
@@ -120,6 +120,20 @@ export type ForgeDb<S extends SchemaShape = SchemaMap> = Collections<S> & {
     (strings: TemplateStringsArray, ...values: unknown[]): Promise<number>;
     (fragment: SqlFragment): Promise<number>;
   };
+  /**
+   * Is the database answering?
+   *
+   * Every engine can be asked, and none of them agree on how: Mongo
+   * takes `{ ping: 1 }` on the command channel, SQL takes `SELECT 1`.
+   * Without this, a health endpoint has to know which engine it is
+   * talking to — which is the one place an application should not have
+   * to, because a healthcheck is the thing that runs before anyone has
+   * worked out what is wrong.
+   *
+   * Resolves on success and REJECTS on failure, so a caller can time it
+   * and report the error rather than inspecting a boolean.
+   */
+  $ping(): Promise<void>;
   $disconnect(): Promise<void>;
   // Runtime schema apply — the in-process replacement for `forge push`. Reads
   // the active schema, emits dialect DDL, applies what's missing inside a
@@ -202,12 +216,12 @@ const PROXY_PASSTHROUGH = new Set<PropertyKey>([
 // than claiming keys whose access would throw.
 const DB_HELPER_KEYS = new Set<string>([
   'adapter', '$models', '$transaction', '$runCommandRaw', '$queryRaw',
-  '$executeRaw', '$disconnect', '$migrate', '$doctor', '$diff', '$explain',
+  '$executeRaw', '$ping', '$disconnect', '$migrate', '$doctor', '$diff', '$explain',
   '$on', '$off',
 ]);
 const TX_HELPER_KEYS = new Set<string>([
   'adapter', '$models', '$transaction', '$runCommandRaw', '$queryRaw',
-  '$executeRaw', '$disconnect', '$on', '$off',
+  '$executeRaw', '$ping', '$disconnect', '$on', '$off',
 ]);
 
 // `models` may be the live global schema proxy, so neither the lookup nor the
@@ -394,6 +408,7 @@ function makeDb(
       if (key === '$runCommandRaw') return $runCommandRaw;
       if (key === '$queryRaw') return makeRawCaller((frag) => adapter.$queryRaw(frag));
       if (key === '$executeRaw') return makeRawCaller((frag) => adapter.$executeRaw(frag));
+      if (key === '$ping') return $ping;
       if (key === '$disconnect') return () => adapter.close();
       if (key === '$migrate') return $migrate;
       if (key === '$doctor') return $doctor;
@@ -863,6 +878,25 @@ function makeDb(
     return diffIntrospection(models as Record<string, any>, introspection, opts?.ignore ?? []);
   }
 
+  /**
+   * The cheapest "are you there" each engine offers.
+   *
+   * Mongo answers the `ping` admin command; every SQL dialect answers
+   * `SELECT 1`. IndexedDB has no server to be unreachable, so a
+   * resolved promise is the honest answer there.
+   *
+   * Rejects rather than returning false: the caller wants the error to
+   * log, and a boolean throws it away.
+   */
+  async function $ping(): Promise<void> {
+    if (adapter.kind === 'mongo') {
+      await mongoDbOf(adapter).command({ ping: 1 });
+      return;
+    }
+    if (adapter.kind === 'indexeddb') return;
+    await adapter.$queryRaw(forgeSql.raw('SELECT 1'));
+  }
+
   // Mongo-only — it's the BSON command channel. SQL consumers reach for
   // $queryRaw / $executeRaw instead.
   function $runCommandRaw(command: Document) {
@@ -896,6 +930,7 @@ function makeDb(
           }
           return (c: any) => mongoDbOf(adapter).command(c, { session: session as ClientSession });
         }
+        if (key === '$ping') return $ping;
         if (key === '$disconnect') return () => adapter.close();
         if (key === '$on') return (event: any, cb: any) => adapter.emitter.on(event, cb);
         if (key === '$off') return (event: any, cb: any) => adapter.emitter.off(event, cb);
