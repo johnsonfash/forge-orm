@@ -4,6 +4,28 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.20.7 — A dropped TTL index said nothing
+
+**Patch.** `expireAfterSeconds` tells Mongo to delete a row once a date
+column is old enough. Postgres has no equivalent — expiry is a job
+there, not an index — so the adapter could not honour it and never
+could.
+
+What it did was build the index WITHOUT the expiry and say nothing. The
+index looks right in `\d`, `push` reports success, and the rows simply
+stop being deleted.
+
+On the schema that found this, that was **eight** indexes, every one on
+a table that grows a row per authentication attempt: OTP codes,
+password-reset tokens, refresh tokens, sync ingest keys, portal sessions
+and OTPs, finished jobs. Exactly the tables the TTLs were added to stop
+growing.
+
+There is nothing to emit, so `push` now warns — naming the index, the
+table, and what it does not do — in the same voice as `method: 'vector'`
+and `visible: false`. The index is still created; only the silence is
+gone.
+
 ## 2.20.6 — Dual-dialect indexes, json paths in index keys, and `$ping`
 
 Three things, all found by taking one real 277-model Mongo schema and

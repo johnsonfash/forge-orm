@@ -464,6 +464,36 @@ function buildIndex(d: Dialect, table: string, idx: IndexDef, m: ModelDef<any>):
     if (translated) whereClause = ` WHERE ${translated}`;
   }
 
+  /*
+   * ─── TTL IS MONGO-ONLY, AND SILENCE WAS THE DANGEROUS PART ─────────
+   *
+   * `expireAfterSeconds` tells Mongo to delete a row once a date column
+   * is old enough. Postgres has no equivalent — expiry is a job, not an
+   * index — so this adapter cannot honour it and never could.
+   *
+   * What it did until now was build the index WITHOUT the expiry and
+   * say nothing. The index then looks right in `\d`, the push reports
+   * success, and the rows simply stop being deleted. On a real schema
+   * that was eight indexes, every one of them on a table that grows a
+   * row per authentication attempt — OTP codes, password-reset tokens,
+   * refresh tokens, portal sessions, finished jobs. The tables the TTLs
+   * were added to stop growing.
+   *
+   * There is nothing to emit, so this warns instead, in the same voice
+   * as `method: 'vector'` above: the index is still created, and the
+   * operator is told what it does NOT do, by name, while they are
+   * looking at the push output.
+   */
+  if (typeof idx.expireAfterSeconds === 'number') {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[forge:push:postgres] index '${name}' sets 'expireAfterSeconds: ` +
+      `${idx.expireAfterSeconds}' — Postgres has no TTL index, so rows in ` +
+      `'${table}' will NOT expire. The index is created without it. Schedule ` +
+      `a delete job for this table, or the rows accumulate forever.`,
+    );
+  }
+
   // MySQL-only fields — warn loudly if set on Postgres so a portable schema
   // can drop them.
   if (idx.visible === false) {
