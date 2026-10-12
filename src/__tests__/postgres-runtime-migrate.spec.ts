@@ -23,11 +23,30 @@ const Account = model('accounts', {
 const appSchema = { account: Account } as any;
 
 /**
+ * The same model after a correction: `balance` turned out not to be written
+ * on every path, so the declaration was wrong and is now `.optional()`.
+ * Dropping the default too — a field with a default is never NULL anyway, so
+ * it would not exercise the widening.
+ */
+const AccountOptionalBalance = model('accounts', {
+  id: f.id({ type: 'uuid' }),
+  owner: f.string().unique(),
+  balance: f.int().optional(),
+});
+const optionalBalanceSchema = { account: AccountOptionalBalance } as any;
+
+/**
  * A single-session postgres driver, the shape PGlite and Neon-over-HTTP
  * present: `query` and nothing else. No pool, so no `connect()`.
  */
 function fakePgDriver(
-  existing: { tables?: string[]; constraints?: string[]; columns?: string[] } = {},
+  existing: {
+    tables?: string[];
+    constraints?: string[];
+    columns?: string[];
+    /** "<table>.<column>" entries the database currently has as NOT NULL. */
+    notNull?: string[];
+  } = {},
 ) {
   const sql: string[] = [];
   const driver = {
@@ -48,8 +67,12 @@ function fakePgDriver(
       // listed table with no columns is not a state a real database can be
       // in, so a caller that declares `tables` declares its columns too.
       if (/information_schema\.columns/.test(text)) {
+        // Two different lookups hit this table: every column, and the subset
+        // that is NOT NULL. The second carries `is_nullable` in its WHERE.
+        const wantNotNull = /is_nullable/.test(text);
+        const src = wantNotNull ? (existing.notNull ?? []) : (existing.columns ?? []);
         return {
-          rows: (existing.columns ?? []).map((c) => {
+          rows: src.map((c) => {
             const [table_name, column_name] = c.split('.');
             return { table_name, column_name };
           }),
@@ -186,5 +209,65 @@ describe('$migrate() adds a column to a table that already exists', () => {
     const r = await db.$migrate();
     expect(r.applied).toEqual([]);
     expect(r.failures).toEqual([]);
+  });
+});
+
+/**
+ * A FIELD THAT WAS DECLARED REQUIRED AND IS NOT.
+ *
+ * This is the correction that cannot be made any other way. A required field
+ * means nothing on Mongo — forge leaves a valueless field off the document —
+ * so a declaration drifts from what the code actually writes without anyone
+ * noticing, and the drift only surfaces when a NOT NULL column refuses the
+ * same write on SQL. Fixing `schema.ts` then has to reach a database that has
+ * already been pushed, or it is only a fix for databases nobody has made yet.
+ *
+ * Widening is the one column change that is safe unasked: every value already
+ * in the column still fits. Narrowing (SET NOT NULL) can fail on the rows that
+ * are already there and is left to the operator, with the statement to run.
+ */
+describe('$migrate() widens a column the schema no longer requires', () => {
+  it('drops NOT NULL when the field became optional', async () => {
+    const { driver, sql } = fakePgDriver({
+      tables: ['accounts'],
+      constraints: ['forge_accounts_uq_owner'],
+      columns: ['accounts.id', 'accounts.owner', 'accounts.balance'],
+      // The database still has it required; the schema has moved on.
+      notNull: ['accounts.id', 'accounts.owner', 'accounts.balance'],
+    });
+    const db = (await createDb({ driver, schema: optionalBalanceSchema })) as any;
+    const r = await db.$migrate();
+    expect(sql.join('\n')).toMatch(
+      /ALTER TABLE "accounts" ALTER COLUMN "balance" DROP NOT NULL/,
+    );
+    expect(r.applied).toContain('accounts.balance');
+    expect(r.failures).toEqual([]);
+  });
+
+  it('never emits SET NOT NULL on its own', async () => {
+    const { driver, sql } = fakePgDriver({
+      tables: ['accounts'],
+      constraints: ['forge_accounts_uq_owner'],
+      columns: ['accounts.id', 'accounts.owner', 'accounts.balance'],
+      // Nullable in the database, required in the schema — the NARROWING
+      // direction, which can fail on existing rows.
+      notNull: ['accounts.id'],
+    });
+    const db = (await createDb({ driver, schema: appSchema })) as any;
+    await db.$migrate();
+    expect(sql.join('\n')).not.toMatch(/SET NOT NULL/);
+  });
+
+  it('leaves an already-nullable column alone', async () => {
+    const { driver, sql } = fakePgDriver({
+      tables: ['accounts'],
+      constraints: ['forge_accounts_uq_owner'],
+      columns: ['accounts.id', 'accounts.owner', 'accounts.balance'],
+      notNull: ['accounts.id', 'accounts.owner'],
+    });
+    const db = (await createDb({ driver, schema: optionalBalanceSchema })) as any;
+    const r = await db.$migrate();
+    expect(sql.join('\n')).not.toMatch(/DROP NOT NULL/);
+    expect(r.applied).toEqual([]);
   });
 });

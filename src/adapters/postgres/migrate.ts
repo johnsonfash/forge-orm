@@ -40,6 +40,7 @@ export async function planMigration(
 ): Promise<MigrationPlan> {
   const existingTables    = await listTables(pool);
   const existingColumns   = await listColumns(pool);
+  const notNullColumns    = await listNotNullColumns(pool);
   const existingConstraints = await listConstraints(pool);
   const existingIndexes   = await listIndexes(pool);
 
@@ -57,6 +58,9 @@ export async function planMigration(
         case 'table':      return existingTables.has(stmt.name);
         // `stmt.name` is "<table>.<column>".
         case 'column':     return existingColumns.has(stmt.name);
+        // Already nullable, or not there at all (the ADD COLUMN in this same
+        // batch creates it nullable) — either way nothing to alter.
+        case 'nullability': return !notNullColumns.has(stmt.name);
         case 'unique':
         case 'foreignKey':
         case 'check':      return existingConstraints.has(stmt.name);
@@ -151,6 +155,15 @@ async function listColumns(pool: PgPoolHandle): Promise<Set<string>> {
   const { rows } = await pool.query(
     `SELECT table_name, column_name FROM information_schema.columns
       WHERE table_schema = current_schema()`,
+  );
+  return new Set(rows.map((r) => `${r.table_name}.${r.column_name}`));
+}
+
+/** The columns that are currently NOT NULL, keyed "<table>.<column>". */
+async function listNotNullColumns(pool: PgPoolHandle): Promise<Set<string>> {
+  const { rows } = await pool.query(
+    `SELECT table_name, column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND is_nullable = 'NO'`,
   );
   return new Set(rows.map((r) => `${r.table_name}.${r.column_name}`));
 }

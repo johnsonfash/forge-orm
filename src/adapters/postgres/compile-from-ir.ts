@@ -93,17 +93,51 @@ function compileLeaf(ctx: CompileCtx, leaf: Extract<WhereTree, { kind: 'leaf' }>
   switch (leaf.op) {
     case 'eq':       return leaf.value === null ? `${col} IS NULL`      : `${col} = ${ph(leaf.value)}`;
     case 'ne':       return leaf.value === null ? `${col} IS NOT NULL`  : `${col} <> ${ph(leaf.value)}`;
+    /*
+     * A `null` INSIDE THE LIST IS A MEMBER, NOT A COMPARISON.
+     *
+     * `{ loc: { in: ['L1', null] } }` means "L1, or not set" — which is what
+     * it means on Mongo, where `$in` with a null member matches a null AND a
+     * missing key. SQL has no such rule: `loc IN ('L1', NULL)` is `loc =
+     * 'L1' OR loc = NULL`, and the second half is UNKNOWN rather than true,
+     * so a row with no value matched nothing.
+     *
+     * Measured on the two engines with the same three rows — one 'L1', one
+     * explicit null, one with the key absent:
+     *
+     *   Mongo     $in: ['L1', null]   →  all three
+     *   Postgres  IN ('L1', NULL)     →  only the 'L1' row
+     *
+     * That is not a near-miss, it is a silently smaller answer. The idiom it
+     * breaks is a common one: scoping rows to a branch while keeping the
+     * org-wide ones that have no branch set. Every such query came back
+     * missing all of its org-wide rows, with nothing raised.
+     *
+     * `notIn` is worse still. `loc NOT IN ('L1', NULL)` is UNKNOWN for every
+     * row, including the ones that plainly are not 'L1', so the filter
+     * matched NOTHING AT ALL rather than too little.
+     *
+     * So a null in either list is pulled out and asked about separately, with
+     * the `IS NULL` form that is the only one SQL has.
+     */
     case 'in': {
       const arr = leaf.value as unknown[];
       // `in: []` matches nothing. Emitting `IN ()` would be a syntax error and
       // a bare `FALSE` is not valid T-SQL, so the literal comes from the dialect.
       if (!arr.length) return ctx.d.falseLiteral;
-      return `${col} IN (${arr.map(ph).join(', ')})`;
+      const vals = arr.filter((v) => v !== null && v !== undefined);
+      if (vals.length === arr.length) return `${col} IN (${vals.map(ph).join(', ')})`;
+      // Only nulls were asked for.
+      if (!vals.length) return `${col} IS NULL`;
+      return `(${col} IN (${vals.map(ph).join(', ')}) OR ${col} IS NULL)`;
     }
     case 'nin': {
       const arr = leaf.value as unknown[];
       if (!arr.length) return ctx.d.trueLiteral;
-      return `${col} NOT IN (${arr.map(ph).join(', ')})`;
+      const vals = arr.filter((v) => v !== null && v !== undefined);
+      if (vals.length === arr.length) return `${col} NOT IN (${vals.map(ph).join(', ')})`;
+      if (!vals.length) return `${col} IS NOT NULL`;
+      return `(${col} NOT IN (${vals.map(ph).join(', ')}) AND ${col} IS NOT NULL)`;
     }
     case 'lt':  return `${col} < ${ph(leaf.value)}`;
     case 'lte': return `${col} <= ${ph(leaf.value)}`;

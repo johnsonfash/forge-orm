@@ -14,7 +14,7 @@ import { mongoToSqlWhere } from '../shared/mongo-to-sql-where';
 //     pg_constraint to skip when already present (see migrate.ts).
 
 export interface DDLStatement {
-  kind: 'table' | 'column' | 'unique' | 'foreignKey' | 'check' | 'index';
+  kind: 'table' | 'column' | 'nullability' | 'unique' | 'foreignKey' | 'check' | 'index';
   sql: string;
   // Deterministic name for the object this statement creates. Used by the
   // migrator to look up "is this already applied?" in pg_class/pg_constraint.
@@ -70,6 +70,7 @@ export function buildSchemaDDL(
     const m = (schema as any)[key] as ModelDef<any>;
     if (!m || m.view) continue;
     out.push(...buildAddColumns(d, m));
+    out.push(...buildDropNotNulls(d, m));
   }
 
   // Pass 2: constraints (unique, FK, check) + indexes — tables only.
@@ -187,6 +188,47 @@ function buildAddColumns(d: Dialect, m: ModelDef<any>): DDLStatement[] {
             },
           }
         : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * DROP NOT NULL, for a field that used to be required and no longer is.
+ *
+ * This is the only column CHANGE that is safe to make without being asked.
+ * Widening a column to accept nulls cannot fail and cannot lose a row: every
+ * value already there still fits. The opposite — SET NOT NULL — can fail on
+ * the rows that are already there and is deliberately NOT done here; a
+ * missing NOT NULL is reported by the ADD COLUMN path instead, with the
+ * statement to run once the column is backfilled.
+ *
+ * It matters because of how a field is usually found to be wrong. A field
+ * declared required means nothing on Mongo, where forge leaves a valueless
+ * field off the document — so the declaration drifts from the truth without
+ * anyone noticing, and the drift is only discovered when a `NOT NULL` column
+ * refuses the same write on SQL. Correcting the schema then has to be able to
+ * reach a database that has already been pushed, or the fix is only a fix for
+ * databases nobody has made yet.
+ *
+ * The planner runs this one against the live column rather than its name, so
+ * it is skipped unless the column really is `NOT NULL` while the schema says
+ * optional.
+ */
+function buildDropNotNulls(d: Dialect, m: ModelDef<any>): DDLStatement[] {
+  const out: DDLStatement[] = [];
+  const table = m.collection;
+  for (const [fieldName, fieldRaw] of Object.entries(m.fields)) {
+    const field = fieldRaw as FieldDef;
+    if (!field.optional || field.dbGenerated) continue;
+    if (field.kind === 'id') continue; // a primary key is never nullable
+    out.push({
+      kind: 'nullability',
+      sql:
+        `ALTER TABLE ${d.quoteIdent(table)} ` +
+        `ALTER COLUMN ${d.quoteIdent(fieldName)} DROP NOT NULL`,
+      name: `${table}.${fieldName}`,
+      table,
     });
   }
   return out;
