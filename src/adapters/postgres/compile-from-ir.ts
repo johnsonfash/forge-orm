@@ -115,20 +115,23 @@ function compileLeaf(ctx: CompileCtx, leaf: Extract<WhereTree, { kind: 'leaf' }>
       return likeOp(ctx, col, `${escapeForLike(String(leaf.value))}%`, !!leaf.caseInsensitive);
     case 'endsWith':
       return likeOp(ctx, col, `%${escapeForLike(String(leaf.value))}`, !!leaf.caseInsensitive);
+    // A `json` / `embed` / `embedMany` field is `jsonb`, not a real array
+    // column, and none of the array operators exist for it — see arrayFilter
+    // in the dialect.
     case 'has':
-      return ctx.d.arrayFilter('has', col, [leaf.value], ctx.params);
+      return ctx.d.arrayFilter('has', col, [leaf.value], ctx.params, isJsonField(ctx, leaf.field));
     case 'hasSome': {
       const arr = leaf.value as unknown[];
       if (!arr.length) return ctx.d.falseLiteral;
-      return ctx.d.arrayFilter('hasSome', col, arr, ctx.params);
+      return ctx.d.arrayFilter('hasSome', col, arr, ctx.params, isJsonField(ctx, leaf.field));
     }
     case 'hasEvery': {
       const arr = leaf.value as unknown[];
       if (!arr.length) return ctx.d.trueLiteral;
-      return ctx.d.arrayFilter('hasEvery', col, arr, ctx.params);
+      return ctx.d.arrayFilter('hasEvery', col, arr, ctx.params, isJsonField(ctx, leaf.field));
     }
     case 'isEmpty': {
-      const empty = ctx.d.arrayFilter('isEmpty', col, [], ctx.params);
+      const empty = ctx.d.arrayFilter('isEmpty', col, [], ctx.params, isJsonField(ctx, leaf.field));
       return leaf.value ? empty : `NOT (${empty})`;
     }
     case 'search':
@@ -667,6 +670,19 @@ function singleRowWhere(d: Dialect, m: ModelDef<any>, table: string, where: stri
   return `WHERE ${col} = (SELECT ${col} FROM ${table}${filter} LIMIT 1 FOR UPDATE)`;
 }
 
+/**
+ * True when the field is stored as `jsonb` rather than a real array column.
+ *
+ * `f.json()` is untyped by design, so a json column holding an array is
+ * indistinguishable from one holding an object until you look at the value —
+ * which is why the array operators have to be chosen by the COLUMN type and
+ * not by the operand.
+ */
+function isJsonField(ctx: CompileCtx, field: string): boolean {
+  const kind = (ctx.model.fields[field] as FieldDef | undefined)?.kind;
+  return kind === 'json' || kind === 'embed' || kind === 'embedMany';
+}
+
 export function compileUpdate(
   node: UpdateNode,
   modelOverride?: ModelDef<any>,
@@ -689,8 +705,49 @@ export function compileUpdate(
       return dialect.placeholder(params, v);
     };
     if (node.set) {
+      /*
+       * A DOTTED KEY WRITES INSIDE A JSON COLUMN, and used to write nowhere.
+       *
+       *   data: { 'customer.id': newId }
+       *
+       * came out as `SET "customer.id" = $1` — the whole dotted name quoted
+       * as ONE identifier, so Postgres looked for a column literally called
+       * `customer.id` and answered "column does not exist". The READ side
+       * has understood these paths for a while (the `jsonPath` leaf above),
+       * so a filter on `customer.id` matched rows that could then not be
+       * updated. On Mongo the same write is just `$set: {'customer.id': …}`
+       * and has always worked, which is why nothing flagged it.
+       *
+       * `jsonb_set(col, '{a,b}', value, true)` is the Postgres form, with
+       * `create_missing = true` so a key that is not there yet is added
+       * rather than silently skipped, and a `coalesce` so the column being
+       * NULL does not swallow the whole write (jsonb_set returns NULL for a
+       * NULL input).
+       *
+       * Several dotted writes into the SAME column nest, innermost first, so
+       * one statement can set two keys without one overwriting the other.
+       */
+      const jsonSets = new Map<string, Array<[string[], unknown]>>();
       for (const [k, v] of Object.entries(node.set)) {
+        const dot = k.indexOf('.');
+        const root = dot === -1 ? k : k.slice(0, dot);
+        if (dot !== -1 && isJsonField(ctx, root)) {
+          const list = jsonSets.get(root) ?? [];
+          list.push([k.slice(dot + 1).split('.'), v]);
+          jsonSets.set(root, list);
+          continue;
+        }
         parts.push(`${dialect.quoteIdent(k)} = ${valExpr(k, v)}`);
+      }
+      for (const [root, writes] of jsonSets) {
+        const colQ = dialect.quoteIdent(root);
+        let expr = `coalesce(${colQ}, '{}'::jsonb)`;
+        for (const [path, v] of writes) {
+          const pathLiteral = dialect.placeholder(params, `{${path.join(',')}}`);
+          const valueLiteral = dialect.placeholder(params, JSON.stringify(v ?? null));
+          expr = `jsonb_set(${expr}, ${pathLiteral}::text[], ${valueLiteral}::jsonb, true)`;
+        }
+        parts.push(`${colQ} = ${expr}`);
       }
     }
     if (node.increment) {

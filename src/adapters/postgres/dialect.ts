@@ -48,6 +48,19 @@ export interface Dialect {
     quotedColumn: string,
     values: unknown[],
     params: unknown[],
+    /**
+     * True when the column is `json` / `embed` / `embedMany` rather than a
+     * real array type — i.e. `jsonb` on Postgres.
+     *
+     * Only Postgres needs telling. It is the one dialect whose array filters
+     * use real array operators (`= ANY`, `&&`, `@>` with an `ARRAY[...]`
+     * right-hand side), and none of those exist for `jsonb`: a `has` against
+     * a json column came out as `$1 = ANY("tags")` and failed. MySQL, SQLite
+     * and MSSQL already keep `stringArray` / `intArray` AS json and emit
+     * json functions, so their output is correct for a json column with no
+     * change and they ignore this.
+     */
+    isJson?: boolean,
   ): string;
   /**
    * Emit an array mutation for an UPDATE SET clause.
@@ -259,8 +272,29 @@ export const PostgresDialect: Dialect = {
     return `${quotedColumn} ILIKE ${patternExpr}`;
   },
 
-  arrayFilter(op, quotedColumn, values, params) {
+  arrayFilter(op, quotedColumn, values, params, isJson) {
     const ph = (v: unknown) => this.placeholder(params, v);
+    if (isJson) {
+      // `jsonb` containment. `@>` reads "the left value contains the right
+      // one", and with an array on both sides that is exactly membership —
+      // and it is the form a GIN index on the column can answer.
+      const jb = (v: unknown) =>
+        `${this.placeholder(params, JSON.stringify(v))}::jsonb`;
+      switch (op) {
+        case 'has':      return `${quotedColumn} @> ${jb([values[0]])}`;
+        // One containment test per candidate, OR'd. `?|` would be shorter but
+        // only works for strings, and these columns hold numbers too.
+        case 'hasSome':
+          return `(${values.map((v) => `${quotedColumn} @> ${jb([v])}`).join(' OR ')})`;
+        case 'hasEvery': return `${quotedColumn} @> ${jb(values)}`;
+        // `jsonb_array_length` raises on a value that is not an array, and a
+        // json column is free to hold an object or a scalar — so anything
+        // that is not an array counts as empty rather than as an error.
+        case 'isEmpty':
+          return `coalesce(jsonb_array_length(CASE WHEN jsonb_typeof(${quotedColumn}) = 'array' ` +
+                 `THEN ${quotedColumn} ELSE '[]'::jsonb END), 0) = 0`;
+      }
+    }
     switch (op) {
       case 'has':      return `${ph(values[0])} = ANY(${quotedColumn})`;
       case 'hasSome':  return `${quotedColumn} && ARRAY[${values.map(ph).join(', ')}]`;
