@@ -4,6 +4,54 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.22.0 — Postgres: five things Mongo was hiding
+
+Found by pointing a real application's 8,700-test suite at the Postgres
+adapter for the first time. Every one of these worked on Mongo, and each
+worked there for a reason that does not generalise.
+
+**A `null` inside an `in` list is a member of the list.** `{ loc: { in:
+['L1', null] } }` means "L1, or not set", which is what Mongo's `$in`
+does — it matches an explicit null AND a missing key. `loc IN ('L1',
+NULL)` in SQL is `loc = 'L1' OR loc = NULL`, and the second half is
+UNKNOWN, so every row with no value matched nothing. Measured on three
+rows (one 'L1', one explicit null, one absent): Mongo returned all three,
+Postgres returned one. `notIn` was worse — `NOT IN (…, NULL)` is UNKNOWN
+for every row, so the filter matched nothing at all. A null in either
+list is now asked about with `IS NULL` / `IS NOT NULL`; a list with no
+nulls emits exactly what it did before.
+
+**`updateFirst` and `deleteFirst` could not see a row another writer had
+just touched.** The single-row form was built on `ctid`, a tuple's
+physical address — and an update does not change a row in place, it
+writes a new version at a new address. So the second of two concurrent
+writers looked for an address that no longer held the row, matched
+nothing, and the caller got `null` and raised "not found" for a row
+sitting right there. Now keyed on the primary key with `FOR UPDATE` on
+the subselect. Postgres only: mssql was already keyed on the pk, mysql
+becomes `LIMIT 1`, and sqlite/duckdb use `rowid`, which neither moves.
+
+**`forge push` reported success without adding a column.** The planner
+decided "already applied?" per statement, and a CREATE TABLE counts as
+applied once the TABLE exists — so a field added to a model never reached
+a database that already had the table. There is an ADD COLUMN per field
+now, plus `DROP NOT NULL` when a field has become optional, which is the
+one column change safe to make unasked. `SET NOT NULL` stays manual (it
+can fail on existing rows) and is printed for the operator to run after a
+backfill.
+
+**A dotted key wrote nowhere.** `data: { 'customer.id': x }` compiled to
+`SET "customer.id" = $1` — the dotted name quoted as one identifier — so
+Postgres looked for a column of that literal name. The read side had
+understood these paths for a while, so a filter matched rows that could
+then not be updated. Now `jsonb_set(coalesce(col, '{}'), '{a,b}', value,
+true)`, with several writes to one column nesting rather than one losing.
+
+**The array filters did not work on a `json` column.** `has` emitted `$1
+= ANY(col)`, valid for `text[]` and not for `jsonb`. On a json field
+these now compile to containment (`col @> '["vip"]'`), which a GIN index
+can answer.
+
 ## 2.21.0 — One id shape on every engine
 
 **Minor.** `f.id()` mints an ObjectId on Mongo and a UUID v4 on SQL.
