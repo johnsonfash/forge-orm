@@ -310,13 +310,37 @@ export function collectIndexSpecs(modelName: string, model: ModelDef<any>): Inde
     });
   }
 
-  // Plain compound indexes — schema-supplied. Expression indexes
-  // (idx.expression) and SQL-only fields (idx.include, idx.method) are
-  // SQL-only — skip the spec on Mongo. `where` aliases the Mongo
-  // `partialFilterExpression` when given as an object; a string `where`
-  // is SQL-only and ignored here.
+  // Plain compound indexes — schema-supplied. SQL-only fields
+  // (idx.include, idx.method) are ignored here. `where` aliases the
+  // Mongo `partialFilterExpression` when given as an object; a string
+  // `where` is SQL-only and ignored.
   for (const idx of model.indexes || []) {
-    if (idx.expression) continue; // Mongo doesn't support expression indexes
+    /*
+     * ─── AN INDEX MAY CARRY BOTH FORMS ──────────────────────────────
+     *
+     * `expression` is the SQL payload and Mongo has no equivalent, so
+     * an index that has ONLY an expression is still skipped here.
+     *
+     * But an index may legitimately need a different spelling per
+     * dialect and mean the same thing in both — the case that forced
+     * this is a compound index over an embedded field: Mongo indexes
+     * `{ 'customer.id': 1 }` natively, while Postgres needs
+     * `(("customer"->>'id'))` because the column is jsonb.
+     *
+     * Before this, setting `expression` to serve Postgres SILENTLY
+     * dropped the index on Mongo — so the only way to keep both was to
+     * declare one dialect and remember to swap it at a cutover. That is
+     * a footgun with no warning: the push prints nothing and the index
+     * is simply gone, which on a large collection is a collection scan
+     * nobody is told about.
+     *
+     * So when `keys` are present too, they ARE the Mongo form and they
+     * are used. Postgres already prefers `expression` over `keys` when
+     * both are given (adapters/postgres/ddl.ts), so the two sides agree
+     * without either having to know about the other.
+     */
+    const keysGiven = idx.keys && Object.keys(idx.keys).length > 0;
+    if (idx.expression && !keysGiven) continue;
     const pfe =
       idx.partialFilterExpression ??
       (idx.where && typeof idx.where === 'object'

@@ -361,6 +361,56 @@ function buildIndex(d: Dialect, table: string, idx: IndexDef, m: ModelDef<any>):
     const colExpr = cols
       .map((c) => {
         const dir = idx.keys[c];
+        /*
+         * ─── A DOTTED KEY OVER A JSON COLUMN ────────────────────────
+         *
+         * `{ 'customer.id': 1 }` is Mongo's way of indexing inside an
+         * embedded document, and it is the natural way to write it:
+         * the schema already says `customer` is an `f.embed()`.
+         *
+         * Quoting it as an identifier emits the column `"customer.id"`,
+         * which does not exist — the single thing that stopped a real
+         * schema (277 models) from pushing to Postgres. The author's
+         * only escape was `expression`, which is wrapped as ONE
+         * expression and therefore cannot carry a mixed index like
+         * `(orgId, customer.id, createdAt DESC)` — it emits a row
+         * constructor and PG answers "syntax error at or near ','".
+         *
+         * So the path is translated here instead. forge already knows
+         * the root is jsonb, because the schema declared it: `a.b.c`
+         * becomes `(("a"->'b'->>'c'))`, with the last hop as `->>` so
+         * the index is over text rather than jsonb. Nobody has to
+         * write SQL, and the same declaration serves both dialects.
+         *
+         * A dotted key whose ROOT IS NOT a json/embed column is left
+         * alone and will fail loudly as before — that is a typo, not a
+         * path, and inventing a translation for it would hide it.
+         */
+        const dot = c.indexOf('.');
+        if (dot > 0) {
+          const root = c.slice(0, dot);
+          const rootDef = m.fields[root] as { kind?: string } | undefined;
+          const kind = rootDef?.kind;
+          if (kind === 'json' || kind === 'embed' || kind === 'embedMany') {
+            const path = c.slice(dot + 1).split('.');
+            // Segments come from the schema, never from a request. A
+            // quote in one is a typo, and silently escaping it would
+            // build an index on a key nobody meant.
+            for (const seg of path) {
+              if (seg.includes("'")) {
+                throw new Error(
+                  `[forge:postgres] index key '${c}' has a quote in its path. ` +
+                  'JSON path segments must be plain keys.',
+                );
+              }
+            }
+            const last = path.pop()!;
+            const hops = path.map((seg) => `->'${seg}'`).join('');
+            const expr = `(${d.quoteIdent(root)}${hops}->>'${last}')`;
+            if (!isBtree) return `(${expr})`;
+            return `(${expr}) ${dir === -1 ? 'DESC' : 'ASC'}`;
+          }
+        }
         if (isBtree && dir === 'text') return `${d.quoteIdent(c)} text_pattern_ops`;
         // pgvector requires the metric opclass alongside the column:
         // `embedding vector_cosine_ops`.

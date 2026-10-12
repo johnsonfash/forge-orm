@@ -4,6 +4,40 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.20.6 — An index could not carry both dialects
+
+**Minor.** An index may need a different SPELLING per dialect and mean
+exactly the same thing in both. The case that found this is a compound
+index over an embedded field: Mongo indexes `{ 'customer.id': 1 }`
+natively, while Postgres stores the embed as `jsonb` and needs
+`(("customer"->>'id'))`. Both say "index the customer id on this
+invoice".
+
+You could not write both. Setting `expression` to serve Postgres made
+the Mongo push **skip the index entirely** — silently. Push printed
+nothing, `doctor` said nothing, `listIndexes` showed no sign, and the
+collection went back to a full scan with no warning anywhere. The only
+way to keep a dual-dialect schema was to declare one dialect and
+remember to swap the declaration by hand at a cutover, which is a
+footgun with no safety on it.
+
+```ts
+indexes: [{
+  keys: { orgId: 1, 'customer.id': 1, createdAt: -1 },   // Mongo
+  expression: `"orgId", (("customer"->>'id')), "createdAt" DESC`,  // SQL
+  name: 'idx_invoice_org_customer_created',
+}]
+```
+
+Mongo now uses `keys` whenever they are present, and skips only an index
+that has **nothing but** an expression — where there is genuinely
+nothing to build from. Postgres already preferred `expression` over
+`keys` when both were given, so the two sides agree without either
+having to know about the other.
+
+An index that carries only `expression` is unaffected, and so is one
+that carries only `keys`.
+
 ## 2.20.5 — Mongo indexes had no runtime path
 
 **Minor.** `forge push` was the only way to create a declared Mongo index.
