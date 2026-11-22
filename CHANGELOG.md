@@ -4,6 +4,98 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.23.0 — Postgres: migration files, row locks, a real SQL splitter
+
+**The default `pg` pool no longer crashes the process when an idle
+connection dies.** It had no `'error'` listener, so a Postgres restart or
+a terminated backend surfaced as an uncaught exception and Node exited.
+It now emits a warning; the pool drops the broken client and the next
+query reconnects. Proved by terminating the backend under a live pool.
+(An injected postgres.js driver was never affected.)
+
+
+Four things were said to stop forge replacing a postgres.js + Kysely +
+plain-SQL-migrations stack. Checked against the source, three were true
+and one was half true.
+
+**There was no way to apply migration files.** `forge generate` wrote
+numbered `.sql` files, `forge generate --custom` told you to fill one in
+"then `forge migrate`", and `forge migrate status` reported them as
+pending — but `forge migrate` itself printed a usage line and exited.
+The only thing that executed a file was `forge diff apply`, which ran
+its statements one by one in autocommit and wrote the ledger row
+afterwards, so a failure on statement three left one and two applied
+and no record of them.
+
+**`forge migrate` and `db.$migrateFiles()` (postgres) apply the folder.**
+
+- Files run in name order. Hand-written SQL needs no markers; a
+  `forge generate` file runs only its `-- up` section.
+- **Each file is one transaction together with its ledger row.** A file
+  that fails part-way leaves nothing — proved on a real server: the
+  table from statement 1 and the row from statement 2 are both absent,
+  and the ledger holds only the files before it.
+- **The file is sent as written** over the simple query protocol (pg
+  and postgres.js both), so `$$` bodies, `DO` blocks and `BEGIN ATOMIC`
+  need no client-side splitting.
+- **Statements Postgres refuses inside a transaction** (`CREATE INDEX
+  CONCURRENTLY`, `VACUUM`, …) are caught before anything runs, with the
+  fix: a `-- forge:no-transaction` line, which runs that file one
+  statement at a time and says plainly that it is not all-or-nothing.
+  Nothing is downgraded silently. A `BEGIN`/`COMMIT` inside a file is
+  refused, because it would commit the file without its ledger row.
+- **Checksums**: `_forge_migrations` gains a `checksum` column; a file
+  edited after it ran stops the run. Rows written before this release
+  have their checksum recorded on the next run.
+- **Concurrent runs** wait on the advisory lock `forge push` already
+  takes and re-read the ledger once they hold it: five runners started
+  together (and two CLI processes racing) applied each file exactly once.
+- A file numbered behind one already applied, or a ledger entry with no
+  file, stops the run unless `--allow-out-of-order` / `--allow-unknown`.
+- The CLI reads `MIGRATION_DATABASE_URL` before `DATABASE_URL`, for apps
+  whose `DATABASE_URL` goes through a transaction-mode pooler.
+
+**`forge diff apply` and `forge rollback` are one transaction on
+Postgres too**: statements and ledger change commit together or not at
+all.
+
+**The statement splitter is a lexer now** (`splitSqlStatements`,
+exported). It was `split(/;\s*\n/)` — a plpgsql function came out as
+four broken statements. It knows dollar quotes with any tag, `''` and
+`E''` strings, quoted identifiers, `--` and nested `/* */` comments,
+and `BEGIN ATOMIC … END`; mysql and sqlite modes for their own quoting.
+`-- up` / `-- down` markers must be whole lines: `indexOf('-- up')` also
+matched `-- update the totals`.
+
+**`forge migrate status` agreed with nothing else.** The ledger holds
+names without `.sql` (that is what `diff apply` and `rollback` write)
+and status compared file names with it, so a diff-applied migration was
+reported as pending AND as not in this checkout. It also no longer needs
+a forge schema to run.
+
+**Row locks in the query API.** `findFirst`, `findUnique`, `findMany`
+and their `OrThrow` forms take `lock`:
+
+    await db.$transaction(async (tx) => {
+      const [job] = await tx.job.findMany({
+        where: { status: 'queued' }, orderBy: { runAt: 'asc' }, take: 1,
+        lock: { mode: 'update', skipLocked: true },
+      });
+    });
+
+`'update' | 'noKeyUpdate' | 'share' | 'keyShare'`, with `nowait` or
+`skipLocked`. Raw `FOR UPDATE` through `tx.$queryRaw` always worked and
+still does. Outside a transaction a lock is refused rather than taken
+and dropped the moment the SELECT returns; on a dialect other than
+postgres it is refused rather than emitted. Proved with two connections:
+the waiter shows up in `pg_stat_activity` on a Lock, SKIP LOCKED claims
+the next row at once, NOWAIT fails with 55P03.
+
+**Driver port**: sessions may offer `exec(sql)` (multi-statement, no
+parameters) and drivers `reserve()` (one connection outside a
+transaction). Both optional; `pgDriver`, `postgresJsDriver` (3.4+ for
+`reserve`) and `pgliteDriver` implement them.
+
 ## 2.22.2 — Fix: forge would not load in a browser
 
 **`object-id.ts`, added in 2.21.0, imported `randomBytes` from

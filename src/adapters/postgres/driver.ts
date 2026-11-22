@@ -7,6 +7,18 @@ import type { AdapterKind } from '../types';
 
 export interface PgQueryable {
   query(sql: string, params?: unknown[]): Promise<{ rows: any[]; rowCount: number }>;
+  /**
+   * Run a script of several statements in one round trip over the simple
+   * query protocol, with no parameters. Optional: the migration runner uses
+   * it to send a file exactly as written (so `$$` bodies and `BEGIN ATOMIC`
+   * need no client-side splitting), and splits the file itself when absent.
+   */
+  exec?(sql: string): Promise<void>;
+}
+
+/** A connection held for the caller alone until `release()`. */
+export interface PgReservedSession extends PgQueryable {
+  release(): Promise<void> | void;
 }
 
 export interface PostgresDriver extends PgQueryable {
@@ -16,6 +28,13 @@ export interface PostgresDriver extends PgQueryable {
   transaction<T>(fn: (session: PgQueryable) => Promise<T>): Promise<T>;
   // Optional server-side cursor stream. Absent → adapter materialises via query.
   stream?(sql: string, params: unknown[]): AsyncIterable<any>;
+  /**
+   * Hold one connection outside any transaction. Optional: needed only by
+   * work that must span several autocommit statements on ONE connection —
+   * a migration marked `-- forge:no-transaction` (for `CREATE INDEX
+   * CONCURRENTLY`) holds a session advisory lock across its statements.
+   */
+  reserve?(): Promise<PgReservedSession>;
   close(): Promise<void>;
 }
 
@@ -33,7 +52,12 @@ export function pgDriver(pool: any): PostgresDriver {
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
-        const result = await fn({ query: async (s, p) => norm(await client.query(s, p)) });
+        const result = await fn({
+          query: async (s, p) => norm(await client.query(s, p)),
+          // No values → node-postgres uses the simple protocol, which is the
+          // one that accepts several statements in one string.
+          exec: async (s) => { await client.query(s); },
+        });
         await client.query('COMMIT');
         return result;
       } catch (err) {
@@ -64,6 +88,14 @@ export function pgDriver(pool: any): PostgresDriver {
         client.release();
       }
     },
+    reserve: async () => {
+      const client = await pool.connect();
+      return {
+        query: async (s, p) => norm(await client.query(s, p)),
+        exec: async (s) => { await client.query(s); },
+        release: () => client.release(),
+      };
+    },
     close: async () => { await pool.end(); },
   };
 }
@@ -77,11 +109,31 @@ export function postgresJsDriver(sql: any): PostgresDriver {
     const rows = Array.from(r as any[]);
     return { rows, rowCount: (r.count ?? rows.length) as number };
   };
+  // `.simple()` sends the text over the simple protocol, the only one that
+  // takes several statements; `unsafe` alone prepares it and refuses them.
+  const exec = async (q: any, text: string) => { await q.unsafe(text).simple(); };
   return {
     kind: 'postgres',
     query: (text, params) => run(sql, text, params),
     transaction: (fn) => sql.begin((txSql: any) =>
-      fn({ query: (text: string, params?: unknown[]) => run(txSql, text, params) })),
+      fn({
+        query: (text: string, params?: unknown[]) => run(txSql, text, params),
+        exec: (text: string) => exec(txSql, text),
+      })),
+    // postgres.js 3.4+. Older releases have no reserve(), and then a
+    // no-transaction migration says so instead of running on a pool.
+    ...(typeof sql.reserve === 'function'
+      ? {
+          reserve: async () => {
+            const r = await sql.reserve();
+            return {
+              query: (text: string, params?: unknown[]) => run(r, text, params),
+              exec: (text: string) => exec(r, text),
+              release: () => r.release(),
+            };
+          },
+        }
+      : {}),
     close: async () => { await sql.end({ timeout: 5 }); },
   };
 }

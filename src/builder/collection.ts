@@ -51,7 +51,7 @@ import { buildSqliteCompileApi } from '../adapters/sqlite/compile';
 import { buildDuckdbCompileApi } from '../adapters/duckdb/compile';
 import { buildMssqlCompileApi } from '../adapters/mssql/compile';
 import type { CompileApi, MongoCompileApi, SQLCompileApi } from '../compile';
-import { buildCount, buildDelete, buildGroupBy, buildInsert, buildProjection, buildSelect, buildUpdate, buildUpdateData } from '../ir/build';
+import { buildCount, buildDelete, buildGroupBy, buildInsert, buildProjection, buildSelect, buildUpdate, buildUpdateData, type RowLockOption } from '../ir/build';
 import type { UpdateNode } from '../ir/types';
 import type { Adapter } from '../adapters/types';
 import { getDefaultMongoAdapter } from '../adapters/mongo/adapter';
@@ -320,6 +320,9 @@ export class CollectionWrapper<
     offset?: number;
     cursor?: CursorInput;
     distinct?: Array<keyof F & string>;
+    /** Row lock (postgres, inside a transaction): 'update' | 'share' | …, or
+     *  `{ mode, nowait }` / `{ mode, skipLocked }`. */
+    lock?: RowLockOption;
   }>(args: A & NoBothSelectInclude<A> = {} as any): Promise<Find1<F, R, A, SM> | null> {
     const result = await this._find(args, 1);
     return (result[0] as Find1<F, R, A, SM>) ?? null;
@@ -330,6 +333,7 @@ export class CollectionWrapper<
     select?: ISelect<F, R, SM>;
     include?: IInclude<R, SM>;
     omit?: { [K in keyof F]?: boolean };
+    lock?: RowLockOption;
   }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A, SM> | null> {
     return this.findFirst(args as any) as any;
   }
@@ -346,6 +350,9 @@ export class CollectionWrapper<
     offset?: number;
     cursor?: CursorInput;
     distinct?: Array<keyof F & string>;
+    /** Row lock (postgres, inside a transaction): 'update' | 'share' | …, or
+     *  `{ mode, nowait }` / `{ mode, skipLocked }`. */
+    lock?: RowLockOption;
   }>(args: A & NoBothSelectInclude<A> = {} as any): Promise<Find1<F, R, A, SM>> {
     const r = await this.findFirst(args);
     if (!r) throw notFoundError(this.model.collection, args.where);
@@ -357,6 +364,7 @@ export class CollectionWrapper<
     select?: ISelect<F, R, SM>;
     include?: IInclude<R, SM>;
     omit?: { [K in keyof F]?: boolean };
+    lock?: RowLockOption;
   }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A, SM>> {
     const r = await this.findUnique(args);
     if (!r) throw notFoundError(this.model.collection, args.where);
@@ -375,6 +383,9 @@ export class CollectionWrapper<
     offset?: number;
     cursor?: CursorInput;
     distinct?: Array<keyof F & string>;
+    /** Row lock (postgres, inside a transaction): 'update' | 'share' | …, or
+     *  `{ mode, nowait }` / `{ mode, skipLocked }`. */
+    lock?: RowLockOption;
   }>(args: A & NoBothSelectInclude<A> = {} as any): Promise<Find1<F, R, A, SM>[]> {
     return this._find(args, undefined) as Promise<Find1<F, R, A, SM>[]>;
   }
@@ -1086,6 +1097,7 @@ export class CollectionWrapper<
     args = this._withSoftDeleteFilter(args);
     const cardinality: 'one' | 'many' = hardLimit === 1 ? 'one' : 'many';
     const node = buildSelect(mk, this.model, args ?? {}, cardinality, schema as any);
+    if (node.lock) this._assertCanLock();
     // If a hardLimit was specified (findFirst path), honour it even when the
     // user passed no take/limit.
     if (hardLimit != null && (node.limit == null || node.limit > hardLimit)) {
@@ -1093,6 +1105,25 @@ export class CollectionWrapper<
     }
     const rows = await this.adapter.executeSelect(node, this.model, { session: this.session });
     return rows;
+  }
+
+  // A row lock lives until the transaction ends. Outside one, Postgres runs
+  // the SELECT in its own implicit transaction and drops the lock the moment
+  // the rows come back — the call would read as "locked" and lock nothing.
+  private _assertCanLock(): void {
+    if (this.adapter.kind !== 'postgres') {
+      throw new Error(
+        `[forge] lock: row locks are supported on postgres only; '${this.model.collection}' ` +
+        `is on ${this.adapter.kind}.`,
+      );
+    }
+    if (!this.session) {
+      throw new Error(
+        `[forge] lock: on '${this.model.collection}' outside a transaction locks nothing — ` +
+        `the lock is released as soon as the SELECT returns. Call it on the tx inside ` +
+        `db.$transaction(async (tx) => …).`,
+      );
+    }
   }
 
   private async _returnOne(

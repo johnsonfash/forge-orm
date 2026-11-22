@@ -25,6 +25,7 @@ pre-built-fragment call styles).
 * [`$runCommandRaw` — the Mongo BSON channel](#runcommandraw--the-mongo-bson-channel)
 * [Returning shape and row typing](#returning-shape-and-row-typing)
 * [Raw inside a `$transaction`](#raw-inside-a-transaction)
+* [Multi-statement scripts](#multi-statement-scripts)
 * [Postgres patterns](#postgres-patterns)
 * [MySQL patterns](#mysql-patterns)
 * [SQLite patterns](#sqlite-patterns)
@@ -522,6 +523,26 @@ caveat the README's [Transactions chapter](../README.md#transactions)
 calls out for typed writes.
 
 ---
+
+
+## Multi-statement scripts
+
+`$queryRaw` / `$executeRaw` send **one statement**. Whether a string holding several goes through depends on the driver, which is not something to build on: node-postgres sends a parameterless query over the simple protocol and accepts it; postgres.js prepares every `unsafe()` call and refuses it ("cannot insert multiple commands into a prepared statement").
+
+For a script — schema changes, functions, triggers, seed blocks — use one of:
+
+* **A migration file**, applied by `forge migrate` / `db.$migrateFiles()` (Postgres). The file is sent whole over the simple protocol in its own transaction, so `$$` bodies, `DO` blocks and `BEGIN ATOMIC` need no care. See [MIGRATIONS.md › forge migrate](./MIGRATIONS.md#forge-migrate--migration-files-postgres).
+* **`splitSqlStatements(text, 'postgres')`**, exported from `forge-orm`, then one `$executeRaw` per statement inside a `$transaction`. It is a lexer, not `split(';')`: it skips semicolons inside dollar quotes (any tag), `''` and `E''` strings, quoted identifiers, `--` and nested `/* */` comments, and `BEGIN ATOMIC … END` bodies, and reports the line each statement starts on. `'mysql'` and `'sqlite'` modes follow those dialects' quoting.
+
+```ts
+import { splitSqlStatements, forgeSql } from 'forge-orm';
+
+await db.$transaction(async (tx) => {
+  for (const { sql } of splitSqlStatements(script, 'postgres')) {
+    await tx.$executeRaw(forgeSql.raw(sql));
+  }
+});
+```
 
 ## Postgres patterns
 

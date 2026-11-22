@@ -5,6 +5,7 @@ import type {
   InsertNode,
   OrderByEntry,
   ProjectionPlan,
+  RowLockSpec,
   SelectNode,
   UpdateNode,
   WhereTree,
@@ -503,6 +504,12 @@ export function compileSelect(
   schemaOverride?: Record<string, ModelDef<any>>,
 ): SQLArtifact {
   const m = modelDef(node.model, modelOverride);
+  // The other SQL dialects borrow this compiler; none of them spells a row
+  // lock this way (MSSQL uses table hints, SQLite has no row locks), so a
+  // lock reaching them is refused rather than emitted as foreign SQL.
+  if (node.lock && dialect.name !== 'postgres') {
+    throw new Error(`[forge] lock: row locks are supported on postgres only, not ${dialect.name}.`);
+  }
   const params: unknown[] = [];
   const table = dialect.quoteIdent(m.collection);
   const ctx: CompileCtx = { d: dialect, model: m, table, params, aliasCount: { n: 0 }, schemaOverride };
@@ -569,10 +576,24 @@ export function compileSelect(
 
   const sql = [
     `SELECT ${distinctClause}${cols} FROM ${table}`,
-    whereClause, orderClause, limit, offset,
+    whereClause, orderClause, limit, offset, compileLockClause(node.lock),
   ].filter(Boolean).join(' ');
 
   return { kind: 'sql', dialect: dialect.name, sql, params };
+}
+
+const LOCK_SQL: Record<RowLockSpec['strength'], string> = {
+  update: 'FOR UPDATE',
+  noKeyUpdate: 'FOR NO KEY UPDATE',
+  share: 'FOR SHARE',
+  keyShare: 'FOR KEY SHARE',
+};
+
+/** `FOR UPDATE [NOWAIT | SKIP LOCKED]` — the last clause of a SELECT. */
+export function compileLockClause(lock: RowLockSpec | undefined): string {
+  if (!lock) return '';
+  const wait = lock.wait === 'nowait' ? ' NOWAIT' : lock.wait === 'skipLocked' ? ' SKIP LOCKED' : '';
+  return `${LOCK_SQL[lock.strength]}${wait}`;
 }
 
 export function compileCount(

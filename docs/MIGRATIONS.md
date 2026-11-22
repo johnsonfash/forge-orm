@@ -1,4 +1,4 @@
-# Migrations — `forge push`, `forge diff`, `forge rollback`, drift, and CI
+# Migrations — `forge push`, `forge migrate`, `forge diff`, `forge rollback`, drift, and CI
 
 Companion to the README's **[Creating tables and migrations](../README.md#creating-tables-and-migrations)** chapter. The README is the one-screen tour: the CLI names, the schema-resolution cascade, the headline flags. This file is the deep reference: every command's exact behaviour, what counts as drift, what gets emitted per dialect, how to wire it into CI, and where the runtime browser path (`db.$migrate()`, since 2.5.1) takes over.
 
@@ -6,7 +6,8 @@ The browser-side equivalents are covered in **[BROWSER.md](./BROWSER.md#dbmigrat
 
 ## Contents
 
-* [The migration model — why there are no migration files](#the-migration-model--why-there-are-no-migration-files)
+* [The migration model — push, or migration files](#the-migration-model--push-or-migration-files)
+* [`forge migrate` — migration files (Postgres)](#forge-migrate--migration-files-postgres)
 * [`forge push`](#forge-push)
 * [`forge diff`](#forge-diff)
 * [`forge diff apply`](#forge-diff-apply)
@@ -26,9 +27,11 @@ The browser-side equivalents are covered in **[BROWSER.md](./BROWSER.md#dbmigrat
 
 ---
 
-## The migration model — why there are no migration files
+## The migration model — push, or migration files
 
-forge is a **declare-and-push** ORM. You write models in TypeScript, and `forge push` reads the schema, introspects the live database, and emits the DDL needed to bring the database forward. There is no `migrations/` folder you hand-edit, no `prisma migrate dev` step, no down-files you wire up by hand. The artefact of "schema at commit X" is the schema file at commit X — nothing else.
+forge supports two models. The default is **declare-and-push**; on Postgres there is also a **migrations folder** applied by [`forge migrate`](#forge-migrate--migration-files-postgres), for hand-written SQL and reviewed, versioned changes. The two compose: `forge generate` writes schema-derived files into the same folder that holds your hand-written ones, and `forge migrate` applies them all in order.
+
+In the push model, forge is a **declare-and-push** ORM. You write models in TypeScript, and `forge push` reads the schema, introspects the live database, and emits the DDL needed to bring the database forward. There is no `migrations/` folder you hand-edit, no `prisma migrate dev` step, no down-files you wire up by hand. The artefact of "schema at commit X" is the schema file at commit X — nothing else.
 
 The trade-off is symmetric:
 
@@ -51,7 +54,78 @@ The reconciliation path — `forge diff apply` + `_forge_migrations` ledger — 
 * A team larger than 4-5 backend engineers committing to the same schema, with code review on the SQL itself, not the schema declaration.
 * You need transformational data migrations baked into the same atomic unit as the DDL — a migration file with a `BEGIN; ALTER TABLE …; UPDATE …; COMMIT;` body is the natural shape.
 
-In those cases, reach for Prisma Migrate, Drizzle Kit migrate, or a hand-rolled SQL migrations folder. forge's `compile.<op>()` API still gives you typed query objects you can paste into a SQL migration; the two models compose.
+On Postgres that is [`forge migrate`](#forge-migrate--migration-files-postgres): a folder of `.sql` files, each applied all-or-nothing with its ledger row, checksummed, and safe to run from every instance at boot. On the other dialects, reach for Prisma Migrate, Drizzle Kit migrate, or a hand-rolled SQL migrations folder.
+
+## `forge migrate` — migration files (Postgres)
+
+```sh
+npx forge migrate                    # apply pending files in ./migrations, in order
+npx forge migrate --dry-run          # list what would run; write nothing
+npx forge migrate --dir=db/migrations
+npx forge migrate status             # applied / pending / out of order / unknown
+```
+
+```ts
+// In-process — the same runner, against the connection the app already has.
+await db.$migrateFiles({ dir: 'migrations', logger: console.log });
+```
+
+The URL is `--url`, else `MIGRATION_DATABASE_URL`, else `DATABASE_URL`. The separate name is for apps whose `DATABASE_URL` goes through a transaction-mode pooler (PgBouncer): run migrations on a direct connection.
+
+### The files
+
+Any `.sql` file in the folder, applied in **name order** (`0001_core.sql`, `0002_trips.sql`, …). The ledger name is the file name without `.sql`.
+
+* **Hand-written SQL needs no markers.** The whole file is the migration: PostGIS `geography` columns, GIST indexes, `CHECK` constraints, `CREATE EXTENSION`, plpgsql functions, triggers, `DO` blocks, `REVOKE` — anything Postgres accepts.
+* **A `forge generate` file** has `-- up` and `-- down` lines; only the up section runs. The down section is what `forge rollback` runs. The markers must be whole lines.
+* An empty file (or the `generate --custom` placeholder) is refused: recording it would make the ledger say something happened.
+
+### All-or-nothing, per file
+
+Each file runs in **one transaction together with the `_forge_migrations` row that records it**. If statement 3 fails, statements 1 and 2 are rolled back and no row is written; files before it stay applied, files after it are not attempted. Fix the file and run again.
+
+The file is sent **as written**, in one round trip over the simple query protocol (node-postgres and postgres.js both support it), so the server does the parsing and `$$` bodies, tagged `$fn$` quotes, `DO` blocks, `E''` strings and `BEGIN ATOMIC` function bodies all work unchanged. A driver without that capability gets the file split by forge's lexer (`splitSqlStatements`), still in the one transaction.
+
+Do **not** put `BEGIN`/`COMMIT` in a file: it would commit the file without its ledger row, so it is refused before anything runs. `SAVEPOINT` / `ROLLBACK TO SAVEPOINT` are fine.
+
+### Files that cannot run in a transaction
+
+`CREATE INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY`, `REINDEX … CONCURRENTLY`, `VACUUM`, `CREATE DATABASE` and a few others are refused by Postgres inside a transaction block. forge catches them **before anything runs** and names the fix. Put the statement in a file of its own that says so:
+
+```sql
+-- forge:no-transaction
+CREATE INDEX CONCURRENTLY IF NOT EXISTS trips_pickup_gix ON trips USING gist (pickup);
+```
+
+Such a file runs one statement at a time on one held connection (under a session advisory lock), and its ledger row is written after the last statement. It is **not** all-or-nothing: if statement 2 fails, statement 1 stays applied and the file is not recorded, so write it to be safe to re-run (`IF NOT EXISTS`). A failed `CREATE INDEX CONCURRENTLY` can leave an `INVALID` index; drop it before re-running. This needs `pgDriver` or `postgresJsDriver` on postgres.js 3.4+ (`reserve()`).
+
+### Checksums and drift
+
+The ledger stores a sha256 of what ran (line endings normalised). A file edited after it ran **stops the run** and names the file. Put it back and add a new migration. Rows written before checksums existed (by `forge diff apply`) have their checksum recorded on the next run.
+
+### Adopting a database that is already migrated
+
+Moving from another runner, the files are already applied and must not run again. Record them by name with no checksum; the next `forge migrate` records each checksum from the file and applies nothing:
+
+```sql
+CREATE TABLE IF NOT EXISTS _forge_migrations (name VARCHAR(255) PRIMARY KEY, applied_at VARCHAR(64));
+INSERT INTO _forge_migrations (name, applied_at) VALUES ('0001_core', now()::text);
+```
+
+### Order and unknown migrations
+
+* A pending file that sorts **before** one already applied is refused (two branches generated in parallel; the later one shipped first). `--allow-out-of-order` / `allowOutOfOrder: true` applies it as it stands.
+* A ledger entry with **no file** in the folder means somebody ran another branch against this database. Refused unless `--allow-unknown` / `allowUnknown: true`.
+
+### Concurrent runs
+
+Every runner takes the same `pg_advisory_xact_lock` that `forge push` takes, per file, and re-reads the ledger once it holds it. So several app instances can call `db.$migrateFiles()` at boot: one applies each file, the others wait and then skip it. Verified with five in-process runners and with two CLI processes started together — every file applied exactly once.
+
+### What it does not do
+
+* It does not generate SQL; `forge generate` does, into the same folder.
+* No automatic down: `forge rollback` runs the latest file's `-- down` section (one transaction on Postgres).
+* Postgres only. MySQL commits DDL implicitly, so "all-or-nothing" cannot be offered there.
 
 ---
 
@@ -313,6 +387,10 @@ CREATE TABLE _forge_migrations (
 * `applied_at` is an ISO-8601 string.
 
 This table is auto-ignored by `forge diff` so it never shows up as drift. You can read it directly with `db.$queryRaw` if you need to expose "what schema state are we on" to ops dashboards.
+
+### On Postgres, one transaction
+
+`forge diff apply` and `forge rollback` both run their statements and the ledger change in one transaction on Postgres: a failure part-way changes nothing, and the ledger row is written (or removed) only if every statement succeeded.
 
 ### `rollback` only goes back one
 
@@ -1486,6 +1564,11 @@ against a snapshot, or against what a database reports. This one compares
 `_forge_migrations`. It is the only command here that genuinely needs
 `DATABASE_URL`, because a database is the only thing that knows what it
 has actually run.
+
+It reads `MIGRATION_DATABASE_URL` first, like `forge migrate`, and loads no
+schema — a project whose migrations are hand-written SQL can run it as is.
+Ledger names are compared without `.sql`, so a migration recorded by `forge
+diff apply` or `forge migrate` matches its file.
 
 ```
   migrations

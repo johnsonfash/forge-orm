@@ -5,6 +5,8 @@ import type {
   GroupByNode,
   InsertNode,
   RelationPlan,
+  RowLockSpec,
+  RowLockStrength,
   SelectNode,
   UpdateNode,
 } from '../types';
@@ -34,6 +36,39 @@ export interface BuildSelectArgs {
   offset?: number;
   cursor?: any;
   distinct?: string[];
+  lock?: RowLockOption;
+}
+
+/**
+ * The `lock:` option on findFirst / findUnique / findMany.
+ *
+ *   lock: 'update'                                  // FOR UPDATE
+ *   lock: { mode: 'update', skipLocked: true }      // FOR UPDATE SKIP LOCKED
+ *   lock: { mode: 'share', nowait: true }           // FOR SHARE NOWAIT
+ */
+export type RowLockOption =
+  | RowLockStrength
+  | { mode: RowLockStrength; nowait?: boolean; skipLocked?: boolean };
+
+const LOCK_STRENGTHS: readonly RowLockStrength[] = ['update', 'noKeyUpdate', 'share', 'keyShare'];
+
+export function normaliseLock(lock: RowLockOption | undefined): RowLockSpec | undefined {
+  if (lock == null) return undefined;
+  const mode = typeof lock === 'string' ? lock : lock.mode;
+  if (!LOCK_STRENGTHS.includes(mode)) {
+    throw new Error(
+      `[forge] lock: '${String(mode)}' is not a lock mode. Use one of ` +
+      `${LOCK_STRENGTHS.map((m) => `'${m}'`).join(', ')}.`,
+    );
+  }
+  if (typeof lock === 'string') return { strength: mode };
+  if (lock.nowait && lock.skipLocked) {
+    throw new Error(`[forge] lock: nowait and skipLocked cannot both be set — one fails, the other skips.`);
+  }
+  return {
+    strength: mode,
+    ...(lock.nowait ? { wait: 'nowait' as const } : lock.skipLocked ? { wait: 'skipLocked' as const } : {}),
+  };
 }
 
 export function buildSelect(
@@ -66,6 +101,8 @@ export function buildSelect(
     cursor: buildCursor(a.cursor),
     distinct: a.distinct?.length ? a.distinct : undefined,
   };
+  const lock = normaliseLock(a.lock);
+  if (lock) node.lock = lock;
   return node;
 }
 

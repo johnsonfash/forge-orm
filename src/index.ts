@@ -15,7 +15,14 @@ export type { WasmDriverOptions } from './adapters/sqlite/wasm-driver';
 // Pluggable Postgres drivers — pg (default) or postgres.js.
 //   createDb({ schema, driver: postgresJsDriver(postgres(url)) })
 export { pgDriver, postgresJsDriver, isPostgresDriver } from './adapters/postgres/driver';
-export type { PostgresDriver, PgQueryable } from './adapters/postgres/driver';
+export type { PostgresDriver, PgQueryable, PgReservedSession } from './adapters/postgres/driver';
+// Migration files: run with `forge migrate` or `db.$migrateFiles()`. Types
+// only here — the runner reads the filesystem and is loaded on demand.
+export type {
+  MigrateFilesOptions, MigrateFilesReport, MigrationFile,
+} from './adapters/postgres/migrate-files-types';
+export { splitSqlStatements } from './scripts/sql-split';
+export type { SplitDialect, SplitStatement } from './scripts/sql-split';
 // Pluggable MySQL drivers — mysql2 (default), mariadb, or PlanetScale.
 export { mysql2Driver, mariadbDriver, planetscaleDriver, isMysqlDriver } from './adapters/mysql/driver';
 export type { MysqlDriver, MysqlQueryable } from './adapters/mysql/driver';
@@ -46,8 +53,9 @@ export type {
   IRNode,
   SelectNode, InsertNode, UpdateNode, DeleteNode, CountNode, AggregateNode,
   WhereTree, WhereLeaf, WhereAnd, WhereOr, WhereNot, WhereRelation, WhereOp,
-  ProjectionPlan, RelationPlan, OrderByEntry, CursorSpec,
+  ProjectionPlan, RelationPlan, OrderByEntry, CursorSpec, RowLockSpec, RowLockStrength,
 } from './ir/types';
+export type { RowLockOption } from './ir/build';
 export {
   buildSelect, buildCount, buildInsert, buildUpdate, buildDelete, buildGroupBy,
   buildWhereTree, buildOrderBy, buildProjection, buildUpdateData, buildCursor,

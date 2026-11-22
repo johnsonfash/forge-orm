@@ -64,8 +64,13 @@ export function buildStatus(
   applied: { name: string; appliedAt: string | null }[],
   dir: string,
 ): StatusReport {
-  const appliedByName = new Map(applied.map((a) => [a.name, a.appliedAt]));
-  const localSet = new Set(local);
+  // The ledger holds names WITHOUT `.sql` (that is what `diff apply`,
+  // `rollback` and `migrate` write) while the folder lists file names, so
+  // every comparison goes through one key. Without it a migration applied
+  // by `diff apply` reported as pending AND as not in this checkout.
+  const key = (n: string) => n.replace(/\.sql$/i, '');
+  const appliedByName = new Map(applied.map((a) => [key(a.name), a.appliedAt]));
+  const localSet = new Set(local.map(key));
   const rows: MigrationStatus[] = [];
 
   // The highest applied name THIS CHECKOUT ALSO HAS. Anything pending
@@ -78,16 +83,17 @@ export function buildStatus(
   // current state") that does not address the real cause. A safety check
   // that fires on innocent files is one people learn to scroll past.
   // The unknown block carries the ordering warning instead.
-  const knownApplied = applied.map((a) => a.name).filter((n) => localSet.has(n));
-  const highestApplied = knownApplied.length ? knownApplied.sort().slice(-1)[0]! : null;
+  const knownApplied = local.filter((n) => appliedByName.has(key(n)));
+  const highestName = knownApplied.length ? knownApplied.sort().slice(-1)[0]! : null;
+  const highestApplied = highestName ? key(highestName) : null;
 
   for (const name of local) {
-    if (appliedByName.has(name)) {
-      rows.push({ name, state: 'applied', appliedAt: appliedByName.get(name) ?? null });
+    if (appliedByName.has(key(name))) {
+      rows.push({ name, state: 'applied', appliedAt: appliedByName.get(key(name)) ?? null });
       continue;
     }
-    if (highestApplied && name < highestApplied) {
-      rows.push({ name, state: 'out-of-order', behind: highestApplied });
+    if (highestApplied && key(name) < highestApplied) {
+      rows.push({ name, state: 'out-of-order', behind: highestName! });
       continue;
     }
     rows.push({ name, state: 'pending' });
@@ -96,7 +102,7 @@ export function buildStatus(
   // In the ledger, not in this checkout. Listed after the local ones
   // because their position in the sequence is exactly what is unknown.
   for (const a of applied) {
-    if (localSet.has(a.name)) continue;
+    if (localSet.has(key(a.name))) continue;
     rows.push({ name: a.name, state: 'unknown', appliedAt: a.appliedAt });
   }
 

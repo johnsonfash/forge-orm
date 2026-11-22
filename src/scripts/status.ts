@@ -3,7 +3,6 @@ import * as dotenv from 'dotenv';
 dotenv.config();
 
 import { createDb } from '../factory';
-import { loadConsumerSchema } from './load-consumer-schema';
 import {
   MIGRATIONS_DIR,
   ensureHistoryTable,
@@ -23,7 +22,7 @@ import { buildStatus, formatStatus, listLocalMigrations } from './migrate-status
 // reality.
 
 async function main(): Promise<void> {
-  const url = process.env.DATABASE_URL;
+  const url = process.env.MIGRATION_DATABASE_URL ?? process.env.DATABASE_URL;
   if (!url) {
     console.error(
       '[forge:status] DATABASE_URL is not set. This is the one command that ' +
@@ -34,8 +33,9 @@ async function main(): Promise<void> {
   }
   const check = process.argv.includes('--check');
 
-  const { schema } = loadConsumerSchema();
-  const db = (await createDb({ url, schema })) as never as Parameters<typeof ensureHistoryTable>[0];
+  // The ledger is all this reads, so no schema is loaded: a project whose
+  // migrations are hand-written SQL can ask what has run without one.
+  const db = (await createDb({ url })) as never as Parameters<typeof ensureHistoryTable>[0];
 
   try {
     await ensureHistoryTable(db);

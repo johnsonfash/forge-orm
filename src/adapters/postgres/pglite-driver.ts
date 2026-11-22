@@ -32,6 +32,7 @@ export function pgliteDataDir(url: string): string | undefined {
  */
 export function pgliteDriver(pg: {
   query(sql: string, params?: unknown[]): Promise<{ rows: unknown[]; affectedRows?: number }>;
+  exec?(sql: string): Promise<unknown>;
   close(): Promise<void>;
 }): PostgresDriver {
   const queryable: PgQueryable = {
@@ -45,6 +46,9 @@ export function pgliteDriver(pg: {
         rowCount: (r.affectedRows ?? r.rows.length) as number,
       };
     },
+    ...(typeof pg.exec === 'function'
+      ? { exec: async (sql: string) => { await pg.exec!(sql); } }
+      : {}),
   };
   return {
     kind: 'postgres',

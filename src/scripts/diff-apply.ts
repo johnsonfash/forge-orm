@@ -7,7 +7,7 @@ import { generateMigration } from './migrate-gen';
 import { loadConsumerSchema } from './load-consumer-schema';
 import {
   ensureHistoryTable, listApplied, rawExec, recordMigration,
-  renderMigrationFile, splitStatements, timestampSlug, writeMigrationFile,
+  renderMigrationFile, splitDialectFor, splitStatements, timestampSlug, writeMigrationFile,
 } from './migrate-runtime';
 
 // forge:diff:apply — generate a reconciliation migration from live drift and
@@ -53,13 +53,8 @@ async function main() {
     await ensureHistoryTable(db);
     if ((await listApplied(db)).includes(name)) { console.log('[forge:diff:apply] already applied.'); return; }
 
-    const statements = splitStatements(ups.join(';\n'));
-    let applied = 0;
-    for (const s of statements) {
-      try { await rawExec(db, s); applied++; }
-      catch (e: any) { console.error(`  ✗ failed: ${s}\n    ${e.message}`); throw e; }
-    }
-    if (applied === 0) {
+    const statements = splitStatements(ups.join(';\n'), splitDialectFor(db.adapter.kind));
+    if (statements.length === 0) {
       // The mirror of the rollback case: recording a migration as applied when
       // nothing ran makes the ledger lie. It happens for real — a diff whose
       // only entries are the SQLite "cannot ALTER ADD FOREIGN KEY" comment
@@ -74,8 +69,19 @@ async function main() {
       process.exitCode = 1;
       return;
     }
-    await recordMigration(db, name);
-    console.log(`[forge:diff:apply] applied ${applied} statement(s); recorded migration '${name}'.`);
+    // Postgres DDL is transactional, so the statements and the ledger row go
+    // in together: a failure part-way leaves neither. Elsewhere (MySQL
+    // commits DDL implicitly) the statements run one by one as before.
+    const run = async (q: any) => {
+      for (const s of statements) {
+        try { await rawExec(q, s); }
+        catch (e: any) { console.error(`  ✗ failed: ${s}\n    ${e.message}`); throw e; }
+      }
+      await recordMigration(q, name);
+    };
+    if (db.adapter.kind === 'postgres') await db.$transaction(run);
+    else await run(db);
+    console.log(`[forge:diff:apply] applied ${statements.length} statement(s); recorded migration '${name}'.`);
   } finally {
     await db.$disconnect();
   }

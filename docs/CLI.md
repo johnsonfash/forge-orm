@@ -2,7 +2,7 @@
 
 Full reference for the `forge` command — every subcommand, every flag, every exit code, plus the runtime API equivalents.
 
-The CLI is a thin dispatcher over seven subcommand entry points (`push`, `diff`, `diff apply`, `generate`, `migrate status`, `rollback`, `doctor`). Each one reads `DATABASE_URL` from `.env` or the environment, resolves the schema through a fixed cascade, and shells out to the dialect-specific introspect/emit code. There are no global flags besides `--help`. Every subcommand owns its own flag set, documented below.
+The CLI is a thin dispatcher over eight subcommand entry points (`push`, `diff`, `diff apply`, `generate`, `migrate`, `migrate status`, `rollback`, `doctor`). Each one reads `DATABASE_URL` from `.env` or the environment, resolves the schema through a fixed cascade, and shells out to the dialect-specific introspect/emit code. There are no global flags besides `--help`. Every subcommand owns its own flag set, documented below.
 
 The migration-model background — *why* push is additive-only, *why* there are no migration files by default — lives in **[MIGRATIONS.md](./MIGRATIONS.md)**. This file is the flag-by-flag reference for the binary itself.
 
@@ -56,6 +56,7 @@ The `forge.schema` field is the second step of the schema-resolution cascade (af
 | `forge diff` | Read-only drift report between schema and live DB. `--check` for CI gate, `--json` for tooling. | No |
 | `forge diff apply` | Generate a reconciliation migration file (`up`/`down`) for the current drift, apply it forward, record in `_forge_migrations`. | Yes |
 | `forge generate` | Write a migration by diffing the schema against the last committed snapshot. **No database.** | Files only |
+| `forge migrate` | Apply pending `.sql` files in `migrations/` in order (Postgres): each file in one transaction with its ledger row, checksummed, advisory-locked. `--dry-run`, `--dir`, `--url`, `--allow-out-of-order`, `--allow-unknown`. See [MIGRATIONS.md](./MIGRATIONS.md#forge-migrate--migration-files-postgres). | Yes |
 | `forge migrate status` | Compare `migrations/` against the `_forge_migrations` ledger. Reports applied, pending, out-of-order, and applied-but-absent. | No |
 | `forge rollback` | Run the `down` block of the most-recently-applied migration. | Yes |
 | `forge doctor` | Driver inventory + URL shape check + schema lint + live capability probe. Pre-flight before anything else. | No |
@@ -771,6 +772,7 @@ Every CLI subcommand has a runtime equivalent. Useful inside the app process —
 | `forge diff apply` | (no direct API) — use `db.$diff()` + `compile.<op>()` + `$executeRaw` | composable in code |
 | `forge rollback` | (no direct API) — read `_forge_migrations` via `$queryRaw`, run down SQL via `$executeRaw` | composable in code |
 | `forge doctor` | `db.$doctor()` | sqlite-wasm gets the rich `BrowserDoctorReport`; other adapters get the per-adapter `DoctorReport` |
+| `forge migrate` | `db.$migrateFiles({ dir })` | same runner, same lock |
 | `forge migrate status` | (no direct API) — read `_forge_migrations` via `$queryRaw` and compare against `migrations/` | composable in code |
 | (no CLI) | `db.$explain(fn, { analyze? })` | every adapter with a compile API — see [EXPLAIN.md](./EXPLAIN.md) |
 

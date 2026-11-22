@@ -5,7 +5,7 @@ dotenv.config();
 import { createDb } from '../factory';
 import {
   ensureHistoryTable, listApplied, parseMigrationFile, planRollback, rawExec,
-  readMigrationFile, removeMigration,
+  readMigrationFile, removeMigration, splitDialectFor,
 } from './migrate-runtime';
 
 // forge:rollback — run the `down` block of the most-recently-applied migration
@@ -32,17 +32,23 @@ async function main() {
       process.exit(1);
     }
     const { down } = parseMigrationFile(content);
-    const { statements, refusal } = planRollback(latest, down);
+    const { statements, refusal } = planRollback(latest, down, splitDialectFor(db.adapter.kind));
     if (refusal) {
       console.error(`[forge:rollback] ${refusal}`);
       process.exit(1);
     }
     console.log(`[forge:rollback] rolling back '${latest}' (${statements.length} statement(s))`);
-    for (const s of statements) {
-      try { await rawExec(db, s); }
-      catch (e: any) { console.error(`  ✗ failed: ${s}\n    ${e.message}`); throw e; }
-    }
-    await removeMigration(db, latest);
+    // One transaction on Postgres, as for the up: a down that fails part-way
+    // must not leave the ledger row deleted with half the reversal applied.
+    const run = async (q: any) => {
+      for (const s of statements) {
+        try { await rawExec(q, s); }
+        catch (e: any) { console.error(`  ✗ failed: ${s}\n    ${e.message}`); throw e; }
+      }
+      await removeMigration(q, latest);
+    };
+    if (db.adapter.kind === 'postgres') await db.$transaction(run);
+    else await run(db);
     console.log(`[forge:rollback] rolled back '${latest}'.`);
   } finally {
     await db.$disconnect();

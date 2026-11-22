@@ -177,6 +177,16 @@ export type ForgeDb<S extends SchemaShape = SchemaMap> = Collections<S> & {
     dryRun?: boolean;
     prune?: boolean;
   }): Promise<import('./wasm/migrate').RuntimeApplyReport>;
+  // Apply the hand-written / generated `.sql` files in a migrations folder,
+  // in order — the in-process `forge migrate`. Postgres only. Each file runs
+  // in its own transaction with the ledger row that records it; checksums
+  // catch a file edited after it ran; an advisory lock lets every instance
+  // call this at boot and still apply each file exactly once.
+  //
+  //   await db.$migrateFiles({ dir: 'migrations' });
+  $migrateFiles(
+    opts?: import('./adapters/postgres/migrate-files').MigrateFilesOptions,
+  ): Promise<import('./adapters/postgres/migrate-files').MigrateFilesReport>;
   // Runtime capability probe — the browser/wasm replacement for `forge doctor`.
   // On sqlite adapters (including the wasm one) returns the rich
   // BrowserDoctorReport (environment + sqlite + capabilities + notes); on
@@ -230,7 +240,7 @@ const PROXY_PASSTHROUGH = new Set<PropertyKey>([
 // than claiming keys whose access would throw.
 const DB_HELPER_KEYS = new Set<string>([
   'adapter', '$models', '$transaction', '$runCommandRaw', '$queryRaw',
-  '$executeRaw', '$ping', '$disconnect', '$migrate', '$doctor', '$diff', '$explain',
+  '$executeRaw', '$ping', '$disconnect', '$migrate', '$migrateFiles', '$doctor', '$diff', '$explain',
   '$on', '$off',
 ]);
 const TX_HELPER_KEYS = new Set<string>([
@@ -431,6 +441,7 @@ function makeDb(
       if (key === '$ping') return $ping;
       if (key === '$disconnect') return () => adapter.close();
       if (key === '$migrate') return $migrate;
+      if (key === '$migrateFiles') return $migrateFiles;
       if (key === '$doctor') return $doctor;
       if (key === '$diff') return $diff;
       if (key === '$explain') return $explain;
@@ -871,6 +882,20 @@ function makeDb(
       `[forge] $migrate() is only supported on mongo, sqlite, postgres and ` +
       `indexeddb adapters today. For ${adapter.kind} use the CLI: 'npx forge push'.`,
     );
+  }
+
+  async function $migrateFiles(
+    opts?: import('./adapters/postgres/migrate-files').MigrateFilesOptions,
+  ) {
+    if (adapter.kind !== 'postgres') {
+      throw new Error(
+        `[forge] $migrateFiles() runs .sql migration files on postgres only; this db is ` +
+        `${adapter.kind}. Use $migrate() to sync the schema instead.`,
+      );
+    }
+    const { applyMigrationFiles } = await import('./adapters/postgres/migrate-files');
+    const driver = (adapter as unknown as { driver: import('./adapters/postgres/driver').PostgresDriver }).driver;
+    return applyMigrationFiles(driver, opts);
   }
 
   // Runtime capability probe. sqlite adapter routes through the rich

@@ -12,6 +12,9 @@ forge — schema sync for MongoDB, PostgreSQL, MySQL & SQLite.
 
 Usage:
   forge generate              Write a migration from the last snapshot (no DB)
+  forge migrate               Apply pending .sql files in migrations/, in order,
+                              each in its own transaction (postgres)
+  forge migrate --dry-run     List what would run; write nothing
   forge migrate status        What has run, what has not, what should not have
   forge push                  Idempotently sync your schema to the live DB
   forge push --dry-run        Report what push WOULD do; write nothing (Mongo)
@@ -59,7 +62,29 @@ Full docs: https://github.com/johnsonfash/forge-orm#readme
 
 /** What each subcommand does, for `forge <cmd> --help`. */
 const SUBCOMMAND_HELP: Record<string, string> = {
-  migrate: `forge migrate status — what the database has actually applied.
+  migrate: `forge migrate — apply the pending .sql files in migrations/ (postgres).
+
+  Files apply in name order. A file may be hand-written SQL (functions,
+  triggers, PostGIS columns, CHECK constraints, anything) or a \`forge
+  generate\` file; in the latter only its \`-- up\` section runs.
+
+  Each file runs in ONE transaction together with its row in
+  _forge_migrations: a file that fails part-way leaves nothing behind.
+  The file is sent as written, so $$ bodies and DO blocks need no care.
+  A file that must run outside a transaction (CREATE INDEX CONCURRENTLY)
+  says so on a line of its own:  -- forge:no-transaction
+
+  A file edited after it ran stops the run (checksum). Concurrent runs
+  wait on an advisory lock and apply each file exactly once.
+
+    --dry-run              list what would run; write nothing
+    --dir=<path>           folder other than ./migrations
+    --url=<url>            else MIGRATION_DATABASE_URL, else DATABASE_URL
+    --allow-out-of-order   apply a file numbered behind an applied one
+    --allow-unknown        proceed although the database has applied
+                           migrations this folder does not contain
+
+forge migrate status — what the database has actually applied.
 
   Four states, two of which no other tool reports:
     applied        in the ledger and in this checkout
@@ -161,7 +186,13 @@ async function main() {
         await import('./status');
         return;
       }
-      console.error(`[forge] usage: forge migrate status`);
+      if (args[1] === undefined || args[1].startsWith('-') || args[1] === 'up' || args[1] === 'deploy') {
+        const rest = args[1] && !args[1].startsWith('-') ? args.slice(2) : args.slice(1);
+        process.argv = [process.argv[0], process.argv[1], ...rest];
+        await import('./migrate-apply');
+        return;
+      }
+      console.error(`[forge] usage: forge migrate [--dry-run] | forge migrate status`);
       process.exit(1);
       return;
     }

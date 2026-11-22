@@ -13,6 +13,14 @@ export type IRNode =
   | AggregateNode
   | GroupByNode;
 
+export type RowLockStrength = 'update' | 'noKeyUpdate' | 'share' | 'keyShare';
+
+/** Normalised `lock:` option. `wait` absent = block until the lock is free. */
+export interface RowLockSpec {
+  strength: RowLockStrength;
+  wait?: 'nowait' | 'skipLocked';
+}
+
 export interface SelectNode {
   kind: 'select';
   model: string;                  // schema key (e.g. 'user'), not collection name
@@ -24,6 +32,8 @@ export interface SelectNode {
   offset?: number;
   cursor?: CursorSpec;
   distinct?: string[];
+  // Row lock taken by the SELECT (postgres): FOR UPDATE / FOR SHARE etc.
+  lock?: RowLockSpec;
   // Cardinality intent: 'one' for findFirst/findUnique, 'many' for findMany.
   // Drivers may optimise differently (e.g. Mongo `findOne` vs `find().limit(1)`).
   cardinality: 'one' | 'many';

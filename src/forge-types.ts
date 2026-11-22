@@ -47,6 +47,7 @@ export type PerModelTypes<M> = M extends TypedModel<infer F, infer R>
         skip?: number; offset?: number;
         cursor?: { [k: string]: any };
         distinct?: Array<keyof F & string>;
+        lock?: import('./ir/build').RowLockOption;
       };
       FindManyArgs: PerModelTypes<M>['FindFirstArgs'];
       FindUniqueArgs: {
@@ -54,6 +55,7 @@ export type PerModelTypes<M> = M extends TypedModel<infer F, infer R>
         select?: SelectInputFor<F, R, SchemaMap>;
         include?: IncludeInputFor<R, SchemaMap>;
         omit?: { [K in keyof F]?: boolean };
+        lock?: import('./ir/build').RowLockOption;
       };
       CreateArgs: { data: CreateInputT<F, R>; select?: SelectInputFor<F, R, SchemaMap>; include?: IncludeInputFor<R, SchemaMap> };
       CreateManyArgs: { data: CreateInputT<F, R>[]; skipDuplicates?: boolean };

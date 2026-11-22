@@ -2,7 +2,7 @@
 
 Explicit pessimistic locking — row locks (SELECT FOR UPDATE), shared locks, advisory locks, SKIP LOCKED for work queues. This page documents what each dialect supports, what forge exposes, and the lock-ordering / lock-timeout / deadlock-retry patterns that keep systems live under contention.
 
-The [Transactions deep-dive](./TRANSACTIONS.md) covers `$transaction` itself; this doc is the layer above — what happens *inside* the tx callback when two writers want the same row. The README never mentions row locks because the wrapper has no first-class API for them: every example below is forge's raw-SQL escape hatch (`tx.$executeRaw`, `tx.$queryRaw`) issuing the dialect's locking statement, with the wrapper layer used for the rest of the tx body.
+The [Transactions deep-dive](./TRANSACTIONS.md) covers `$transaction` itself; this doc is the layer above — what happens *inside* the tx callback when two writers want the same row. On Postgres, row locks are a `lock:` option on the read API; on the other dialects the examples below use forge's raw-SQL escape hatch (`tx.$executeRaw`, `tx.$queryRaw`) issuing the dialect's locking statement, with the wrapper layer used for the rest of the tx body.
 
 Everything below assumes 2.5.x. The implementation files worth knowing about are `src/factory.ts` (where the `tx` proxy hands a `session` to every wrapped call), `src/adapters/<dialect>/adapter.ts` for the per-dialect raw paths, and `src/adapters/postgres/migrate.ts` — the one place inside forge itself that takes a lock (a transaction-scoped advisory lock around `forge push` so two concurrent CI deploys don't race the DDL plan).
 
@@ -38,21 +38,41 @@ Everything below assumes 2.5.x. The implementation files worth knowing about are
 
 ## What forge exposes
 
-Forge does not have a `{ lock: 'forUpdate' }` option on `findFirst` / `findMany`. There is no `tx.user.findFirst({ where: { id }, lock: 'forUpdate' })`. There is no `tx.account.lock(...)` helper, no `lockMode` field in the query IR, no per-dialect lock translator. The thinking is the same one behind isolation levels (see [TRANSACTIONS.md › Isolation levels](./TRANSACTIONS.md#isolation-levels)) — every dialect spells row locking differently enough (`FOR UPDATE` vs `WITH (UPDLOCK)` vs raw findOneAndUpdate semantics on Mongo) that a single typed surface would either be a lowest-common-denominator pretence at portability or a sprawling discriminated union nobody uses. Both are worse than "drop to raw SQL inside the tx," so that's what forge does.
+**Row locks are an option on the read API (Postgres).** `findFirst`, `findUnique`, `findMany` and the `OrThrow` forms take `lock`:
 
-What you do get:
+```ts
+await db.$transaction(async (tx) => {
+  const acct = await tx.account.findUniqueOrThrow({ where: { id: acctId }, lock: 'update' });
+  if (acct.balance < amount) throw new Error('insufficient');
+  await tx.account.update({ where: { id: acctId }, data: { balance: { decrement: amount } } });
+});
+```
 
-* **`tx.$queryRaw` / `tx.$executeRaw`** — issue the dialect's locking statement directly against the tx session. The lock is held for the rest of the tx; the row(s) it returned are typed `unknown[]` from the `$queryRaw` tag, but you usually only need the ids and you already know them.
-* **The tx session itself.** Forge guarantees every wrapped call on `tx.x` runs against the same connection / `ClientSession` that `tx.$executeRaw` runs against — there's no risk of "the lock is on connection A and the update is on connection B" the way you'd see with naive pool reuse. See [TRANSACTIONS.md › Per-dialect tx semantics](./TRANSACTIONS.md#per-dialect-tx-semantics) for the underlying handle types.
-* **The `pg_advisory_xact_lock` precedent.** Forge itself takes an advisory lock during `forge push` (`src/adapters/postgres/migrate.ts:78`) so two concurrent migration runs serialise instead of racing the DDL plan. That's the same pattern your application code uses for cross-row coordination.
+| `lock:` | SQL appended to the SELECT |
+| --- | --- |
+| `'update'` | `FOR UPDATE` |
+| `'noKeyUpdate'` | `FOR NO KEY UPDATE` |
+| `'share'` | `FOR SHARE` |
+| `'keyShare'` | `FOR KEY SHARE` |
+| `{ mode: 'update', skipLocked: true }` | `FOR UPDATE SKIP LOCKED` |
+| `{ mode: 'share', nowait: true }` | `FOR SHARE NOWAIT` |
+
+Rules the option enforces:
+
+* **Only inside a transaction.** Outside one, Postgres runs the SELECT in its own implicit transaction and releases the lock as soon as the rows come back, so the call would read as locked and lock nothing. forge throws instead. Calling `db.<model>` (not `tx.<model>`) inside a `$transaction` callback is fine — the ambient session carries the lock.
+* **Postgres only** (PGlite included). The other dialects refuse it rather than emit SQL they do not speak: MSSQL locks with table hints, SQLite and DuckDB have no row locks, Mongo has none at all.
+* `nowait` and `skipLocked` are exclusive. `NOWAIT` fails with SQLSTATE `55P03` (lock_not_available).
+* The lock covers the rows of the model being read. Relations pulled in with `include` are separate queries and are **not** locked.
+* Postgres refuses `FOR UPDATE` with `distinct` (it becomes `DISTINCT ON`); the server's error is what you get.
+
+**Raw SQL still works**, for anything the option does not cover (`FOR UPDATE OF`, `LOCK TABLE`, advisory locks): `tx.$queryRaw` / `tx.$executeRaw` run on the same connection as every `tx.<model>` call, so a lock taken raw holds for the wrapped calls that follow. `regression-pg-locking.ts` proves both forms with two real connections: the waiter appears in `pg_stat_activity` on a Lock, SKIP LOCKED claims the next row at once, NOWAIT fails immediately, and two `FOR SHARE` holders coexist while a `FOR UPDATE` waits for both.
+
+**forge's own lock**: `forge push`, `forge migrate` and `db.$migrateFiles()` all take `pg_advisory_xact_lock(0x6f6f7267, 0x65000001)` (`src/adapters/postgres/migrate.ts`), so concurrent deploys serialise.
 
 What you don't get:
 
-* A typed "find this row and lock it" wrapper. You write `await tx.$queryRaw` ... `FOR UPDATE` and you read the rows back as `unknown[]`.
-* Cross-dialect lock translation. `FOR UPDATE` works on Postgres and MySQL; on MSSQL you write `WITH (UPDLOCK, HOLDLOCK)`; on Mongo you don't lock at all, you use `findOneAndUpdate` or optimistic versioning. There's no shared vocab.
+* Cross-dialect lock translation. On MySQL write `FOR UPDATE` through `tx.$queryRaw`; on MSSQL `WITH (UPDLOCK, HOLDLOCK)`; on Mongo use `findOneAndUpdate` or optimistic versioning.
 * Automatic retry on lock timeout or deadlock. Forge maps the error codes (`P2034` — see [ERRORS.md › Retry classes](./ERRORS.md#retry-classes--transient-vs-permanent)) but the `for` loop around `db.$transaction(...)` is yours to write. The pattern is at [TRANSACTIONS.md › Deadlock and serialization-failure retry](./TRANSACTIONS.md#deadlock-and-serialization-failure-retry).
-
-The doc below shows what to write per-dialect. The mental model is consistent: open a `$transaction`, issue a raw locking statement against `tx`, do the work with the wrapped API, let the tx commit to release.
 
 ---
 
@@ -824,6 +844,8 @@ For single-row inventory updates this is usually the better choice — fewer rou
 ### (b) Job queue with `SKIP LOCKED`
 
 N worker processes drain a `job` table. Every worker calls `claimJob()` in a loop; each call should return a distinct row or `null` if the queue is empty.
+
+On Postgres the claim is one typed call — `tx.job.findMany({ where: { status: 'pending' }, orderBy: { created_at: 'asc' }, take: 1, lock: { mode: 'update', skipLocked: true } })`. The raw form below is the same SQL and also runs on MySQL 8.0+.
 
 ```ts
 const Job = model('job', {

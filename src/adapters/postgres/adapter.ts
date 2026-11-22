@@ -51,6 +51,13 @@ export class PostgresAdapter implements Adapter {
         idleTimeoutMillis: 10_000,
         connectionTimeoutMillis: 10_000,
       });
+      // An idle client whose server connection dies (a Postgres restart, a terminated
+      // backend) makes the pool emit 'error'. With no listener Node treats that as an
+      // uncaught exception and the process exits. The pool already drops the broken
+      // client and opens a new one on the next query, so report it and carry on.
+      pool.on('error', (err: Error) => {
+        process.emitWarning(`forge-orm: idle Postgres connection lost (${err.message}); the pool will reconnect`);
+      });
       this._rawPool = pool;
       this._driver = pgDriver(pool);
     }

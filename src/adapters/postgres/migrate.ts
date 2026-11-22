@@ -4,10 +4,12 @@ import type { PgPoolHandle } from './execute';
 // Migration runner for Postgres. Each statement is wrapped in a savepoint so a
 // single failure rolls back that statement without aborting the whole batch.
 //
-// Intentionally NOT implemented:
-//   • Migration journal / history (Prisma's _prisma_migrations equivalent).
-//     We push-on-startup style; for production drift detection, run
-//     forge:push against staging first and inspect the plan.
+// This is the PUSH path, which keeps no history and is best-effort by
+// design (a failed statement is rolled back to its savepoint and the rest
+// commit). The migrations-folder path — history table, checksums, one
+// transaction per file — is migrate-files.ts (`forge migrate`).
+//
+// Intentionally NOT implemented here:
 //   • Renaming detection (ALTER TABLE … RENAME). Removing a model and adding
 //     another emits DROP + CREATE; data is preserved only when the name is kept.
 //   • Column type changes (ALTER TABLE … ALTER COLUMN). Existing columns are
@@ -19,8 +21,8 @@ import type { PgPoolHandle } from './execute';
 // ddl.ts for what that cost and how nullability is handled.
 
 // Stable lock id, frozen so all forge:push invocations share the same lock.
-const ADVISORY_LOCK_HI = 0x6f6f7267; // "forg"
-const ADVISORY_LOCK_LO = 0x65000001; // "e" + version
+export const ADVISORY_LOCK_HI = 0x6f6f7267; // "forg"
+export const ADVISORY_LOCK_LO = 0x65000001; // "e" + version
 
 export interface MigrationPlan {
   toApply: DDLStatement[];

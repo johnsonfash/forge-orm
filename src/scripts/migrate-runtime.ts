@@ -2,10 +2,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { ForgeDb } from '../factory';
 import type { SqlFragment } from '../raw-sql';
+import { splitSqlStatements, type SplitDialect } from './sql-split';
 
 // Shared runtime for the migration workflow: a portable `_forge_migrations`
 // history table, timestamped up/down files, and apply/rollback helpers.
-// Used by diff-apply.ts and rollback.ts.
+// Used by diff-apply.ts, rollback.ts and adapters/postgres/migrate-files.ts.
 
 export const MIGRATIONS_DIR = path.resolve(process.cwd(), 'migrations');
 
@@ -53,46 +54,21 @@ export async function removeMigration(db: ForgeDb, name: string): Promise<void> 
 }
 
 // Split a migration block into individual executable statements, dropping
-// comment-only and blank lines (so `-- note` lines never hit the driver).
+// comment-only and blank ones (so `-- note` lines never hit the driver).
 //
-// The comment test is per LINE, not per statement. A generated `down` can
-// open with a warning ahead of its SQL (alter-column.ts does this for a
-// narrowing), and one of those lines ends in `;` — so testing `/^--/`
-// against the whole chunk classified `-- review…\nALTER TABLE …` as a
-// comment and silently discarded the ALTER.
-//
-// Only the LEADING run of comment lines is stripped. Once real SQL has
-// started a `--` is left where it is: inside a string literal it is not a
-// comment, and forge cannot tell which it is without a lexer. A `;` inside
-// a string literal still splits the statement for the same reason.
-export function splitStatements(block: string): string[] {
-  const out: string[] = [];
-  for (const chunk of block.split(/;\s*(?:\n|$)/)) {
-    const sql = stripLeadingComments(chunk);
-    if (sql.length > 0) out.push(sql);
-  }
-  return out;
+// This used to be `block.split(/;\s*\n/)`, which cut a plpgsql function
+// body at every `;` inside its `$$ … $$`, and split string literals and
+// comments that held a semicolon. sql-split.ts is the lexer that replaced it.
+// Leading comments are still stripped per statement: a generated `down` can
+// open with a warning whose last line ends in `;` (alter-column.ts does this
+// for a narrowing), and that must not swallow the ALTER after it.
+export function splitStatements(block: string, dialect: SplitDialect = 'generic'): string[] {
+  return splitSqlStatements(block, dialect).map((s) => s.sql);
 }
 
-function stripLeadingComments(chunk: string): string {
-  let s = chunk.trim();
-  for (;;) {
-    if (s.startsWith('--')) {
-      const nl = s.indexOf('\n');
-      if (nl === -1) return '';
-      s = s.slice(nl + 1).trim();
-      continue;
-    }
-    if (s.startsWith('/*')) {
-      const end = s.indexOf('*/');
-      // Unterminated: the split landed inside the block comment, so nothing
-      // in this chunk is executable.
-      if (end === -1) return '';
-      s = s.slice(end + 2).trim();
-      continue;
-    }
-    return s;
-  }
+/** The split dialect for an adapter kind. */
+export function splitDialectFor(kind: string): SplitDialect {
+  return kind === 'postgres' || kind === 'mysql' || kind === 'sqlite' ? kind : 'generic';
 }
 
 export interface RollbackPlan {
@@ -109,8 +85,8 @@ export interface RollbackPlan {
  * ledger row leaves the database carrying the change while `status` reports
  * the migration as pending, so the next apply re-runs the `up`.
  */
-export function planRollback(name: string, down: string): RollbackPlan {
-  const statements = splitStatements(down);
+export function planRollback(name: string, down: string, dialect: SplitDialect = 'generic'): RollbackPlan {
+  const statements = splitStatements(down, dialect);
   if (statements.length > 0) return { statements };
   return {
     statements,
@@ -141,14 +117,25 @@ export function renderMigrationFile(name: string, ups: string[], downs: string[]
   ].join('\n');
 }
 
+// The markers are whole lines. `indexOf('-- up')` also matched
+// `-- update the totals`, so a comment could move where the up block began.
+const UP_MARKER = /^--[ \t]*up[ \t]*\r?$/im;
+const DOWN_MARKER = /^--[ \t]*down[ \t]*\r?$/im;
+
 export function parseMigrationFile(content: string): ParsedMigration {
-  const upIdx = content.indexOf('-- up');
-  const downIdx = content.indexOf('-- down');
-  if (upIdx === -1 || downIdx === -1) return { up: '', down: '' };
+  const up = UP_MARKER.exec(content);
+  const down = DOWN_MARKER.exec(content);
+  if (!up || !down || down.index < up.index) return { up: '', down: '' };
   return {
-    up: content.slice(upIdx + 5, downIdx),
-    down: content.slice(downIdx + 7),
+    up: content.slice(up.index + up[0].length, down.index),
+    down: content.slice(down.index + down[0].length),
   };
+}
+
+/** Whether a file uses the `-- up` / `-- down` sections at all. A file
+ *  without them is a hand-written migration whose whole text is the up. */
+export function hasUpDownSections(content: string): boolean {
+  return UP_MARKER.test(content) && DOWN_MARKER.test(content);
 }
 
 export function timestampSlug(slug: string): string {
@@ -164,6 +151,6 @@ export function writeMigrationFile(name: string, content: string): string {
 }
 
 export function readMigrationFile(name: string): string | null {
-  const file = path.join(MIGRATIONS_DIR, `${name}.sql`);
+  const file = path.join(MIGRATIONS_DIR, /\.sql$/i.test(name) ? name : `${name}.sql`);
   return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
 }
