@@ -804,7 +804,7 @@ export function compileUpdate(
         for (const [path, v] of writes) {
           const pathLiteral = dialect.placeholder(params, `{${path.join(',')}}`);
           const valueLiteral = dialect.placeholder(params, JSON.stringify(v ?? null));
-          expr = `jsonb_set(${expr}, ${pathLiteral}::text[], ${valueLiteral}::jsonb, true)`;
+          expr = `jsonb_set(${expr}, ${pathLiteral}::text[], ${valueLiteral}::text::jsonb, true)`;
         }
         parts.push(`${colQ} = ${expr}`);
       }

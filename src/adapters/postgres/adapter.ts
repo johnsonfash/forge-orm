@@ -11,7 +11,17 @@ import {
   type PgExecOpts,
   type PgPoolHandle,
 } from './execute';
-import { pgDriver, type PostgresDriver, type PgQueryable } from './driver';
+import { pgDriver, postgresJsDriver, type PostgresDriver, type PgQueryable } from './driver';
+
+function postgresJsInstalled(): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    require.resolve('postgres');
+    return true;
+  } catch {
+    return false;
+  }
+}
 import { bytesForDriver } from '../../bytes';
 
 // PostgresAdapter — drives a PostgresDriver port (driver.ts). By default it
@@ -43,6 +53,14 @@ export class PostgresAdapter implements Adapter {
     this._url = url;
     if (this._injected) {
       this._driver = this._injected;
+    } else if (!isDriverInstalled('postgres').installed && postgresJsInstalled()) {
+      // A project that uses postgres.js and never installed `pg` (the CLI opens
+      // its own connection from the URL, so `forge migrate` used to fail there
+      // with a missing-driver error). Use the driver the project already has.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const mod = require('postgres');
+      const postgres = typeof mod === 'function' ? mod : mod.default;
+      this._driver = postgresJsDriver(postgres(url, { max: 10, onnotice: () => {} }));
     } else {
       const pg = loadDriver('postgres', url);
       const pool = new pg.Pool({
@@ -192,7 +210,8 @@ export class PostgresAdapter implements Adapter {
         out[k] = bytesForDriver(model?.collection ?? '?', k, field.maxBytes, v);
       } else if (field && (field.kind === 'json' || field.kind === 'embed' || field.kind === 'embedMany')
           && v != null && typeof v === 'object') {
-        out[k] = JSON.stringify(v);
+        // postgres.js serialises json/jsonb parameters itself; see PostgresDriver.jsonParams.
+        out[k] = this._driver?.jsonParams === 'value' ? v : JSON.stringify(v);
       } else {
         out[k] = v;
       }

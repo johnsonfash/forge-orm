@@ -4,6 +4,29 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.23.1 — JSON over postgres.js, and the CLI without pg or dotenv
+
+**A JSON value written through a model over postgres.js was stored as a
+jsonb STRING.** forge turned the object into text first, which node-postgres
+needs; postgres.js asks the server for each parameter's type and, for
+json/jsonb, runs its own `JSON.stringify` on top. `jsonb_typeof` came back
+`'string'` and the value read back as the text of the object. The
+`postgresJsDriver` now declares `jsonParams: 'value'` and forge hands it the
+object. The two places that send JSON text into a cast (the containment
+filters `has` / `hasSome` / `hasEvery` on a JSON array, and a dotted-key write
+through `jsonb_set`) now cast `$n::text::jsonb`, which is a text parameter on
+every driver. `regression-pg-json.ts` asks the server for `jsonb_typeof` on
+node-postgres and on postgres.js with `prepare` on and off.
+
+**`forge` (the CLI) needed packages it never declared.**
+- Every command imported `dotenv`, a devDependency, so in a project without
+  it the CLI died with "Cannot find module 'dotenv'". `.env` is now read with
+  dotenv when the project has it and Node's own `process.loadEnvFile`
+  otherwise; variables already in the environment still win.
+- forge's own connection (the CLI's, or `createDb({ url })`) always loaded
+  `pg`. A project that has postgres.js and not `pg` now gets a postgres.js
+  connection instead of a missing-driver error.
+
 ## 2.23.0 — Postgres: migration files, row locks, a real SQL splitter
 
 **The default `pg` pool no longer crashes the process when an idle

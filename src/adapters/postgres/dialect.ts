@@ -279,7 +279,7 @@ export const PostgresDialect: Dialect = {
       // one", and with an array on both sides that is exactly membership —
       // and it is the form a GIN index on the column can answer.
       const jb = (v: unknown) =>
-        `${this.placeholder(params, JSON.stringify(v))}::jsonb`;
+        `${this.placeholder(params, JSON.stringify(v))}::text::jsonb`;
       switch (op) {
         case 'has':      return `${quotedColumn} @> ${jb([values[0]])}`;
         // One containment test per candidate, OR'd. `?|` would be shorter but

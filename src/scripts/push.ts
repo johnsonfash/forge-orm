@@ -1,6 +1,6 @@
 /* eslint-disable no-console */
-import * as dotenv from 'dotenv';
-dotenv.config();
+import { loadEnv } from './load-env';
+loadEnv();
 
 import { detectAdapterKind } from '../adapters/detect';
 import { loadConsumerSchema } from './load-consumer-schema';

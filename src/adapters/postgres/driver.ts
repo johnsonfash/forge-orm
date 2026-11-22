@@ -35,6 +35,14 @@ export interface PostgresDriver extends PgQueryable {
    * CONCURRENTLY`) holds a session advisory lock across its statements.
    */
   reserve?(): Promise<PgReservedSession>;
+  /**
+   * How a JSON value must be handed to this driver. `'text'` (node-postgres):
+   * forge serialises it first. `'value'` (postgres.js): the driver asks the
+   * server for each parameter's type and runs its own JSON.stringify on json
+   * and jsonb, so a value forge had already turned into text was encoded a
+   * second time and stored as a jsonb STRING. Absent means `'text'`.
+   */
+  readonly jsonParams?: 'text' | 'value';
   close(): Promise<void>;
 }
 
@@ -114,6 +122,7 @@ export function postgresJsDriver(sql: any): PostgresDriver {
   const exec = async (q: any, text: string) => { await q.unsafe(text).simple(); };
   return {
     kind: 'postgres',
+    jsonParams: 'value',
     query: (text, params) => run(sql, text, params),
     transaction: (fn) => sql.begin((txSql: any) =>
       fn({

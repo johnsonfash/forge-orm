@@ -39,7 +39,7 @@ describe('a dotted key writes INSIDE a json column', () => {
     // already, so a filter matched rows that could not then be updated.
     expect(a.sql).not.toMatch(/"customer\.id"/);
     expect(a.sql).toMatch(
-      /SET "customer" = jsonb_set\(coalesce\("customer", '\{\}'::jsonb\), \$1::text\[\], \$2::jsonb, true\)/,
+      /SET "customer" = jsonb_set\(coalesce\("customer", '\{\}'::jsonb\), \$1::text\[\], \$2::text::jsonb, true\)/,
     );
     expect(a.params[0]).toBe('{id}');
     // The value goes in JSON-encoded, so a string lands as a json string and
@@ -81,7 +81,7 @@ describe('array filters on a json column', () => {
     // jsonb — there is no ANY for it. `@>` is both correct and the form a GIN
     // index on the column can answer.
     const sql = where({ tags: { has: 'vip' } });
-    expect(sql).toMatch(/"tags" @> \$\d+::jsonb/);
+    expect(sql).toMatch(/"tags" @> \$\d+::text::jsonb/);
     expect(sql).not.toMatch(/= ANY\("tags"\)/);
   });
 
@@ -89,7 +89,7 @@ describe('array filters on a json column', () => {
     // `?|` would be shorter and only works for strings; these columns hold
     // numbers too.
     const sql = where({ tags: { hasSome: ['vip', 'wholesale'] } });
-    expect(sql).toMatch(/"tags" @> \$\d+::jsonb OR .*"tags" @> \$\d+::jsonb/);
+    expect(sql).toMatch(/"tags" @> \$\d+::text::jsonb OR .*"tags" @> \$\d+::text::jsonb/);
   });
 
   it('`hasEvery` is one containment of the whole candidate array', () => {
