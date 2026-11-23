@@ -531,7 +531,7 @@ calls out for typed writes.
 
 For a script — schema changes, functions, triggers, seed blocks — use one of:
 
-* **A migration file**, applied by `forge migrate` / `db.$migrateFiles()` (Postgres). The file is sent whole over the simple protocol in its own transaction, so `$$` bodies, `DO` blocks and `BEGIN ATOMIC` need no care. See [MIGRATIONS.md › forge migrate](./MIGRATIONS.md#forge-migrate--migration-files-postgres).
+* **A migration file**, applied by `forge migrate` / `db.$migrateFiles()`. On Postgres the file is sent whole over the simple protocol in its own transaction, so `$$` bodies, `DO` blocks and `BEGIN ATOMIC` need no care; on the other dialects forge's splitter (`splitSqlStatements`) cuts it, knowing MySQL `DELIMITER` blocks, SQLite trigger bodies and SQL Server `GO` batches. See [MIGRATIONS.md › forge migrate](./MIGRATIONS.md#forge-migrate--migration-files).
 * **`splitSqlStatements(text, 'postgres')`**, exported from `forge-orm`, then one `$executeRaw` per statement inside a `$transaction`. It is a lexer, not `split(';')`: it skips semicolons inside dollar quotes (any tag), `''` and `E''` strings, quoted identifiers, `--` and nested `/* */` comments, and `BEGIN ATOMIC … END` bodies, and reports the line each statement starts on. `'mysql'` and `'sqlite'` modes follow those dialects' quoting.
 
 ```ts

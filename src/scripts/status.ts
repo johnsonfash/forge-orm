@@ -38,6 +38,11 @@ async function main(): Promise<void> {
   const db = (await createDb({ url })) as never as Parameters<typeof ensureHistoryTable>[0];
 
   try {
+    if ((db as unknown as { adapter: { kind: string } }).adapter.kind === 'mongo') {
+      console.error('[forge:status] MongoDB has no migration files to report on; `forge push` manages its indexes.');
+      process.exitCode = 1;
+      return;
+    }
     await ensureHistoryTable(db);
     const applied = await listAppliedWithDates(db);
     const local = listLocalMigrations(MIGRATIONS_DIR);

@@ -6,6 +6,7 @@ import { planRenames } from './rename-column';
 import { buildSchemaDDL as buildPgDDL } from '../adapters/postgres/ddl';
 import { buildSchemaDDL as buildMysqlDDL } from '../adapters/mysql/ddl';
 import { buildSchemaDDL as buildSqliteDDL } from '../adapters/sqlite/ddl';
+import { buildSchemaDDL as buildDuckdbDDL } from '../adapters/duckdb/ddl';
 import type { FieldDef, ModelDef, RelationDef } from '../schema/types';
 
 // Reconciliation migration generator. Compares the declared schema to a
@@ -35,6 +36,31 @@ function colDef(d: Dialect, name: string, f: FieldDef): string {
   return `${d.quoteIdent(name)} ${type}${notNull}${def}`;
 }
 
+/** Why `forge generate` / `forge diff apply` cannot write SQL for `kind`. */
+export function unsupportedGenerateMessage(kind: string): string {
+  if (kind === 'mongo') {
+    return `[forge] MongoDB has no DDL migrations — indexes are reconciled by \`forge push\`.`;
+  }
+  if (kind === 'mssql') {
+    return `[forge] forge does not generate SQL Server migrations yet: its ALTER syntax ` +
+      `(ADD without COLUMN, sp_rename, IF NOT EXISTS guards) needs a generator of its own. ` +
+      `Write the .sql file by hand (batches separated by GO lines) and apply it with ` +
+      `\`forge migrate\`; \`forge push\` creates missing tables and indexes.`;
+  }
+  return `[forge] forge cannot generate migrations for ${kind}.`;
+}
+
+// DuckDB has no ALTER TABLE … ADD CONSTRAINT ("No support for that ALTER
+// TABLE option yet"), so a foreign key can only be declared inside CREATE
+// TABLE. Written as a note rather than as SQL that fails on apply.
+function duckdbFkNote(what: string): MigrationPair {
+  return {
+    up: `-- DuckDB cannot ALTER ADD FOREIGN KEY (${what}); declare it in CREATE TABLE by hand if it is needed`,
+    down: '-- (no-op)',
+    note: `fk ${what} (manual, DuckDB)`,
+  };
+}
+
 function idxName(table: string, unique: boolean, cols: string[]): string {
   return `forge_${table}_${unique ? 'uq' : 'idx'}_${cols.join('_')}`;
 }
@@ -47,6 +73,7 @@ function buildDDLFor(
   if (kind === 'postgres') return buildPgDDL(one as never);
   if (kind === 'mysql') return buildMysqlDDL(one as never);
   if (kind === 'sqlite') return buildSqliteDDL(one as never);
+  if (kind === 'duckdb') return buildDuckdbDDL(one as never);
   return [];
 }
 
@@ -57,7 +84,11 @@ export function generateMigration(
 ): MigrationPair[] {
   const d = dialectFor(actual.kind);
   const kind = actual.kind;
-  if (!d) return [];
+  if (!d) {
+    // Returning no changes here read as "already in sync" to `forge diff
+    // apply`, and as an empty migration to `forge generate`.
+    throw new Error(unsupportedGenerateMessage(kind));
+  }
   const pairs: MigrationPair[] = [];
   const actualTables = new Map(actual.tables.map((t) => [t.name, t]));
 
@@ -96,6 +127,10 @@ export function generateMigration(
         ? own.filter((s) => s.kind !== 'column' && s.kind !== 'nullability')
         : buildDDLFor(kind, { [key]: m } as Record<string, unknown>);
       for (const stmt of ddl) {
+        if (stmt.kind === 'foreignKey' && d.name === 'duckdb') {
+          newTableFks.push(duckdbFkNote(stmt.name));
+          continue;
+        }
         (stmt.kind === 'foreignKey' ? newTableFks : pairs).push({
           up: stmt.sql,
           // Dropping the table takes its indexes and constraints with it,
@@ -245,6 +280,10 @@ export function generateMigration(
         else if (w.unique) kindKW = 'UNIQUE ';
         const colList = w.cols.map(d.quoteIdent).join(', ');
         sql = `CREATE ${kindKW}INDEX ${d.quoteIdent(name)} ON ${q} (${colList})`;
+      } else if (d.name === 'duckdb') {
+        // No partial or covering indexes on DuckDB; push drops them the same way.
+        const colList = w.cols.map(d.quoteIdent).join(', ');
+        sql = `CREATE ${w.unique ? 'UNIQUE ' : ''}INDEX IF NOT EXISTS ${d.quoteIdent(name)} ON ${q} (${colList})`;
       } else {
         // SQLite supports WHERE natively.
         const colList = w.cols.map(d.quoteIdent).join(', ');
@@ -270,6 +309,10 @@ export function generateMigration(
       if (actFks.has(k)) continue;
       if (d.name === 'sqlite') {
         pairs.push({ up: `-- SQLite cannot ALTER ADD FOREIGN KEY (${k}); recreate the table to add it`, down: `-- (no-op)`, note: `fk ${k} (manual)` });
+        continue;
+      }
+      if (d.name === 'duckdb') {
+        pairs.push(duckdbFkNote(k));
         continue;
       }
       const fkName = `forge_${m.collection}_fk_${r.on}`;

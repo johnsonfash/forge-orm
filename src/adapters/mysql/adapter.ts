@@ -46,7 +46,10 @@ export class MysqlAdapter implements Adapter {
       this._driver = this._injected;
     } else {
       const mysql = loadDriver('mysql', url);
-      const rawPool = mysql.createPool({ uri: url, connectionLimit: 50 });
+      // supportBigNumbers: a BIGINT past 2^53 comes back as an exact string
+      // instead of a rounded number, so f.bigint() can read it; smaller values
+      // (every COUNT(*)) are still numbers.
+      const rawPool = mysql.createPool({ uri: url, connectionLimit: 50, supportBigNumbers: true });
       this._rawPool = (rawPool.promise ? rawPool.promise() : rawPool) as MysqlPool;
       this._driver = mysql2Driver(this._rawPool);
     }
@@ -152,12 +155,13 @@ export class MysqlAdapter implements Adapter {
 
   async *streamSelect(node: any, model: any, _opts?: ExecOpts): AsyncIterable<any> {
     const { compileSelect } = await import('./compile-from-ir');
+    const { decodeRow } = await import('./execute');
     const a = compileSelect(node, model);
     if (this.driver.stream) {
-      yield* this.driver.stream(a.sql, a.params);
+      for await (const row of this.driver.stream(a.sql, a.params)) yield decodeRow(model, row);
     } else {
       const [rows] = await this.driver.query(a.sql, a.params);
-      for (const row of rows as any[]) yield row;
+      for (const row of rows as any[]) yield decodeRow(model, row);
     }
   }
 

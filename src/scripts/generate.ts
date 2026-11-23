@@ -5,7 +5,8 @@ loadEnv();
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AdapterKind } from '../adapters/types';
-import { generateMigration } from './migrate-gen';
+import { generateMigration, unsupportedGenerateMessage } from './migrate-gen';
+import { detectAdapterKind } from '../adapters/detect';
 import { loadConsumerSchema } from './load-consumer-schema';
 import { MIGRATIONS_DIR, renderMigrationFile } from './migrate-runtime';
 import {
@@ -49,28 +50,31 @@ function flagValue(name: string): string | undefined {
  *  DATABASE_URL WITHOUT connecting — the scheme is enough. */
 function resolveDialect(): AdapterKind {
   const explicit = flagValue('dialect');
-  if (explicit) return explicit as AdapterKind;
-  const url = process.env.DATABASE_URL ?? '';
-  if (/^postgres(ql)?:/.test(url)) return 'postgres';
-  if (/^mysql:/.test(url)) return 'mysql';
-  if (/^(sqlite|file):/.test(url)) return 'sqlite';
-  if (/^mongodb(\+srv)?:/.test(url)) return 'mongo';
-  throw new Error(
-    '[forge:generate] cannot tell which dialect to generate for. Pass ' +
-      '--dialect=postgres|mysql|sqlite, or set DATABASE_URL (it is only read ' +
-      'for its scheme — nothing connects).',
-  );
+  const kind = explicit
+    ? (explicit === 'mariadb' ? 'mysql' : explicit === 'sqlserver' ? 'mssql' : explicit) as AdapterKind
+    : detectAdapterKind(process.env.DATABASE_URL ?? '');
+  if (!kind) {
+    throw new Error(
+      '[forge:generate] cannot tell which dialect to generate for. Pass ' +
+        '--dialect=postgres|mysql|sqlite|duckdb, or set DATABASE_URL (it is only read ' +
+        'for its scheme — nothing connects).',
+    );
+  }
+  if (!GENERATABLE.includes(kind)) {
+    throw new Error(
+      kind === 'mongo' || kind === 'mssql'
+        ? unsupportedGenerateMessage(kind)
+        : `[forge:generate] '${explicit ?? kind}' is not a dialect forge generates for. ` +
+          `Use --dialect=${GENERATABLE.join('|')}.`,
+    );
+  }
+  return kind;
 }
+
+const GENERATABLE: AdapterKind[] = ['postgres', 'mysql', 'sqlite', 'duckdb'];
 
 async function main(): Promise<void> {
   const kind = resolveDialect();
-  if (kind === 'mongo') {
-    console.error(
-      '[forge:generate] Mongo has no DDL migrations — indexes are reconciled by ' +
-        '`forge push`, which is idempotent and needs no history.',
-    );
-    process.exit(1);
-  }
 
   const { schema, source } = loadConsumerSchema();
   console.log(`[forge:generate] schema: ${source}  dialect: ${kind}`);

@@ -52,7 +52,8 @@ import { buildDuckdbCompileApi } from '../adapters/duckdb/compile';
 import { buildMssqlCompileApi } from '../adapters/mssql/compile';
 import type { CompileApi, MongoCompileApi, SQLCompileApi } from '../compile';
 import { buildCount, buildDelete, buildGroupBy, buildInsert, buildProjection, buildSelect, buildUpdate, buildUpdateData, type RowLockOption } from '../ir/build';
-import type { UpdateNode } from '../ir/types';
+import type { RowLockSpec, UpdateNode } from '../ir/types';
+import { rowLockSql } from '../adapters/row-lock';
 import type { Adapter } from '../adapters/types';
 import { getDefaultMongoAdapter } from '../adapters/mongo/adapter';
 import { currentSession } from '../session-context';
@@ -1097,7 +1098,7 @@ export class CollectionWrapper<
     args = this._withSoftDeleteFilter(args);
     const cardinality: 'one' | 'many' = hardLimit === 1 ? 'one' : 'many';
     const node = buildSelect(mk, this.model, args ?? {}, cardinality, schema as any);
-    if (node.lock) this._assertCanLock();
+    if (node.lock) this._assertCanLock(node.lock);
     // If a hardLimit was specified (findFirst path), honour it even when the
     // user passed no take/limit.
     if (hardLimit != null && (node.limit == null || node.limit > hardLimit)) {
@@ -1110,13 +1111,9 @@ export class CollectionWrapper<
   // A row lock lives until the transaction ends. Outside one, Postgres runs
   // the SELECT in its own implicit transaction and drops the lock the moment
   // the rows come back — the call would read as "locked" and lock nothing.
-  private _assertCanLock(): void {
-    if (this.adapter.kind !== 'postgres') {
-      throw new Error(
-        `[forge] lock: row locks are supported on postgres only; '${this.model.collection}' ` +
-        `is on ${this.adapter.kind}.`,
-      );
-    }
+  private _assertCanLock(lock: RowLockSpec): void {
+    // Throws for a dialect with no row locks, or a mode it cannot take.
+    rowLockSql(this.adapter.kind, lock);
     if (!this.session) {
       throw new Error(
         `[forge] lock: on '${this.model.collection}' outside a transaction locks nothing — ` +

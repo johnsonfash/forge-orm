@@ -1,4 +1,5 @@
 import type { AdapterKind } from '../types';
+import { guardMysql2Pool, guardPoolErrors } from '../pool-errors';
 
 // MysqlDriver — normalized port for the MySQL adapter. The executor speaks
 // mysql2's tuple shape (`[rows, fields]` from query, `[result, fields]` from
@@ -11,25 +12,51 @@ export interface MysqlQueryable {
   execute(sql: string, params?: unknown[]): Promise<[any, any]>;
 }
 
+/** A connection held for the caller alone until `release()`. */
+export interface MysqlReservedSession extends MysqlQueryable {
+  release(): Promise<void> | void;
+}
+
 export interface MysqlDriver extends MysqlQueryable {
   readonly kind: Extract<AdapterKind, 'mysql'>;
   transaction<T>(fn: (session: MysqlQueryable) => Promise<T>): Promise<T>;
+  /**
+   * Hold one connection outside any transaction. Optional; `forge migrate`
+   * needs it, because MySQL's GET_LOCK belongs to the connection that took it.
+   */
+  reserve?(): Promise<MysqlReservedSession>;
   stream?(sql: string, params: unknown[]): AsyncIterable<any>;
   close(): Promise<void>;
 }
 
 // ─── mysql2 (default) ────────────────────────────────────────────────────────
 // `pool` is a mysql2 PROMISE pool (created via createPool(...).promise()).
+//
+// Every statement asks for `supportBigNumbers`, whatever the pool was built
+// with: a BIGINT past 2^53 then arrives as an exact string (smaller ones stay
+// numbers), and forge decodes it by field kind. Without it mysql2 rounds the
+// value before forge sees it, and a pool the user built themselves could not
+// read such a row at all.
+const exact = (sql: string, params?: unknown[]) =>
+  (params === undefined ? { sql, supportBigNumbers: true } : { sql, values: params, supportBigNumbers: true });
+
+function exactQueryable(target: any): MysqlQueryable {
+  return {
+    query: (sql, params) => target.query(exact(sql, params)),
+    execute: (sql, params) => target.execute(exact(sql, params)),
+  };
+}
+
 export function mysql2Driver(pool: any): MysqlDriver {
+  guardMysql2Pool(pool);
   return {
     kind: 'mysql',
-    query: (sql, params) => pool.query(sql, params),
-    execute: (sql, params) => pool.execute(sql, params),
+    ...exactQueryable(pool),
     transaction: async (fn) => {
       const conn = await pool.getConnection();
       try {
         await conn.query('START TRANSACTION');
-        const result = await fn(conn);
+        const result = await fn(exactQueryable(conn));
         await conn.query('COMMIT');
         return result;
       } catch (err) {
@@ -43,11 +70,15 @@ export function mysql2Driver(pool: any): MysqlDriver {
       const conn = await pool.getConnection();
       try {
         const raw = (conn as any).connection ?? conn;
-        const s: any = raw.query({ sql, values: params }).stream({ highWaterMark: 200 });
+        const s: any = raw.query({ ...exact(sql, params), values: params }).stream({ highWaterMark: 200 });
         for await (const row of s) yield row;
       } finally {
         if (typeof (conn as any).release === 'function') (conn as any).release();
       }
+    },
+    reserve: async () => {
+      const conn = await pool.getConnection();
+      return { ...exactQueryable(conn), release: () => conn.release() };
     },
     close: async () => { if (pool.end) await pool.end(); },
   };
@@ -57,6 +88,7 @@ export function mysql2Driver(pool: any): MysqlDriver {
 // mariadb's query returns rows directly (SELECT) or a result object
 // ({ affectedRows, insertId }) for writes — normalise to mysql2 tuples.
 export function mariadbDriver(pool: any): MysqlDriver {
+  guardPoolErrors(pool, 'MariaDB');
   const asTuple = (r: any): [any, any] => [r, (r && r.meta) ?? undefined];
   const writeTuple = (r: any): [any, any] =>
     [{ affectedRows: r?.affectedRows ?? 0, insertId: r?.insertId != null ? Number(r.insertId) : undefined }, undefined];
@@ -81,6 +113,10 @@ export function mariadbDriver(pool: any): MysqlDriver {
       } finally {
         if (typeof conn.release === 'function') conn.release();
       }
+    },
+    reserve: async () => {
+      const conn = await pool.getConnection();
+      return { ...sess(conn), release: () => conn.release() };
     },
     close: async () => { if (pool.end) await pool.end(); },
   };

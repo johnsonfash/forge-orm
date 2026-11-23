@@ -21,9 +21,24 @@ export async function rawQuery<T = any>(db: ForgeDb, sql: string): Promise<T[]> 
   return db.$queryRaw(frag(sql)) as Promise<T[]>;
 }
 
-// Portable across PG / MySQL / SQLite (varchar accepted everywhere).
+// Portable across PG / MySQL / SQLite / DuckDB (varchar accepted everywhere).
+// SQL Server has no CREATE TABLE IF NOT EXISTS, so it gets its own guard.
 export async function ensureHistoryTable(db: ForgeDb): Promise<void> {
+  if ((db as { adapter?: { kind?: string } }).adapter?.kind === 'mssql') {
+    await rawExec(
+      db,
+      `IF OBJECT_ID(N'_forge_migrations', N'U') IS NULL ` +
+        `CREATE TABLE _forge_migrations (name NVARCHAR(255) NOT NULL PRIMARY KEY, applied_at NVARCHAR(64), checksum NVARCHAR(64))`,
+    );
+    return;
+  }
   await rawExec(db, `CREATE TABLE IF NOT EXISTS _forge_migrations (name VARCHAR(255) PRIMARY KEY, applied_at VARCHAR(64))`);
+}
+
+/** Dialects whose DDL is transactional: a migration and its ledger change
+ *  can commit together. MySQL commits DDL implicitly, so it is not one. */
+export function hasTransactionalDdl(kind: string): boolean {
+  return kind === 'postgres' || kind === 'sqlite' || kind === 'mssql' || kind === 'duckdb';
 }
 
 export async function listApplied(db: ForgeDb): Promise<string[]> {
@@ -68,7 +83,9 @@ export function splitStatements(block: string, dialect: SplitDialect = 'generic'
 
 /** The split dialect for an adapter kind. */
 export function splitDialectFor(kind: string): SplitDialect {
-  return kind === 'postgres' || kind === 'mysql' || kind === 'sqlite' ? kind : 'generic';
+  return kind === 'postgres' || kind === 'mysql' || kind === 'sqlite' || kind === 'mssql' || kind === 'duckdb'
+    ? kind
+    : 'generic';
 }
 
 export interface RollbackPlan {

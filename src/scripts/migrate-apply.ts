@@ -18,6 +18,10 @@ import { MIGRATIONS_DIR } from './migrate-runtime';
 // transaction-mode pooler (PgBouncer) wants migrations on a direct
 // connection: a forge:no-transaction file holds a session advisory lock,
 // and a pooler hands each statement to whichever server connection is free.
+//
+// Postgres, SQLite, SQL Server and DuckDB run each file in one transaction
+// with its ledger row. MySQL cannot (DDL commits implicitly), so there a
+// file runs statement by statement. MongoDB has no SQL and is refused.
 
 function flag(name: string): string | undefined {
   const inline = process.argv.find((a) => a.startsWith(`--${name}=`));
@@ -35,12 +39,22 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const kind = detectAdapterKind(url);
-  if (kind !== 'postgres') {
+  if (kind === 'mongo') {
     console.error(
-      `[forge:migrate] migration files run on postgres only; this URL is ${kind ?? 'unrecognised'}. ` +
-        '`forge push` syncs the schema on every dialect.',
+      '[forge:migrate] MongoDB has no SQL migration files. `forge push` (or db.$migrate() ' +
+        'at boot) creates and rebuilds its indexes from the schema.',
     );
     process.exit(1);
+  }
+  if (!kind) {
+    console.error(`[forge:migrate] cannot tell which database this URL is for: ${url.replace(/\/\/[^@]*@/, '//***@')}`);
+    process.exit(1);
+  }
+  if (kind === 'mysql' && !process.argv.includes('--dry-run')) {
+    console.log(
+      '[forge:migrate] MySQL commits DDL as it runs: each file is applied statement by ' +
+        'statement and is NOT all-or-nothing. Write files that are safe to re-run.',
+    );
   }
   const dir = flag('dir') ? path.resolve(flag('dir')!) : MIGRATIONS_DIR;
   const db = await createDb({ url });

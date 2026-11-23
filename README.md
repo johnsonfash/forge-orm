@@ -2827,6 +2827,7 @@ npx forge diff --check                      # exit non-zero if there is drift (u
 npx forge diff --ignore=logs,/^_atlas_/i    # skip noisy meta-collections (see below)
 npx forge diff apply                        # generate and run a migration that reconciles the difference
 npx forge rollback                          # undo the most recent applied migration
+npx forge migrate                           # apply migrations/*.sql in order (every SQL dialect; see docs/MIGRATIONS.md)
 npx forge migrate status                    # what has run, what has not, what should not have
 npx forge doctor                            # adapter pre-flight + live capability probe (see below)
 npx forge --help

@@ -56,7 +56,7 @@ The `forge.schema` field is the second step of the schema-resolution cascade (af
 | `forge diff` | Read-only drift report between schema and live DB. `--check` for CI gate, `--json` for tooling. | No |
 | `forge diff apply` | Generate a reconciliation migration file (`up`/`down`) for the current drift, apply it forward, record in `_forge_migrations`. | Yes |
 | `forge generate` | Write a migration by diffing the schema against the last committed snapshot. **No database.** | Files only |
-| `forge migrate` | Apply pending `.sql` files in `migrations/` in order (Postgres): each file in one transaction with its ledger row, checksummed, advisory-locked. `--dry-run`, `--dir`, `--url`, `--allow-out-of-order`, `--allow-unknown`. See [MIGRATIONS.md](./MIGRATIONS.md#forge-migrate--migration-files-postgres). | Yes |
+| `forge migrate` | Apply pending `.sql` files in `migrations/` in order: each file in one transaction with its ledger row on Postgres, SQLite, SQL Server and DuckDB; statement by statement on MySQL (DDL commits implicitly there). Checksummed, locked against concurrent runners. Refuses MongoDB. `--dry-run`, `--dir`, `--url`, `--allow-out-of-order`, `--allow-unknown`. See [MIGRATIONS.md](./MIGRATIONS.md#forge-migrate--migration-files). | Yes |
 | `forge migrate status` | Compare `migrations/` against the `_forge_migrations` ledger. Reports applied, pending, out-of-order, and applied-but-absent. | No |
 | `forge rollback` | Run the `down` block of the most-recently-applied migration. | Yes |
 | `forge doctor` | Driver inventory + URL shape check + schema lint + live capability probe. Pre-flight before anything else. | No |
@@ -305,7 +305,7 @@ is for adopting a database somebody else created.
 | Flag | Effect |
 |---|---|
 | `--name <slug>` | Names the file. Defaults to a timestamp-derived slug. |
-| `--dialect <name>` | `postgres` \| `mysql` \| `sqlite` \| `mssql`. Only needed when `DATABASE_URL` is absent — when it is set, the scheme is read and nothing is dialled. |
+| `--dialect <name>` | `postgres` \| `mysql` \| `sqlite` \| `duckdb`. `mssql` is refused with what to do instead: SQL Server migrations are written by hand (batches separated by `GO`) and applied with `forge migrate`. Only needed when `DATABASE_URL` is absent — when it is set, the scheme is read and nothing is dialled. |
 | `--check` | Writes nothing. Exit 3 if the schema contains changes no migration covers, naming them. |
 | `--custom` | Writes an empty `up`/`down` pair plus a snapshot, for a backfill or any data migration. |
 | `--allow-drop` | Confirms that a same-typed drop+add really is a drop, not an unannotated rename. |
@@ -323,7 +323,15 @@ Exit 2 writes nothing at all, deliberately. A migration that applies
 cleanly while leaving the schema and the database disagreeing is the
 failure this removes, not a smaller version of it.
 
-`forge generate` refuses on Mongo. There is no DDL to generate.
+`forge generate` refuses on Mongo (there is no DDL to generate) and on SQL
+Server (its ALTER syntax needs a generator of its own; write the file by
+hand). `forge diff apply` refuses the same two rather than report "already
+in sync".
+
+On DuckDB a foreign key is written as a comment: DuckDB has no `ALTER TABLE
+… ADD CONSTRAINT`, so it can only be declared inside `CREATE TABLE`. UNIQUE
+and CHECK constraints of a new table are put inside its `CREATE TABLE` for the
+same reason.
 
 ---
 

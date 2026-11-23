@@ -18,6 +18,7 @@ import {
   compileUpdate,
 } from './compile-from-ir';
 import { withSqliteErrors } from './errors';
+import { decodeWideIntegers } from '../shared/wide-int';
 import type { SqliteDriver } from './driver';
 import { fromDriverBytes } from '../../bytes';
 import { hydrateManyRelation, hydrateOneRelation } from '../../ir/hydrate-many';
@@ -61,7 +62,7 @@ export function decodeRow(model: ModelDef<any>, row: any): any {
       default:           out[k] = v;
     }
   }
-  return out;
+  return decodeWideIntegers(model, out);
 }
 
 function safeParse(s: string): any {

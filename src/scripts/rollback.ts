@@ -5,15 +5,15 @@ loadEnv();
 import { createDb } from '../factory';
 import {
   ensureHistoryTable, listApplied, parseMigrationFile, planRollback, rawExec,
-  readMigrationFile, removeMigration, splitDialectFor,
+  readMigrationFile, removeMigration, splitDialectFor, hasTransactionalDdl,
 } from './migrate-runtime';
 
 // forge:rollback — run the `down` block of the most-recently-applied migration
 // and remove its row from _forge_migrations.
 
 async function main() {
-  const url = process.env.DATABASE_URL;
-  if (!url) { console.error('[forge:rollback] DATABASE_URL is not set.'); process.exit(1); }
+  const url = process.env.MIGRATION_DATABASE_URL ?? process.env.DATABASE_URL;
+  if (!url) { console.error('[forge:rollback] set MIGRATION_DATABASE_URL or DATABASE_URL.'); process.exit(1); }
 
   const db = await createDb({ url });
   try {
@@ -38,8 +38,9 @@ async function main() {
       process.exit(1);
     }
     console.log(`[forge:rollback] rolling back '${latest}' (${statements.length} statement(s))`);
-    // One transaction on Postgres, as for the up: a down that fails part-way
-    // must not leave the ledger row deleted with half the reversal applied.
+    // One transaction wherever DDL is transactional (everything but MySQL):
+    // a down that fails part-way must not leave the ledger row deleted with
+    // half the reversal applied.
     const run = async (q: any) => {
       for (const s of statements) {
         try { await rawExec(q, s); }
@@ -47,7 +48,7 @@ async function main() {
       }
       await removeMigration(q, latest);
     };
-    if (db.adapter.kind === 'postgres') await db.$transaction(run);
+    if (hasTransactionalDdl(db.adapter.kind)) await db.$transaction(run);
     else await run(db);
     console.log(`[forge:rollback] rolled back '${latest}'.`);
   } finally {

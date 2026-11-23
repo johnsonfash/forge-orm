@@ -8,6 +8,7 @@ import type { Dialect } from '../adapters/postgres/dialect';
 import { PostgresDialect } from '../adapters/postgres/dialect';
 import { MysqlDialect } from '../adapters/mysql/dialect';
 import { SqliteDialect } from '../adapters/sqlite/dialect';
+import { DuckdbDialect } from '../adapters/duckdb/dialect';
 
 /** `null` for adapters with no SQL DDL — Mongo, and anything else
  *  schemaless. Callers must handle it rather than assume SQL. */
@@ -15,5 +16,6 @@ export function dialectFor(kind: string): Dialect | null {
   if (kind === 'postgres') return PostgresDialect;
   if (kind === 'mysql') return MysqlDialect;
   if (kind === 'sqlite') return SqliteDialect;
+  if (kind === 'duckdb') return DuckdbDialect;
   return null;
 }

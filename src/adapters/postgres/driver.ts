@@ -1,4 +1,5 @@
 import type { AdapterKind } from '../types';
+import { guardPoolErrors } from '../pool-errors';
 
 // PostgresDriver — the normalized port the Postgres adapter and executor talk
 // to. node-postgres (`pg`) is the default; `postgres` (porsager/postgres.js) or
@@ -52,6 +53,7 @@ let _cursorSeq = 0;
 
 // ─── node-postgres (pg) — the default driver ────────────────────────────────
 export function pgDriver(pool: any): PostgresDriver {
+  guardPoolErrors(pool, 'Postgres');
   const norm = (r: any) => ({ rows: r.rows, rowCount: r.rowCount ?? r.rows.length });
   return {
     kind: 'postgres',
@@ -111,9 +113,16 @@ export function pgDriver(pool: any): PostgresDriver {
 // ─── postgres.js (porsager) ─────────────────────────────────────────────────
 // Wrap a `postgres(url)` instance. `sql.unsafe(text, params)` runs a
 // parameterised query and returns an array-like result carrying `.count`.
+//
+// unsafe() does not prepare unless asked: without `{ prepare: true }` every
+// query was parsed and planned afresh, which ran at less than half the rate
+// of postgres.js's own prepared queries. It follows the client's setting, so
+// a client created with `prepare: false` (PgBouncer in transaction mode)
+// still never prepares.
 export function postgresJsDriver(sql: any): PostgresDriver {
+  const prepare = sql?.options?.prepare !== false;
   const run = async (q: any, text: string, params?: unknown[]) => {
-    const r = await q.unsafe(text, (params ?? []) as any[]);
+    const r = await q.unsafe(text, (params ?? []) as any[], { prepare });
     const rows = Array.from(r as any[]);
     return { rows, rowCount: (r.count ?? rows.length) as number };
   };

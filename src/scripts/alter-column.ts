@@ -71,6 +71,7 @@ function alterTypeSql(d: Dialect, table: string, col: string, f: FieldDef): stri
   const c = d.quoteIdent(col);
   switch (d.name) {
     case 'postgres':
+    case 'duckdb':
       return `ALTER TABLE ${q} ALTER COLUMN ${c} TYPE ${t}`;
     case 'mysql':
       // MySQL restates the whole definition, so nullability rides along.
@@ -84,7 +85,7 @@ function alterTypeSql(d: Dialect, table: string, col: string, f: FieldDef): stri
 function alterNullSql(d: Dialect, table: string, col: string, f: FieldDef): string | null {
   const q = d.quoteIdent(table);
   const c = d.quoteIdent(col);
-  if (d.name === 'postgres') {
+  if (d.name === 'postgres' || d.name === 'duckdb') {
     return `ALTER TABLE ${q} ALTER COLUMN ${c} ${f.optional ? 'DROP' : 'SET'} NOT NULL`;
   }
   if (d.name === 'mysql') {
@@ -140,7 +141,7 @@ export function diffColumn(
 
   if (!typeChanged && !nullChanged) return null;
 
-  if (d.name !== 'postgres' && d.name !== 'mysql') {
+  if (d.name !== 'postgres' && d.name !== 'mysql' && d.name !== 'duckdb') {
     return { note: `${table}.${name} changed`, unsafe: sqliteRefusal(table, name) };
   }
 
@@ -172,7 +173,7 @@ export function diffColumn(
       down:
         `-- narrowing ${name} back to ${actualType} can fail on rows added since;\n` +
         `-- review before rolling back.\n` +
-        (d.name === 'postgres'
+        (d.name === 'postgres' || d.name === 'duckdb'
           ? `ALTER TABLE ${d.quoteIdent(table)} ALTER COLUMN ${d.quoteIdent(name)} TYPE ${actualType}`
           : `ALTER TABLE ${d.quoteIdent(table)} MODIFY COLUMN ${d.quoteIdent(name)} ${actualType}`),
       note: `widen ${table}.${name}: ${actualType} → ${declaredType}`,
@@ -188,7 +189,7 @@ export function diffColumn(
     return {
       up,
       down:
-        d.name === 'postgres'
+        d.name === 'postgres' || d.name === 'duckdb'
           ? `ALTER TABLE ${d.quoteIdent(table)} ALTER COLUMN ${d.quoteIdent(name)} SET NOT NULL`
           : `ALTER TABLE ${d.quoteIdent(table)} MODIFY COLUMN ${d.quoteIdent(name)} ${d.columnType(field)} NOT NULL`,
       note: `${table}.${name} becomes nullable`,

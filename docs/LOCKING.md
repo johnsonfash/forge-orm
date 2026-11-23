@@ -38,7 +38,7 @@ Everything below assumes 2.5.x. The implementation files worth knowing about are
 
 ## What forge exposes
 
-**Row locks are an option on the read API (Postgres).** `findFirst`, `findUnique`, `findMany` and the `OrThrow` forms take `lock`:
+**Row locks are an option on the read API (Postgres, MySQL, SQL Server).** `findFirst`, `findUnique`, `findMany` and the `OrThrow` forms take `lock`:
 
 ```ts
 await db.$transaction(async (tx) => {
@@ -48,30 +48,33 @@ await db.$transaction(async (tx) => {
 });
 ```
 
-| `lock:` | SQL appended to the SELECT |
-| --- | --- |
-| `'update'` | `FOR UPDATE` |
-| `'noKeyUpdate'` | `FOR NO KEY UPDATE` |
-| `'share'` | `FOR SHARE` |
-| `'keyShare'` | `FOR KEY SHARE` |
-| `{ mode: 'update', skipLocked: true }` | `FOR UPDATE SKIP LOCKED` |
-| `{ mode: 'share', nowait: true }` | `FOR SHARE NOWAIT` |
+| `lock:` | Postgres | MySQL / MariaDB | SQL Server (hint after the table) |
+| --- | --- | --- | --- |
+| `'update'` | `FOR UPDATE` | `FOR UPDATE` | `WITH (UPDLOCK, ROWLOCK)` |
+| `'share'` | `FOR SHARE` | `LOCK IN SHARE MODE` | `WITH (REPEATABLEREAD, ROWLOCK)` |
+| `'noKeyUpdate'` | `FOR NO KEY UPDATE` | refused: use `'update'` | refused: use `'update'` |
+| `'keyShare'` | `FOR KEY SHARE` | refused: use `'share'` | refused: use `'share'` |
+| `{ mode, skipLocked: true }` | `… SKIP LOCKED` | `… SKIP LOCKED` | adds `READPAST` |
+| `{ mode, nowait: true }` | `… NOWAIT` | `… NOWAIT` | adds `NOWAIT` |
 
 Rules the option enforces:
 
-* **Only inside a transaction.** Outside one, Postgres runs the SELECT in its own implicit transaction and releases the lock as soon as the rows come back, so the call would read as locked and lock nothing. forge throws instead. Calling `db.<model>` (not `tx.<model>`) inside a `$transaction` callback is fine — the ambient session carries the lock.
-* **Postgres only** (PGlite included). The other dialects refuse it rather than emit SQL they do not speak: MSSQL locks with table hints, SQLite and DuckDB have no row locks, Mongo has none at all.
-* `nowait` and `skipLocked` are exclusive. `NOWAIT` fails with SQLSTATE `55P03` (lock_not_available).
+* **Only inside a transaction.** Outside one, the SELECT runs in its own implicit transaction and releases the lock as soon as the rows come back, so the call would read as locked and lock nothing. forge throws instead. Calling `db.<model>` (not `tx.<model>`) inside a `$transaction` callback is fine — the ambient session carries the lock.
+* **`noKeyUpdate` and `keyShare` are Postgres modes.** They exist so a foreign-key check does not wait on an UPDATE; MySQL and SQL Server have no such split. forge refuses them there rather than quietly take the stronger lock, which would change what blocks what.
+* **MySQL:** plain `share` is `LOCK IN SHARE MODE`, which 5.7, 8.x and MariaDB all accept. `share` with `nowait` / `skipLocked` is `FOR SHARE …`, which needs MySQL 8.0+ (MariaDB has no `FOR SHARE`). `NOWAIT` and `SKIP LOCKED` on `update` need MySQL 8.0.1+ or MariaDB 10.6+. On an older server the server's own syntax error is what you get.
+* **SQL Server:** `REPEATABLEREAD` holds shared row locks to the end of the transaction without the range locks `HOLDLOCK` takes, which is what `FOR SHARE` does. `NOWAIT` fails with error 1222.
+* **No row locks at all on SQLite, DuckDB and MongoDB**, and the error says what to do instead. SQLite: a write transaction locks the whole database, so put the read and the write in one `db.$transaction()`; to take the write lock at the first read, start it with `BEGIN IMMEDIATE`. DuckDB: one process owns the file and concurrent writes are resolved optimistically. MongoDB: claim a document with an atomic `update` whose `where` matches only unclaimed documents.
+* `nowait` and `skipLocked` are exclusive. Postgres `NOWAIT` fails with SQLSTATE `55P03` (lock_not_available).
 * The lock covers the rows of the model being read. Relations pulled in with `include` are separate queries and are **not** locked.
 * Postgres refuses `FOR UPDATE` with `distinct` (it becomes `DISTINCT ON`); the server's error is what you get.
 
 **Raw SQL still works**, for anything the option does not cover (`FOR UPDATE OF`, `LOCK TABLE`, advisory locks): `tx.$queryRaw` / `tx.$executeRaw` run on the same connection as every `tx.<model>` call, so a lock taken raw holds for the wrapped calls that follow. `regression-pg-locking.ts` proves both forms with two real connections: the waiter appears in `pg_stat_activity` on a Lock, SKIP LOCKED claims the next row at once, NOWAIT fails immediately, and two `FOR SHARE` holders coexist while a `FOR UPDATE` waits for both.
 
-**forge's own lock**: `forge push`, `forge migrate` and `db.$migrateFiles()` all take `pg_advisory_xact_lock(0x6f6f7267, 0x65000001)` (`src/adapters/postgres/migrate.ts`), so concurrent deploys serialise.
+**forge's own lock**: on Postgres, `forge push`, `forge migrate` and `db.$migrateFiles()` all take `pg_advisory_xact_lock(0x6f6f7267, 0x65000001)` (`src/adapters/postgres/migrate.ts`), so concurrent deploys serialise. `forge migrate` takes `GET_LOCK('forge_migrate')` on MySQL, `sp_getapplock('forge_migrate')` on SQL Server and `BEGIN IMMEDIATE` on SQLite; see [MIGRATIONS.md › Per dialect](./MIGRATIONS.md#per-dialect).
 
 What you don't get:
 
-* Cross-dialect lock translation. On MySQL write `FOR UPDATE` through `tx.$queryRaw`; on MSSQL `WITH (UPDLOCK, HOLDLOCK)`; on Mongo use `findOneAndUpdate` or optimistic versioning.
+* Locks on dialects that have none. On Mongo use `findOneAndUpdate` or optimistic versioning.
 * Automatic retry on lock timeout or deadlock. Forge maps the error codes (`P2034` — see [ERRORS.md › Retry classes](./ERRORS.md#retry-classes--transient-vs-permanent)) but the `for` loop around `db.$transaction(...)` is yours to write. The pattern is at [TRANSACTIONS.md › Deadlock and serialization-failure retry](./TRANSACTIONS.md#deadlock-and-serialization-failure-retry).
 
 ---

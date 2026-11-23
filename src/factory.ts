@@ -178,10 +178,12 @@ export type ForgeDb<S extends SchemaShape = SchemaMap> = Collections<S> & {
     prune?: boolean;
   }): Promise<import('./wasm/migrate').RuntimeApplyReport>;
   // Apply the hand-written / generated `.sql` files in a migrations folder,
-  // in order — the in-process `forge migrate`. Postgres only. Each file runs
-  // in its own transaction with the ledger row that records it; checksums
-  // catch a file edited after it ran; an advisory lock lets every instance
-  // call this at boot and still apply each file exactly once.
+  // in order — the in-process `forge migrate`. Postgres, SQLite, SQL Server
+  // and DuckDB run each file in its own transaction with the ledger row that
+  // records it; MySQL commits DDL as it runs, so there a file is applied
+  // statement by statement and recorded after its last one. Checksums catch
+  // a file edited after it ran; a lock lets every instance call this at boot
+  // and still apply each file exactly once. MongoDB refuses: it has no SQL.
   //
   //   await db.$migrateFiles({ dir: 'migrations' });
   $migrateFiles(
@@ -887,15 +889,34 @@ function makeDb(
   async function $migrateFiles(
     opts?: import('./adapters/postgres/migrate-files').MigrateFilesOptions,
   ) {
-    if (adapter.kind !== 'postgres') {
-      throw new Error(
-        `[forge] $migrateFiles() runs .sql migration files on postgres only; this db is ` +
-        `${adapter.kind}. Use $migrate() to sync the schema instead.`,
-      );
+    const a = adapter as unknown as { driver?: unknown; db?: unknown };
+    switch (adapter.kind) {
+      case 'postgres': {
+        const { applyMigrationFiles } = await import('./adapters/postgres/migrate-files');
+        return applyMigrationFiles(a.driver as import('./adapters/postgres/driver').PostgresDriver, opts);
+      }
+      case 'mysql': {
+        const { applyMysqlMigrationFiles } = await import('./adapters/mysql/migrate-files');
+        return applyMysqlMigrationFiles(a.driver as import('./adapters/mysql/driver').MysqlDriver, opts);
+      }
+      case 'sqlite': {
+        const { applySqliteMigrationFiles } = await import('./adapters/sqlite/migrate-files');
+        return applySqliteMigrationFiles(a.db as import('./adapters/sqlite/driver').SqliteDriver, opts);
+      }
+      case 'mssql': {
+        const { applyMssqlMigrationFiles } = await import('./adapters/mssql/migrate-files');
+        return applyMssqlMigrationFiles(a.driver as import('./adapters/mssql/driver').MssqlDriver, opts);
+      }
+      case 'duckdb': {
+        const { applyDuckdbMigrationFiles } = await import('./adapters/duckdb/migrate-files');
+        return applyDuckdbMigrationFiles(a.driver as import('./adapters/duckdb/driver').DuckdbDriver, opts);
+      }
+      default:
+        throw new Error(
+          `[forge] $migrateFiles() runs .sql migration files, and ${adapter.kind} has no SQL. ` +
+          `Use $migrate() (or \`forge push\`) to sync its indexes from the schema.`,
+        );
     }
-    const { applyMigrationFiles } = await import('./adapters/postgres/migrate-files');
-    const driver = (adapter as unknown as { driver: import('./adapters/postgres/driver').PostgresDriver }).driver;
-    return applyMigrationFiles(driver, opts);
   }
 
   // Runtime capability probe. sqlite adapter routes through the rich

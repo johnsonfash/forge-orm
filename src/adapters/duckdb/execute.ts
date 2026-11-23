@@ -22,6 +22,7 @@ import {
   compileUpdate,
 } from './compile-from-ir';
 import { withDuckdbErrors } from './errors';
+import { decodeWideIntegerRows, decodeWideIntegers } from '../shared/wide-int';
 import type { DuckdbQueryable } from './driver';
 import { hydrateManyRelation, hydrateOneRelation } from '../../ir/hydrate-many';
 import { softDeleteField } from '../../ir/build/soft-delete';
@@ -41,7 +42,7 @@ export async function executeDuckdbSelect(
   const artifact = compileSelect(node, model);
   const { rows } = await withDuckdbErrors(() => exec.query(artifact.sql, artifact.params));
 
-  let out = rows;
+  let out = decodeWideIntegerRows(model, rows);
   if (node.distinct?.length) out = dedupeBy(out, node.distinct);
 
   // Fallback geoPoint refinement — exact-circle + sort post-process.
@@ -111,7 +112,7 @@ export async function executeDuckdbInsert(
   const exec = opts.client ?? driver;
   const artifact = compileInsert(node, model);
   const { rows, rowCount } = await withDuckdbErrors(() => exec.query(artifact.sql, artifact.params));
-  return { docs: rows, count: rowCount ?? rows.length };
+  return { docs: decodeWideIntegerRows(model, rows), count: rowCount ?? rows.length };
 }
 
 export async function executeDuckdbUpdate(
@@ -124,7 +125,7 @@ export async function executeDuckdbUpdate(
   const artifact = compileUpdate(node, model);
   const { rows, rowCount } = await withDuckdbErrors(() => exec.query(artifact.sql, artifact.params));
   if (node.many) return { count: rowCount ?? rows.length };
-  return { doc: rows[0], count: rows.length };
+  return { doc: decodeWideIntegers(model, rows[0]), count: rows.length };
 }
 
 export async function executeDuckdbDelete(
@@ -137,7 +138,7 @@ export async function executeDuckdbDelete(
   const artifact = compileDelete(node, model);
   const { rows, rowCount } = await withDuckdbErrors(() => exec.query(artifact.sql, artifact.params));
   if (node.many) return { count: rowCount ?? rows.length };
-  return { doc: rows[0], count: rows.length };
+  return { doc: decodeWideIntegers(model, rows[0]), count: rows.length };
 }
 
 async function hydrate(

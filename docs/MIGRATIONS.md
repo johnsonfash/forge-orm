@@ -7,7 +7,7 @@ The browser-side equivalents are covered in **[BROWSER.md](./BROWSER.md#dbmigrat
 ## Contents
 
 * [The migration model — push, or migration files](#the-migration-model--push-or-migration-files)
-* [`forge migrate` — migration files (Postgres)](#forge-migrate--migration-files-postgres)
+* [`forge migrate` — migration files](#forge-migrate--migration-files)
 * [`forge push`](#forge-push)
 * [`forge diff`](#forge-diff)
 * [`forge diff apply`](#forge-diff-apply)
@@ -29,7 +29,7 @@ The browser-side equivalents are covered in **[BROWSER.md](./BROWSER.md#dbmigrat
 
 ## The migration model — push, or migration files
 
-forge supports two models. The default is **declare-and-push**; on Postgres there is also a **migrations folder** applied by [`forge migrate`](#forge-migrate--migration-files-postgres), for hand-written SQL and reviewed, versioned changes. The two compose: `forge generate` writes schema-derived files into the same folder that holds your hand-written ones, and `forge migrate` applies them all in order.
+forge supports two models. The default is **declare-and-push**; on Postgres there is also a **migrations folder** applied by [`forge migrate`](#forge-migrate--migration-files), for hand-written SQL and reviewed, versioned changes. The two compose: `forge generate` writes schema-derived files into the same folder that holds your hand-written ones, and `forge migrate` applies them all in order.
 
 In the push model, forge is a **declare-and-push** ORM. You write models in TypeScript, and `forge push` reads the schema, introspects the live database, and emits the DDL needed to bring the database forward. There is no `migrations/` folder you hand-edit, no `prisma migrate dev` step, no down-files you wire up by hand. The artefact of "schema at commit X" is the schema file at commit X — nothing else.
 
@@ -54,9 +54,9 @@ The reconciliation path — `forge diff apply` + `_forge_migrations` ledger — 
 * A team larger than 4-5 backend engineers committing to the same schema, with code review on the SQL itself, not the schema declaration.
 * You need transformational data migrations baked into the same atomic unit as the DDL — a migration file with a `BEGIN; ALTER TABLE …; UPDATE …; COMMIT;` body is the natural shape.
 
-On Postgres that is [`forge migrate`](#forge-migrate--migration-files-postgres): a folder of `.sql` files, each applied all-or-nothing with its ledger row, checksummed, and safe to run from every instance at boot. On the other dialects, reach for Prisma Migrate, Drizzle Kit migrate, or a hand-rolled SQL migrations folder.
+That is [`forge migrate`](#forge-migrate--migration-files): a folder of `.sql` files, checksummed and safe to run from every instance at boot, on Postgres, SQLite, SQL Server, DuckDB and MySQL. On all but MySQL each file is applied all-or-nothing with its ledger row; [MySQL cannot do that](#mysql-and-mariadb-files-are-not-all-or-nothing).
 
-## `forge migrate` — migration files (Postgres)
+## `forge migrate` — migration files
 
 ```sh
 npx forge migrate                    # apply pending files in ./migrations, in order
@@ -119,13 +119,43 @@ INSERT INTO _forge_migrations (name, applied_at) VALUES ('0001_core', now()::tex
 
 ### Concurrent runs
 
-Every runner takes the same `pg_advisory_xact_lock` that `forge push` takes, per file, and re-reads the ledger once it holds it. So several app instances can call `db.$migrateFiles()` at boot: one applies each file, the others wait and then skip it. Verified with five in-process runners and with two CLI processes started together — every file applied exactly once.
+On Postgres every runner takes the same `pg_advisory_xact_lock` that `forge push` takes, per file, and re-reads the ledger once it holds it. So several app instances can call `db.$migrateFiles()` at boot: one applies each file, the others wait and then skip it. Verified with five in-process runners and with two CLI processes started together — every file applied exactly once.
+
+### Per dialect
+
+Everything above is written for Postgres and holds on the others, with these differences.
+
+| | One transaction per file | Lock between runners | Splitting |
+| --- | --- | --- | --- |
+| Postgres | yes | `pg_advisory_xact_lock` | sent as written; lexer if the driver cannot take a script |
+| SQLite | yes | `BEGIN IMMEDIATE` (the database write lock) | `;`, but a `CREATE TRIGGER … BEGIN … END` body stays whole |
+| SQL Server | yes | `sp_getapplock`, owned by the transaction | batches on `GO` lines, never on `;` |
+| DuckDB | yes | none needed: one process owns the file; runs on one connection are queued | `;`, with Postgres quoting (`$$`, `E''`) |
+| MySQL / MariaDB | **no** | `GET_LOCK('forge_migrate')` held for the whole run | `;`, `DELIMITER` blocks, routine bodies |
+| MongoDB | refused | | |
+
+**SQLite.** `BEGIN IMMEDIATE` takes the write lock at the start of each file, so a second process waits (up to its busy timeout), then re-reads the ledger and skips what is done. `VACUUM`, `ATTACH`/`DETACH`, `PRAGMA foreign_keys = …` and `PRAGMA journal_mode = …` need a `-- forge:no-transaction` file: the two pragmas are accepted inside a transaction and silently do nothing there. In a no-transaction file only the ledger check and row are taken under the lock, so two processes starting the same such file at the same moment can both run it; write it to be re-runnable. Each statement goes to the driver on its own, so drivers whose `exec()` cannot take a script (tauri-plugin-sql) work too.
+
+**SQL Server.** A file is split into batches on lines holding only `GO` (as `sqlcmd` and SSMS do); everything between two `GO` lines is one request. `CREATE PROCEDURE`, `CREATE VIEW` and `CREATE TRIGGER` must each be alone in their batch, exactly as in SSMS. `GO 5` (repeat) is refused. `BEGIN TRAN` / `COMMIT` in a plain batch is refused; inside a procedure body it is fine. `CREATE/ALTER/DROP DATABASE`, `BACKUP`, `RESTORE`, `RECONFIGURE` and full-text catalog statements need `-- forge:no-transaction`; there the batches commit one by one and only the ledger check and row are under the lock.
+
+**DuckDB.** DDL rolls back with the transaction. A database file is opened read-write by one process at a time, so there is no other runner to lock out; calls on one connection are queued because a connection holds one transaction at a time.
+
+**Statements forge cannot see coming.** The lists above are what forge refuses before anything runs. If the server itself says a statement cannot run in a transaction, nothing from that file was applied; move the statement to a `-- forge:no-transaction` file.
+
+### MySQL and MariaDB: files are not all-or-nothing
+
+MySQL commits every DDL statement the moment it runs (an *implicit commit*), so no transaction can hold a file's `CREATE TABLE` and its ledger row together. `forge migrate` says so when it starts. A file runs one statement at a time and its row is written after the last statement; if statement 3 fails, statements 1 and 2 **stay applied**, the file is not recorded, and the error says how many stayed. This is the same contract as a Postgres `-- forge:no-transaction` file: **write MySQL migrations to be safe to re-run** (`CREATE TABLE IF NOT EXISTS`, `DROP … IF EXISTS`).
+
+* A file may wrap its data changes in `START TRANSACTION; … COMMIT;` itself; a `START TRANSACTION` with no `COMMIT` after it is refused.
+* `DELIMITER $$ … DELIMITER ;` blocks work as in the mysql client, and a `CREATE PROCEDURE … BEGIN … END;` without DELIMITER stays whole too.
+* Statements are sent without parameters, so a `?` inside a string is a `?`.
+* The whole run holds `GET_LOCK('forge_migrate', 3600)` on one connection. That needs a driver that can hold one: `mysql2Driver` and `mariadbDriver` can, the PlanetScale HTTP driver cannot and is refused; point `MIGRATION_DATABASE_URL` at a direct `mysql://` URL.
 
 ### What it does not do
 
-* It does not generate SQL; `forge generate` does, into the same folder.
-* No automatic down: `forge rollback` runs the latest file's `-- down` section (one transaction on Postgres).
-* Postgres only. MySQL commits DDL implicitly, so "all-or-nothing" cannot be offered there.
+* It does not generate SQL; `forge generate` does, into the same folder (Postgres, MySQL, SQLite, DuckDB; SQL Server files are written by hand).
+* No automatic down: `forge rollback` runs the latest file's `-- down` section, in one transaction wherever DDL is transactional (everything but MySQL).
+* MongoDB has no SQL files: `forge migrate` and `$migrateFiles()` refuse it. `forge push` (or `db.$migrate()` at boot) reconciles its indexes.
 
 ---
 
@@ -1251,7 +1281,9 @@ npx forge generate --custom --name backfill-slugs   # empty up/down to fill in
 
 `--dialect` is only needed when `DATABASE_URL` is absent. When it is set,
 the command reads its **scheme** to know the dialect and connects to
-nothing.
+nothing. It generates for `postgres`, `mysql`, `sqlite` and `duckdb`. SQL
+Server and MongoDB are refused with what to do instead (write SQL Server
+files by hand; Mongo uses `forge push`).
 
 ## The CI gate
 

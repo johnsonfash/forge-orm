@@ -4,6 +4,105 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.24.0 — Migration files, row locks and the splitter on every SQL dialect; 64-bit integers as typed
+
+2.23.0 to 2.23.2 added things that only worked on Postgres. They now work on
+every dialect that can support them, and the ones that cannot say so.
+
+**`forge migrate` and `db.$migrateFiles()` run on SQLite, SQL Server, DuckDB
+and MySQL**, with the same checksums, out-of-order and unknown-entry
+refusals, `--dry-run`, `-- forge:no-transaction` and `MIGRATION_DATABASE_URL`.
+
+- **SQLite, SQL Server and DuckDB: each file is one transaction with its
+  ledger row**, as on Postgres. A file that fails part-way leaves nothing.
+  Runners are kept apart by `BEGIN IMMEDIATE` (SQLite), `sp_getapplock`
+  owned by the transaction (SQL Server), and a per-connection queue
+  (DuckDB, whose file one process owns).
+- **MySQL and MariaDB: a file is NOT all-or-nothing**, because MySQL commits
+  DDL as it runs. It is applied statement by statement and recorded after
+  the last; a failure says how many statements before it stayed applied.
+  `forge migrate` prints this when it starts. The run holds
+  `GET_LOCK('forge_migrate')` on one connection, so `mysql2Driver` and
+  `mariadbDriver` gain `reserve()`; the PlanetScale HTTP driver cannot hold
+  a connection and is refused.
+- Statements each dialect will not run in a transaction are caught before
+  anything runs: SQLite `VACUUM`, `ATTACH`, and `PRAGMA foreign_keys = …`,
+  which inside a transaction is accepted and does nothing; SQL Server
+  `ALTER DATABASE`, `BACKUP`, full-text catalogs. `BEGIN`/`COMMIT` in a file
+  is refused, except inside a SQL Server procedure body; a MySQL file may
+  carry its own `START TRANSACTION … COMMIT`.
+- **Runners in one process take turns too.** better-sqlite3 waits for a
+  lock by blocking the thread, so two runners on two connections in one
+  process deadlocked: the waiter froze the thread the holder needed to
+  commit, and failed with "database is locked". SQLite now takes the write
+  lock without blocking and retries on a timer, for up to a minute.
+- **MongoDB is refused** with a pointer to `forge push` / `$migrate()`.
+- `forge rollback` and `forge diff apply` run in one transaction on every
+  dialect with transactional DDL, not only Postgres. `forge migrate status`
+  works on SQL Server, which has no `CREATE TABLE IF NOT EXISTS`; it used to
+  fail creating the ledger.
+
+**The statement splitter knows every dialect.** MySQL: `DELIMITER` blocks,
+`CREATE PROCEDURE / TRIGGER … BEGIN … END` bodies without DELIMITER
+(`IF … END IF`, `CASE … END`, loops counted), `--` only before a space,
+`/*! … */` kept as code. SQLite: trigger bodies, `[bracket]` identifiers.
+SQL Server: batches on `GO` lines and never on `;`, `[brackets]`, nested
+comments. DuckDB: Postgres quoting.
+
+**Row locks on MySQL and SQL Server.** `lock: 'update' | 'share'` with
+`nowait` / `skipLocked`: MySQL `FOR UPDATE`, `LOCK IN SHARE MODE`,
+`FOR SHARE NOWAIT`; SQL Server table hints `WITH (UPDLOCK, ROWLOCK)`,
+`(REPEATABLEREAD, ROWLOCK)`, plus `NOWAIT` or `READPAST`. `noKeyUpdate` and
+`keyShare` are Postgres modes and are refused there with the mode to use.
+SQLite, DuckDB and MongoDB have no row locks; the error now says what to do
+instead.
+
+**A pool you build yourself no longer exits the process when an idle
+connection dies.** 2.23.0 only covered the `pg` pool forge made from a URL.
+`pgDriver`, `mariadbDriver` and `mssqlDriver` now attach a warning listener
+for `'error'` when the pool has none of its own, and `mysql2Driver` gives
+every pooled connection a lasting one (mysql2's own is `once`).
+
+**postgres.js queries are prepared.** `postgresJsDriver` called
+`sql.unsafe(text, params)`, and postgres.js does not prepare an unsafe query
+unless asked, so every query was parsed and planned again. It now passes
+`{ prepare }` from the client's own setting, so a client created with
+`prepare: false` (PgBouncer in transaction mode) still never prepares.
+`bench/drivers-postgres.ts` (20k lookups, 50 at a time): 31k a second before,
+69.8k after, against 83k for postgres.js used directly.
+
+**A bigserial id is a number and an `f.bigint()` is a bigint, on every
+driver.** node-postgres, postgres.js and tedious return a 64-bit column as a
+string, the mariadb connector and DuckDB as a bigint, so `id` came back as
+`"42"` while its type said `number`. Each row is now converted by field kind
+(the drivers' own parsers are untouched, so `COUNT(*)` and raw queries are
+as before). A bigserial id past `Number.MAX_SAFE_INTEGER` throws rather than
+come back rounded to a different id; an `f.bigint()` that the driver had
+already rounded to a number throws too. forge's own mysql2 pool now sets
+`supportBigNumbers`, so a large BIGINT arrives as an exact string. Note that
+`JSON.stringify` refuses a bigint, so a row with an `f.bigint()` needs a
+replacer before it goes into a JSON response.
+
+**`forge generate` and `forge diff apply` on DuckDB and SQL Server.** Both
+returned no changes, which `diff apply` reported as "already in sync" and
+`generate` as an empty migration. DuckDB is generated now. SQL Server is
+refused with what to do instead (write the file by hand, apply it with
+`forge migrate`). DuckDB's own DDL also changed: it has no `ALTER TABLE …
+ADD CONSTRAINT`, so a new table's UNIQUE and CHECK constraints go inside its
+`CREATE TABLE` (they used to fail on `forge push`), a foreign key on DuckDB is
+written as a comment, `::jsonb` defaults are `::JSON`, and the Postgres
+full-text index of a `.searchable()` field is not emitted (DuckDB searches
+with ILIKE and has no `to_tsvector`).
+
+**JSON over mysql2, mariadb, tedious, SQLite and DuckDB was checked for the
+2.23.1 double encoding**: none of them re-encodes a string parameter, so a
+JSON value is stored once. Tested in `json-write-encoding.spec.ts`.
+
+**mysql2 asks for exact big numbers on every statement**, whatever the pool
+was built with: a BIGINT past 2^53 arrives as an exact string (smaller ones
+stay numbers) and forge decodes it by field kind. A pool the app built
+without `supportBigNumbers` used to hand forge an already-rounded value.
+
 ## 2.23.2 — `forge generate` foreign keys, NodeNext schemas, bigserial drift
 
 **A new table's foreign key referenced the schema KEY, not the table.**

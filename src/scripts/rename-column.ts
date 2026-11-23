@@ -49,7 +49,7 @@ function renameSql(d: Dialect, table: string, from: string, to: string): string 
   // does too — the older CHANGE COLUMN syntax needed the full column
   // definition repeated, which is how a rename silently dropped a
   // constraint somebody had added by hand.
-  if (d.name === 'postgres' || d.name === 'mysql' || d.name === 'sqlite') {
+  if (d.name === 'postgres' || d.name === 'mysql' || d.name === 'sqlite' || d.name === 'duckdb') {
     return `ALTER TABLE ${q} RENAME COLUMN ${d.quoteIdent(from)} TO ${d.quoteIdent(to)}`;
   }
   return null;

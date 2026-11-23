@@ -12,6 +12,7 @@ import type {
 } from '../../ir/types';
 import type { SQLArtifact } from '../../compile';
 import type { FieldDef, ModelDef } from '../../schema/types';
+import { rowLockSql } from '../row-lock';
 import { schema } from '../../schema';
 import { PostgresDialect, type Dialect } from './dialect';
 import { multiPolygonBbox } from '../shared/wkt';
@@ -504,12 +505,9 @@ export function compileSelect(
   schemaOverride?: Record<string, ModelDef<any>>,
 ): SQLArtifact {
   const m = modelDef(node.model, modelOverride);
-  // The other SQL dialects borrow this compiler; none of them spells a row
-  // lock this way (MSSQL uses table hints, SQLite has no row locks), so a
-  // lock reaching them is refused rather than emitted as foreign SQL.
-  if (node.lock && dialect.name !== 'postgres') {
-    throw new Error(`[forge] lock: row locks are supported on postgres only, not ${dialect.name}.`);
-  }
+  // Each dialect that borrows this compiler spells a row lock its own way
+  // (MSSQL as a table hint), or refuses it — never emitted as foreign SQL.
+  const lockSql = node.lock ? rowLockSql(dialect.name, node.lock) : { hint: '', tail: '' };
   const params: unknown[] = [];
   const table = dialect.quoteIdent(m.collection);
   const ctx: CompileCtx = { d: dialect, model: m, table, params, aliasCount: { n: 0 }, schemaOverride };
@@ -575,25 +573,16 @@ export function compileSelect(
   const offset = node.offset != null ? `OFFSET ${Number(node.offset)}` : '';
 
   const sql = [
-    `SELECT ${distinctClause}${cols} FROM ${table}`,
-    whereClause, orderClause, limit, offset, compileLockClause(node.lock),
+    `SELECT ${distinctClause}${cols} FROM ${table}${lockSql.hint}`,
+    whereClause, orderClause, limit, offset, lockSql.tail,
   ].filter(Boolean).join(' ');
 
   return { kind: 'sql', dialect: dialect.name, sql, params };
 }
 
-const LOCK_SQL: Record<RowLockSpec['strength'], string> = {
-  update: 'FOR UPDATE',
-  noKeyUpdate: 'FOR NO KEY UPDATE',
-  share: 'FOR SHARE',
-  keyShare: 'FOR KEY SHARE',
-};
-
-/** `FOR UPDATE [NOWAIT | SKIP LOCKED]` — the last clause of a SELECT. */
+/** `FOR UPDATE [NOWAIT | SKIP LOCKED]` — the last clause of a postgres SELECT. */
 export function compileLockClause(lock: RowLockSpec | undefined): string {
-  if (!lock) return '';
-  const wait = lock.wait === 'nowait' ? ' NOWAIT' : lock.wait === 'skipLocked' ? ' SKIP LOCKED' : '';
-  return `${LOCK_SQL[lock.strength]}${wait}`;
+  return lock ? rowLockSql('postgres', lock).tail : '';
 }
 
 export function compileCount(

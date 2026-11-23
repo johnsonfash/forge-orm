@@ -69,13 +69,8 @@ export class PostgresAdapter implements Adapter {
         idleTimeoutMillis: 10_000,
         connectionTimeoutMillis: 10_000,
       });
-      // An idle client whose server connection dies (a Postgres restart, a terminated
-      // backend) makes the pool emit 'error'. With no listener Node treats that as an
-      // uncaught exception and the process exits. The pool already drops the broken
-      // client and opens a new one on the next query, so report it and carry on.
-      pool.on('error', (err: Error) => {
-        process.emitWarning(`forge-orm: idle Postgres connection lost (${err.message}); the pool will reconnect`);
-      });
+      // pgDriver attaches the 'error' listener that keeps an idle connection
+      // dying from exiting the process.
       this._rawPool = pool;
       this._driver = pgDriver(pool);
     }
@@ -188,11 +183,12 @@ export class PostgresAdapter implements Adapter {
   async *streamSelect(node: any, model: any, _opts?: ExecOpts): AsyncIterable<any> {
     const { compileSelect } = await import('./compile-from-ir');
     const a = compileSelect(node, model);
+    const { decodeWideIntegers } = await import('../shared/wide-int');
     if (this.driver.stream) {
-      yield* this.driver.stream(a.sql, a.params);
+      for await (const r of this.driver.stream(a.sql, a.params)) yield decodeWideIntegers(model, r);
     } else {
       const { rows } = await this.driver.query(a.sql, a.params);
-      for (const r of rows) yield r;
+      for (const r of rows) yield decodeWideIntegers(model, r);
     }
   }
 

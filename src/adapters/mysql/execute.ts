@@ -18,6 +18,7 @@ import {
   compileUpdate,
 } from './compile-from-ir';
 import { withMysqlErrors } from './errors';
+import { decodeWideIntegers } from '../shared/wide-int';
 import { buildSelect, buildWhereTree } from '../../ir/build';
 import { fromDriverBytes } from '../../bytes';
 import { hydrateManyRelation, hydrateOneRelation } from '../../ir/hydrate-many';
@@ -44,7 +45,7 @@ export interface MysqlExecOpts {
 
 // mysql2 returns bools as 0/1, dates as Date, JSON pre-parsed; re-hydrate to
 // the schema's JS types.
-function decodeRow(model: ModelDef<any>, row: any): any {
+export function decodeRow(model: ModelDef<any>, row: any): any {
   if (!row || typeof row !== 'object') return row;
   const out: any = {};
   for (const k of Object.keys(row)) {
@@ -67,7 +68,7 @@ function decodeRow(model: ModelDef<any>, row: any): any {
       default:           out[k] = v;
     }
   }
-  return out;
+  return decodeWideIntegers(model, out);
 }
 
 function safeParse(s: string): any {

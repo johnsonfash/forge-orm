@@ -8,12 +8,13 @@ import * as path from 'node:path';
 
 function help() {
   console.log(`
-forge — schema sync for MongoDB, PostgreSQL, MySQL & SQLite.
+forge — schema sync for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB & SQL Server.
 
 Usage:
   forge generate              Write a migration from the last snapshot (no DB)
-  forge migrate               Apply pending .sql files in migrations/, in order,
-                              each in its own transaction (postgres)
+  forge migrate               Apply pending .sql files in migrations/, in order
+                              (one transaction per file; MySQL: statement by
+                              statement, as DDL commits implicitly there)
   forge migrate --dry-run     List what would run; write nothing
   forge migrate status        What has run, what has not, what should not have
   forge push                  Idempotently sync your schema to the live DB
@@ -62,20 +63,26 @@ Full docs: https://github.com/johnsonfash/forge-orm#readme
 
 /** What each subcommand does, for `forge <cmd> --help`. */
 const SUBCOMMAND_HELP: Record<string, string> = {
-  migrate: `forge migrate — apply the pending .sql files in migrations/ (postgres).
+  migrate: `forge migrate — apply the pending .sql files in migrations/.
 
   Files apply in name order. A file may be hand-written SQL (functions,
   triggers, PostGIS columns, CHECK constraints, anything) or a \`forge
   generate\` file; in the latter only its \`-- up\` section runs.
 
-  Each file runs in ONE transaction together with its row in
-  _forge_migrations: a file that fails part-way leaves nothing behind.
-  The file is sent as written, so $$ bodies and DO blocks need no care.
-  A file that must run outside a transaction (CREATE INDEX CONCURRENTLY)
-  says so on a line of its own:  -- forge:no-transaction
+  Postgres, SQLite, SQL Server, DuckDB: each file runs in ONE transaction
+  together with its row in _forge_migrations, so a file that fails
+  part-way leaves nothing behind. A file that must run outside a
+  transaction (CREATE INDEX CONCURRENTLY, VACUUM, ALTER DATABASE) says so
+  on a line of its own:  -- forge:no-transaction
+
+  MySQL / MariaDB commit DDL as it runs, so there a file is applied
+  statement by statement and is NOT all-or-nothing: write it to be safe
+  to re-run. DELIMITER blocks work. SQL Server files split on GO lines.
+  MongoDB has no SQL files and is refused (use forge push).
 
   A file edited after it ran stops the run (checksum). Concurrent runs
-  wait on an advisory lock and apply each file exactly once.
+  wait on a lock (advisory lock, GET_LOCK, sp_getapplock, BEGIN
+  IMMEDIATE) and apply each file exactly once.
 
     --dry-run              list what would run; write nothing
     --dir=<path>           folder other than ./migrations
@@ -105,8 +112,9 @@ forge migrate status — what the database has actually applied.
   same schema always produces the same SQL, so the migration is
   reviewable in the pull request that changes the schema.
     --name <label>      name the file
-    --dialect <kind>    postgres | mysql | sqlite (else read from
-                        DATABASE_URL's scheme — nothing connects)
+    --dialect <kind>    postgres | mysql | sqlite | duckdb (else read
+                        from DATABASE_URL's scheme — nothing connects).
+                        SQL Server is refused: write its files by hand
     --check             exit 3 if the schema has changes with no
                         migration (for CI)
     --custom            empty up/down, for a data migration

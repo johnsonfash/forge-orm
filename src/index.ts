@@ -25,7 +25,7 @@ export { splitSqlStatements } from './scripts/sql-split';
 export type { SplitDialect, SplitStatement } from './scripts/sql-split';
 // Pluggable MySQL drivers — mysql2 (default), mariadb, or PlanetScale.
 export { mysql2Driver, mariadbDriver, planetscaleDriver, isMysqlDriver } from './adapters/mysql/driver';
-export type { MysqlDriver, MysqlQueryable } from './adapters/mysql/driver';
+export type { MysqlDriver, MysqlQueryable, MysqlReservedSession } from './adapters/mysql/driver';
 // Pluggable Mongo — bring your own MongoClient (DocumentDB/Cosmos/FerretDB/custom).
 //   createDb({ schema, driver: mongoDriver(new MongoClient(uri, opts), 'mydb') })
 export { mongoDriver, isMongoDriver } from './adapters/mongo/driver';

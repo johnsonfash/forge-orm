@@ -107,3 +107,147 @@ describe('splitSqlStatements — other dialects', () => {
       .toEqual([`SELECT '$$'`, 'SELECT 2']);
   });
 });
+
+describe('splitSqlStatements — mysql', () => {
+  const my = (s: string) => splitSqlStatements(s, 'mysql').map((x) => x.sql);
+
+  it('backtick identifiers and backslash escapes in both quote styles', () => {
+    expect(my('CREATE TABLE `a;b` (id int); SELECT "x\\";y"; SELECT 3;'))
+      .toEqual(['CREATE TABLE `a;b` (id int)', 'SELECT "x\\";y"', 'SELECT 3']);
+  });
+
+  it('-- is a comment only when a space follows it', () => {
+    expect(my('SELECT 1--1;\n-- note; here\nSELECT 2;')).toEqual(['SELECT 1--1', 'SELECT 2']);
+  });
+
+  it('DELIMITER blocks: the body keeps its semicolons, the DELIMITER lines are dropped', () => {
+    const sql = `CREATE TABLE t (id int);
+DELIMITER $$
+CREATE PROCEDURE p()
+BEGIN
+  INSERT INTO t VALUES (1);
+  INSERT INTO t VALUES (2);
+END$$
+CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW
+BEGIN
+  SET NEW.id = NEW.id + 1;
+END$$
+DELIMITER ;
+SELECT 1;`;
+    const out = splitSqlStatements(sql, 'mysql');
+    expect(out.map((s) => s.sql)).toEqual([
+      'CREATE TABLE t (id int)',
+      'CREATE PROCEDURE p()\nBEGIN\n  INSERT INTO t VALUES (1);\n  INSERT INTO t VALUES (2);\nEND',
+      'CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW\nBEGIN\n  SET NEW.id = NEW.id + 1;\nEND',
+      'SELECT 1',
+    ]);
+    expect(out.map((s) => s.line)).toEqual([1, 3, 8, 13]);
+  });
+
+  it('a routine body without DELIMITER is kept whole, IF / CASE / LOOP blocks included', () => {
+    const sql = `CREATE DEFINER=\`root\`@\`%\` PROCEDURE p(IN n INT)
+BEGIN
+  DECLARE i INT DEFAULT 0;
+  IF n > 0 THEN SET i = 1; END IF;
+  SET i = CASE WHEN n > 1 THEN 2 ELSE 3 END;
+  lbl: LOOP
+    SET i = i + 1;
+    IF i > 10 THEN LEAVE lbl; END IF;
+  END LOOP;
+  BEGIN
+    SELECT i;
+  END;
+END;
+SELECT 2;`;
+    const out = my(sql);
+    expect(out).toHaveLength(2);
+    expect(out[0]).toMatch(/^CREATE DEFINER[\s\S]*END;\nEND$/);
+    expect(out[1]).toBe('SELECT 2');
+  });
+
+  it('BEGIN outside a routine does not swallow the next statement', () => {
+    expect(my('CREATE TABLE begin_log (id int); SELECT 1;')).toEqual(['CREATE TABLE begin_log (id int)', 'SELECT 1']);
+  });
+
+  it('keeps /*! … */ version comments, which the server runs', () => {
+    expect(my('/*!40101 SET NAMES utf8mb4 */;\nSELECT 1;')).toEqual(['/*!40101 SET NAMES utf8mb4 */', 'SELECT 1']);
+  });
+});
+
+describe('splitSqlStatements — sqlite', () => {
+  const lite = (s: string) => splitSqlStatements(s, 'sqlite').map((x) => x.sql);
+
+  it('keeps a trigger body whole, CASE … END inside included', () => {
+    const sql = `CREATE TABLE t (id INTEGER, n INTEGER);
+CREATE TRIGGER t_bump AFTER UPDATE ON t
+BEGIN
+  UPDATE t SET n = CASE WHEN n IS NULL THEN 1 ELSE n + 1 END WHERE id = NEW.id;
+  INSERT INTO log VALUES (NEW.id);
+END;
+CREATE TEMP TRIGGER t2 AFTER INSERT ON t BEGIN SELECT 1; END;
+SELECT 3;`;
+    const out = lite(sql);
+    expect(out).toHaveLength(4);
+    expect(out[1]).toMatch(/^CREATE TRIGGER t_bump[\s\S]*END$/);
+    expect(out[2]).toBe('CREATE TEMP TRIGGER t2 AFTER INSERT ON t BEGIN SELECT 1; END');
+    expect(out[3]).toBe('SELECT 3');
+  });
+
+  it('[bracket] and `backtick` identifiers', () => {
+    expect(lite('CREATE TABLE [a;b] (`c;d` int); SELECT 2;')).toEqual(['CREATE TABLE [a;b] (`c;d` int)', 'SELECT 2']);
+  });
+
+  it('a backslash is not an escape', () => {
+    expect(lite(`SELECT 'C:\\'; SELECT 2;`)).toEqual([`SELECT 'C:\\'`, 'SELECT 2']);
+  });
+});
+
+describe('splitSqlStatements — mssql', () => {
+  const ms = (s: string) => splitSqlStatements(s, 'mssql');
+
+  it('splits on GO lines only; semicolons stay inside the batch', () => {
+    const sql = `CREATE TABLE [t;x] (id INT);
+INSERT INTO [t;x] VALUES (1);
+GO
+CREATE PROCEDURE p AS
+BEGIN
+  SELECT N'it''s; fine';
+  SELECT 2;
+END
+go -- end of procedure
+SELECT 3`;
+    const out = ms(sql);
+    expect(out.map((s) => s.sql)).toEqual([
+      'CREATE TABLE [t;x] (id INT);\nINSERT INTO [t;x] VALUES (1);',
+      "CREATE PROCEDURE p AS\nBEGIN\n  SELECT N'it''s; fine';\n  SELECT 2;\nEND",
+      'SELECT 3',
+    ]);
+    expect(out.map((s) => s.line)).toEqual([1, 4, 10]);
+  });
+
+  it('GO inside a string, a comment, or mid-line is not a separator', () => {
+    const sql = `SELECT 'a
+GO
+b';
+/* GO
+GO */
+SELECT 1 AS go;
+GO`;
+    expect(ms(sql)).toHaveLength(1);
+  });
+
+  it('records a GO repeat count', () => {
+    expect(ms('INSERT INTO t DEFAULT VALUES\nGO 5\n')[0]).toMatchObject({ repeat: 5 });
+  });
+
+  it('nested block comments', () => {
+    expect(ms('/* a /* b */ GO\n */ SELECT 1').map((s) => s.sql)).toEqual(['SELECT 1']);
+  });
+});
+
+describe('splitSqlStatements — duckdb', () => {
+  it('lexes like postgres: dollar quotes and E-strings', () => {
+    expect(splitSqlStatements(`SELECT $$a;b$$; SELECT E'\\';'; SELECT 3;`, 'duckdb').map((s) => s.sql))
+      .toEqual([`SELECT $$a;b$$`, `SELECT E'\\';'`, 'SELECT 3']);
+  });
+});

@@ -3,6 +3,7 @@
 // caller and re-binds them as named @p1, @p2 inputs on a Request object.
 
 import type { AdapterKind } from '../types';
+import { guardPoolErrors } from '../pool-errors';
 
 export interface MssqlQueryResult {
   rows: any[];
@@ -33,6 +34,7 @@ export interface MssqlQueryable {
  * unchanged (mssql handles them natively).
  */
 export function mssqlDriver(pool: any): MssqlDriver {
+  guardPoolErrors(pool, 'SQL Server');
   const runQuery = async (sqlText: string, params?: unknown[]): Promise<MssqlQueryResult> => {
     const request = pool.request();
     if (params) {

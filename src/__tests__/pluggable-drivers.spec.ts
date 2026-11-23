@@ -20,7 +20,7 @@ describe('MysqlDriver wrappers normalize each client to mysql2 tuple shape', () 
     expect((await d.execute('UPDATE x', []))[0]).toEqual({ affectedRows: 2 });
     const r = await d.transaction(async (s) => { await s.query('Q', []); return 'done'; });
     expect(r).toBe('done');
-    expect(calls).toEqual(expect.arrayContaining([['conn.query', 'START TRANSACTION', undefined], ['conn.query', 'Q', []], ['conn.query', 'COMMIT', undefined], ['release']]));
+    expect(calls).toEqual(expect.arrayContaining([['conn.query', 'START TRANSACTION', undefined], ['conn.query', { sql: 'Q', values: [], supportBigNumbers: true }, undefined], ['conn.query', 'COMMIT', undefined], ['release']]));
   });
 
   test('mariadbDriver normalizes rows + write results to tuples', async () => {
@@ -70,5 +70,22 @@ describe('MongoDriver — bring-your-own MongoClient', () => {
     expect(() => mongoDriver({} as any)).toThrow(/expects a MongoClient/);
     expect(() => mongoDriver(null as any)).toThrow(/expects a MongoClient/);
     expect(isMongoDriver({ kind: 'mongo' })).toBe(false);
+  });
+});
+
+describe('mysql2Driver asks for exact big numbers on every statement', () => {
+  it('query, execute, transactions and reserved sessions all pass supportBigNumbers', async () => {
+    const seen: unknown[] = [];
+    const conn = { query: async (o: unknown) => { seen.push(o); return [[], []]; }, execute: async (o: unknown) => { seen.push(o); return [{}, []]; }, release: () => {} };
+    const pool = { ...conn, getConnection: async () => conn, on: () => {}, listenerCount: () => 0 };
+    const d = mysql2Driver(pool);
+    await d.query('A', [1]);
+    await d.execute('B', [2]);
+    await d.transaction((s) => s.query('C', [3]));
+    const r = await d.reserve!();
+    await r.query('D');
+    const asked = seen.filter((o) => typeof o === 'object') as Array<Record<string, unknown>>;
+    expect(asked.map((o) => o.sql)).toEqual(['A', 'B', 'C', 'D']);
+    expect(asked.every((o) => o.supportBigNumbers === true)).toBe(true);
   });
 });

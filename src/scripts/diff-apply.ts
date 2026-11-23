@@ -7,7 +7,7 @@ import { generateMigration } from './migrate-gen';
 import { loadConsumerSchema } from './load-consumer-schema';
 import {
   ensureHistoryTable, listApplied, rawExec, recordMigration,
-  renderMigrationFile, splitDialectFor, splitStatements, timestampSlug, writeMigrationFile,
+  renderMigrationFile, splitDialectFor, hasTransactionalDdl, splitStatements, timestampSlug, writeMigrationFile,
 } from './migrate-runtime';
 
 // forge:diff:apply — generate a reconciliation migration from live drift and
@@ -69,9 +69,9 @@ async function main() {
       process.exitCode = 1;
       return;
     }
-    // Postgres DDL is transactional, so the statements and the ledger row go
-    // in together: a failure part-way leaves neither. Elsewhere (MySQL
-    // commits DDL implicitly) the statements run one by one as before.
+    // Where DDL is transactional (everything but MySQL) the statements and
+    // the ledger row go in together: a failure part-way leaves neither.
+    // MySQL commits DDL implicitly, so there they run one by one.
     const run = async (q: any) => {
       for (const s of statements) {
         try { await rawExec(q, s); }
@@ -79,7 +79,7 @@ async function main() {
       }
       await recordMigration(q, name);
     };
-    if (db.adapter.kind === 'postgres') await db.$transaction(run);
+    if (hasTransactionalDdl(db.adapter.kind)) await db.$transaction(run);
     else await run(db);
     console.log(`[forge:diff:apply] applied ${statements.length} statement(s); recorded migration '${name}'.`);
   } finally {
