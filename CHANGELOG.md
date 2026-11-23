@@ -4,6 +4,10 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.27.1 — Benchmark results in the docs
+
+* docs/BENCHMARKS.md has a Results section: the scorecard against Kysely and Knex, side-by-side tables for Postgres, MySQL and SQLite with Prisma 7, Drizzle, Kysely, Knex and the raw driver, where forge is slower and why, and 2.25 → 2.27. The README performance section carries the scorecard. No code changes.
+
 ## 2.27.0 — select: false writes, MySQL distinct 5x faster, DuckDB streams on its own connection, IN or EXISTS by shape on SQLite
 
 - **`select: false` on `create`, `update`, `upsert` and `delete`.** The write

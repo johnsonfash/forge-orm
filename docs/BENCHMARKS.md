@@ -184,6 +184,115 @@ Neither case fails the run.
 
 ---
 
+## Results (2.27.0)
+
+Measured on an Apple M2 laptop, Node 22, all databases local: PostgreSQL 17,
+MySQL 8, SQLite through better-sqlite3 12, MongoDB 8.3, DuckDB 1.5. The other
+engines are Prisma 7.8 (driver adapters, no Rust engine), Drizzle 0.45,
+Kysely 0.29 and Knex 3.3. Seed 1000 users, 10 iterations, median ms; lower is
+faster. Every engine's results were checked against each other, and forge's
+matched on every scenario. The full tables, every scenario with round trips,
+are in `bench/compare/results/2.27.0-before-after-<dialect>.md`.
+
+Close calls were settled with the interleaved runner (`ab.ts`), because a
+laptop drifts between runs. Postgres timings in particular varied up to 2x
+from one sequential run to the next.
+
+### Scorecard: forge against the faster of Kysely and Knex
+
+| dialect | forge faster | level (within 5%) | forge slower |
+|---|---|---|---|
+| SQLite | 32 | 11 | 6 |
+| Postgres | 16 | 22 | 11 (6% to 25%) |
+| MySQL | 9 | 33 | 7 |
+
+Against Prisma 7, forge is faster on almost every scenario; Prisma leads on
+about five Postgres scenarios, mostly within noise. Mongo and DuckDB have no
+other ORM in the bench: there forge is level with the raw driver on most
+scenarios and ahead of it on relation loads and writes.
+
+### Postgres
+
+| scenario | forge | raw | Prisma | Drizzle | Kysely | Knex |
+|---|---|---|---|---|---|---|
+| find by id | 0.39 | 0.26 | 0.56 | 0.44 | 0.31 | 0.42 |
+| filter + page | 0.34 | 0.34 | 0.52 | 0.55 | 0.44 | 0.46 |
+| 100-id lookup | 0.62 | 0.62 | 0.97 | 1.19 | 0.97 | 1.07 |
+| users → posts → comments | 2.99 | 3.93 | 5.31 | 4.24 | 2.93 | 4.38 |
+| posts with tags | 1.53 | 2.92 | 2.40 | 3.45 | 3.02 | 2.22 |
+| tag counts | 3.70 | 6.03 | 3.81 | 6.12 | 4.69 | 4.68 |
+| distinct | 2.12 | 2.60 | 2.64 | 2.85 | 3.36 | 3.19 |
+| full-text search | 1.26 | 1.31 | 39.90 | 1.69 | 1.53 | 1.58 |
+| read 1,000+ rows | 19.96 | 21.05 | 28.71 | 21.99 | 21.06 | 21.36 |
+| create | 0.21 | 0.19 | 0.25 | 0.24 | 0.17 | 0.17 |
+| create 1,000 | 21.4 | 19.2 | 80.4 | 38.4 | 22.4 | 23.9 |
+| upsert ×10 | 0.95 | 0.86 | 1.71 | 1.43 | 1.03 | 1.04 |
+| update parent + children | 0.45 | 0.39 | 0.92 | 0.62 | 0.53 | 0.55 |
+| bulk delete | 1.35 | 1.28 | 1.46 | 1.38 | 1.43 | 1.75 |
+| mixed transaction | 0.67 | 0.44 | 1.57 | 0.92 | 0.72 | 0.83 |
+
+### MySQL
+
+| scenario | forge | raw | Prisma | Drizzle | Kysely | Knex |
+|---|---|---|---|---|---|---|
+| find by id | 0.39 | 0.34 | 0.94 | 0.40 | 0.29 | 0.38 |
+| users → posts | 0.60 | 0.87 | 1.38 | 1.18 | 0.73 | 0.66 |
+| users → posts → comments | 23.1 | 25.2 | 27.9 | 1237.2 | 1054.1 | 25.0 |
+| tag counts | 2.16 | 6.57 | 2.67 | 7.87 | 7.26 | 7.23 |
+| distinct | 3.18 | 14.95 | 3.23 | 15.44 | 14.94 | 15.04 |
+| count related records | 1.07 | 0.96 | 10.53 | 1.63 | 2.07 | 0.89 |
+| stream 10,000 rows | 15.5 | 13.1 | n/a | 49.8 | 22.8 | 16.5 |
+| create 1,000 | 20.1 | 15.8 | 75.9 | 25.5 | 19.6 | 23.8 |
+| upsert ×10 | 1.24 | 1.14 | 5.68 | 1.44 | 1.25 | 1.29 |
+| delete through a relation filter | 0.18 | 0.19 | 0.32 | 0.27 | 0.23 | 0.26 |
+| mixed transaction | 0.82 | 0.73 | 2.21 | 0.94 | 0.79 | 0.84 |
+
+### SQLite
+
+| scenario | forge | raw | Prisma | Drizzle | Kysely | Knex |
+|---|---|---|---|---|---|---|
+| find by id | 0.029 | 0.005 | 0.210 | 0.107 | 0.044 | 0.100 |
+| users → posts → comments | 0.41 | 0.42 | 0.89 | 0.89 | 0.65 | 0.55 |
+| count related records | 0.14 | 0.15 | 2.35 | 0.24 | 0.33 | 0.20 |
+| group by through a relation | 0.86 | 1.75 | 1.11 | 1.92 | 1.83 | 1.78 |
+| read 10,000 rows | 11.4 | 7.3 | 21.4 | 16.0 | 31.6 | 7.6 |
+| create 1,000 | 3.9 | 3.4 | 58.5 | 12.3 | 4.2 | 7.1 |
+| update through a relation filter | 0.05 | 2.04 | 2.43 | 2.15 | 2.10 | 2.35 |
+| upsert ×10 | 0.22 | 0.17 | 0.82 | 0.54 | 0.34 | 0.44 |
+| mixed transaction | 0.19 | 0.09 | 0.85 | 0.28 | 0.21 | 0.28 |
+
+### Where forge is slower, and why
+
+* **It decodes values.** Large reads on SQLite are 50 to 80% slower than
+  Knex: forge turns every date and JSON column into a `Date` or object, Knex
+  returns the stored text.
+* **One round trip on Postgres.** Includes two or three levels deep, and
+  many-to-many, are 12 to 25% slower than Knex on a local database. forge
+  builds the whole result inside Postgres in one round trip; Knex sends one
+  query per level. Over a real network, where every round trip costs more,
+  the single trip comes out ahead.
+* **MySQL includes.** Related-record counts and many-to-many are 15 to 40%
+  slower than Kysely's single JSON query. That same JSON plan took over a
+  second on an unpaged nested include where forge took 23 ms, so forge keeps
+  the plan that never gets that slow.
+* **It returns the row.** `update` and `upsert` hand back the whole decoded
+  row, about 10% slower than Kysely, which returns three columns or nothing.
+  `select: false` makes it level.
+* **Nested writes are planned and atomic.** Nested creates are 7 to 15%
+  slower than hand-written statements, because forge plans them and wraps
+  them in a transaction so a failure cannot leave half the data saved.
+
+### 2.25 → 2.27
+
+| | 2.25 | 2.27 |
+|---|---|---|
+| Postgres: users → posts → comments, paged | 75 round trips | 1 |
+| SQLite: forge's own time on a lookup by id | 16 µs | 3.7 µs |
+| MySQL `distinct` | 15.8 ms | 3.2 ms |
+| SQLite delete through a relation filter | 2.09 ms | 0.06 ms |
+| DuckDB stream | 20 round trips | 2 |
+| Mongo `deleteMany` | 6 round trips | 2 |
+
 ## The deep comparison
 
 `bench/compare/deep/` compares forge with the raw driver, Prisma, Drizzle,
