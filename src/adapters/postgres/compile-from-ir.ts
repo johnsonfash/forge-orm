@@ -10,6 +10,7 @@ import type {
   UpdateNode,
   WhereTree,
 } from '../../ir/types';
+import { COUNT_ALIAS_PREFIX, PARTITION_ROW_ALIAS } from '../../ir/types';
 import type { SQLArtifact } from '../../compile';
 import type { FieldDef, ModelDef } from '../../schema/types';
 import { rowLockSql } from '../row-lock';
@@ -17,6 +18,7 @@ import { schema } from '../../schema';
 import { PostgresDialect, type Dialect } from './dialect';
 import { multiPolygonBbox } from '../shared/wkt';
 import { softDeleteField } from '../../ir/build/soft-delete';
+import { hasFallbackGeo } from '../shared/haversine';
 
 // Hard rules:
 //   • Never interpolate values into the SQL string — always via params.
@@ -170,18 +172,24 @@ function compileLeaf(ctx: CompileCtx, leaf: Extract<WhereTree, { kind: 'leaf' }>
       const empty = ctx.d.arrayFilter('isEmpty', col, [], ctx.params, isJsonField(ctx, leaf.field));
       return leaf.value ? empty : `NOT (${empty})`;
     }
-    case 'search':
-      return ctx.d.searchClause(col, ph(String(leaf.value)), {
+    case 'search': {
+      const sctx = {
         rawColumn: leaf.field,
         baseTable: ctx.model.collection,
         quoteIdent: (s: string) => ctx.d.quoteIdent(s),
-      });
+      };
+      if (ctx.d.searchExpr) {
+        const pk = Object.entries(ctx.model.fields).find(([, fd]) => (fd as FieldDef).kind === 'id')?.[0] ?? 'id';
+        return ctx.d.searchExpr(col, { ...sctx, term: String(leaf.value), primaryKey: pk, placeholder: ph });
+      }
+      return ctx.d.searchClause(col, ph(String(leaf.value)), sctx);
+    }
     case 'jsonPath': {
       if (!leaf.jsonPath) return ctx.d.trueLiteral;
       const { path, subOp } = leaf.jsonPath;
       const rawCol = `${ctx.table}.${ctx.d.quoteIdent(leaf.field)}`;
       const rendered = ctx.d.jsonPathExpr
-        ? ctx.d.jsonPathExpr(rawCol, path, leaf.value, ctx.params)
+        ? ctx.d.jsonPathExpr(rawCol, path, leaf.value, ctx.params, subOp)
         : pgJsonPath(rawCol, path, leaf.value);
       // Compare the extracted value against the user-supplied operand using
       // the same operator vocabulary as scalar leaves.
@@ -300,10 +308,17 @@ function polygonBboxPrefilter(
 ): string {
   const { minLng, maxLng, minLat, maxLat } = multiPolygonBbox(multiPolygon);
   const ph = (v: unknown) => ctx.d.placeholder(ctx.params, v);
-  const lngCol = `(${ctx.table}.${ctx.d.quoteIdent(field)}->>'lng')::float8`;
-  const latCol = `(${ctx.table}.${ctx.d.quoteIdent(field)}->>'lat')::float8`;
+  const lngCol = jsonNumber(ctx, field, 'lng');
+  const latCol = jsonNumber(ctx, field, 'lat');
   return `(${lngCol} BETWEEN ${ph(minLng)} AND ${ph(maxLng)} AND ` +
          `${latCol} BETWEEN ${ph(minLat)} AND ${ph(maxLat)})`;
+}
+
+// A number read out of a fallback geoPoint's JSON. `->>` and `::float8` are
+// Postgres (DuckDB speaks them too); SQLite and SQL Server have their own.
+function jsonNumber(ctx: CompileCtx, field: string, key: 'lng' | 'lat'): string {
+  const col = `${ctx.table}.${ctx.d.quoteIdent(field)}`;
+  return ctx.d.jsonNumberExpr ? ctx.d.jsonNumberExpr(col, key) : `(${col}->>'${key}')::float8`;
 }
 
 // Bounding-box prefilter for fallback geoPoint columns (JSON {lng, lat}).
@@ -321,8 +336,8 @@ function haversineBboxPrefilter(
   // PG: extract lng/lat from the jsonb. SQLite/MySQL use the same expression
   // via the dialect's quoteIdent + ->> path operator (dialect-specific).
   // For PG we use `->>` to get text and cast to float8.
-  const lngCol = `(${ctx.table}.${ctx.d.quoteIdent(field)}->>'lng')::float8`;
-  const latCol = `(${ctx.table}.${ctx.d.quoteIdent(field)}->>'lat')::float8`;
+  const lngCol = jsonNumber(ctx, field, 'lng');
+  const latCol = jsonNumber(ctx, field, 'lat');
   return `(${lngCol} BETWEEN ${ph(point.lng - lngDeg)} AND ${ph(point.lng + lngDeg)} AND ` +
          `${latCol} BETWEEN ${ph(point.lat - latDeg)} AND ${ph(point.lat + latDeg)})`;
 }
@@ -398,6 +413,34 @@ function compileRelationFilter(
       return `NOT EXISTS (SELECT 1 FROM ${subTable} ${aliasQ} WHERE ${joinCondition} AND ${notInner})`;
     }
   }
+}
+
+// `_count: { posts: true }` as a correlated subquery per relation, in the
+// parent's own SELECT: one round trip instead of one grouped query per
+// relation. Soft-deleted children are excluded so the count agrees with what
+// `include` hands back.
+function compileRelationCountCols(ctx: CompileCtx, counts: string[] | undefined): string {
+  if (!counts?.length) return '';
+  const relations = ctx.model.relations();
+  const cols: string[] = [];
+  for (const relName of counts) {
+    const rel = relations[relName];
+    if (!rel) continue;
+    const target =
+      ctx.schemaOverride?.[rel.target] ?? ((schema as any)[rel.target] as ModelDef<any> | undefined);
+    if (!target) continue;
+    ctx.aliasCount.n += 1;
+    const alias = ctx.d.quoteIdent(`c${ctx.aliasCount.n}`);
+    const sd = softDeleteField(target);
+    const where =
+      `${alias}.${ctx.d.quoteIdent(rel.on)} = ${ctx.table}.${ctx.d.quoteIdent(rel.refs)}` +
+      (sd ? ` AND ${alias}.${ctx.d.quoteIdent(sd)} IS NULL` : '');
+    cols.push(
+      `(SELECT COUNT(*) FROM ${ctx.d.quoteIdent(target.collection)} ${alias} WHERE ${where}) ` +
+      `AS ${ctx.d.quoteIdent(COUNT_ALIAS_PREFIX + relName)}`,
+    );
+  }
+  return cols.join(', ');
 }
 
 function notEmpty(s: string): boolean {
@@ -513,6 +556,8 @@ export function compileSelect(
   const ctx: CompileCtx = { d: dialect, model: m, table, params, aliasCount: { n: 0 }, schemaOverride };
 
   let cols = compileProjectionCols(dialect, table, m, node.projection);
+  const counts = compileRelationCountCols(ctx, node.projection?.counts);
+  if (counts) cols = `${cols}, ${counts}`;
   const distinctClause = node.distinct?.length
     ? `DISTINCT ON (${node.distinct.map((f) => `${table}.${dialect.quoteIdent(f)}`).join(', ')}) `
     : '';
@@ -548,7 +593,9 @@ export function compileSelect(
         `${table}.${dialect.quoteIdent(nearToEntry.field)}`,
         fld, nearToEntry.nearTo as { lng: number; lat: number }, params,
       );
-      cols = `${cols}, ${distExpr} AS _distanceMeters`;
+      // Quoted: unquoted, Postgres folds it to `_distancemeters` and the
+      // ORDER BY "_distanceMeters" below names a column that does not exist.
+      cols = `${cols}, ${distExpr} AS ${dialect.quoteIdent('_distanceMeters')}`;
     } else if (fld.kind === 'geoPoint') {
       // fallback: true — the column is JSON, not a geography, so there is no
       // ST_Distance to call. `where.near` already knew this and emitted a
@@ -569,8 +616,17 @@ export function compileSelect(
   const whereClause = whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : '';
 
   const orderClause = compileOrder(dialect, table, node.orderBy, m);
-  const limit = node.limit != null ? `LIMIT ${Number(node.limit)}` : '';
-  const offset = node.offset != null ? `OFFSET ${Number(node.offset)}` : '';
+
+  if (node.partitionBy && (node.limit != null || node.offset != null)) {
+    const sql = compilePartitionedPage(dialect, table, cols, whereClause, orderClause, node);
+    return { kind: 'sql', dialect: dialect.name, sql, params };
+  }
+
+  // A fallback geo query is paged by the executor after the exact distance
+  // pass (refineFallbackGeo); a LIMIT here would keep arbitrary bbox rows.
+  const geoPaged = hasFallbackGeo(node, m);
+  const limit = node.limit != null && !geoPaged ? `LIMIT ${Number(node.limit)}` : '';
+  const offset = node.offset != null && !geoPaged ? `OFFSET ${Number(node.offset)}` : '';
 
   const sql = [
     `SELECT ${distinctClause}${cols} FROM ${table}${lockSql.hint}`,
@@ -578,6 +634,39 @@ export function compileSelect(
   ].filter(Boolean).join(' ');
 
   return { kind: 'sql', dialect: dialect.name, sql, params };
+}
+
+// A page per parent in one statement:
+//
+//   SELECT * FROM (
+//     SELECT <cols>, ROW_NUMBER() OVER (PARTITION BY fk ORDER BY <orderBy>) AS __forge_rn
+//     FROM child WHERE fk IN (…) AND <nested where>
+//   ) p WHERE __forge_rn > offset AND __forge_rn <= offset + limit ORDER BY __forge_rn
+//
+// The outer ORDER BY keeps each parent's rows in their window order; rows of
+// different parents interleave, which the loader's grouping does not mind.
+function compilePartitionedPage(
+  d: Dialect,
+  table: string,
+  cols: string,
+  whereClause: string,
+  orderClause: string,
+  node: SelectNode,
+): string {
+  const rn = d.quoteIdent(PARTITION_ROW_ALIAS);
+  // T-SQL refuses ROW_NUMBER() without an ORDER BY; the others number in scan order.
+  const over = orderClause || (d.name === 'mssql' ? 'ORDER BY (SELECT NULL)' : '');
+  const inner = [
+    `SELECT ${cols}, ROW_NUMBER() OVER (PARTITION BY ${table}.${d.quoteIdent(node.partitionBy!)}` +
+      `${over ? ' ' + over : ''}) AS ${rn} FROM ${table}`,
+    whereClause,
+  ].filter(Boolean).join(' ');
+  const skip = Math.max(0, Math.trunc(Number(node.offset ?? 0)));
+  const bounds: string[] = [];
+  if (skip > 0) bounds.push(`${rn} > ${skip}`);
+  if (node.limit != null) bounds.push(`${rn} <= ${skip + Math.max(0, Math.trunc(Number(node.limit)))}`);
+  const filter = bounds.length ? ` WHERE ${bounds.join(' AND ')}` : '';
+  return `SELECT * FROM (${inner}) ${d.quoteIdent('__forge_page')}${filter} ORDER BY ${rn}`;
 }
 
 /** `FOR UPDATE [NOWAIT | SKIP LOCKED]` — the last clause of a postgres SELECT. */
@@ -637,7 +726,10 @@ export function compileInsert(
   }).join(', ');
 
   const onConflict = node.skipDuplicates ? ' ON CONFLICT DO NOTHING' : '';
-  const returning = node.returning?.exclusive && node.returning.fields.length
+  // Postgres and SQLite report the count without RETURNING; DuckDB and SQL
+  // Server read it from the returned rows, so they keep the clause.
+  const countOnly = node.countOnly && (dialect.name === 'postgres' || dialect.name === 'sqlite');
+  const returning = countOnly ? '' : node.returning?.exclusive && node.returning.fields.length
     ? ` RETURNING ${node.returning.fields.map((f) => dialect.quoteIdent(f)).join(', ')}`
     : ' RETURNING *';
 
@@ -708,14 +800,38 @@ export function hasNoUpdatePayload(node: UpdateNode): boolean {
 // So Postgres was the only dialect where the identity could move under a
 // concurrent writer, and leaving the marker untouched for the rest keeps
 // their output byte-identical instead of rewriting four adapters to fix one.
-function singleRowWhere(d: Dialect, m: ModelDef<any>, table: string, where: string): string {
+function singleRowWhere(d: Dialect, m: ModelDef<any>, table: string, where: string, tree?: WhereTree): string {
   const filter = where ? ` WHERE ${where}` : '';
+  // A where that names the primary key or a unique column by value matches
+  // one row at most, so the subselect only costs: on DuckDB it halved a
+  // single-row UPDATE. MySQL and SQL Server rewrite the marker form into
+  // their own spelling and keep it.
+  if (where && (d.name === 'postgres' || d.name === 'sqlite' || d.name === 'duckdb') && pinsOneRow(m, tree)) {
+    return `WHERE ${where}`;
+  }
   const ctidForm = `WHERE ctid = (SELECT ctid FROM ${table}${filter} LIMIT 1)`;
   if (d.name !== 'postgres') return ctidForm;
   const pk = Object.entries(m.fields).find(([, f]) => (f as FieldDef).kind === 'id')?.[0];
   if (!pk) return ctidForm;
   const col = d.quoteIdent(pk);
   return `WHERE ${col} = (SELECT ${col} FROM ${table}${filter} LIMIT 1 FOR UPDATE)`;
+}
+
+// Whether `tree` is an AND (or a single leaf) holding an equality on the
+// primary key, a unique column, or every column of a composite unique.
+function pinsOneRow(m: ModelDef<any>, tree: WhereTree | undefined): boolean {
+  if (!tree) return false;
+  const leaves = tree.kind === 'leaf' ? [tree] : tree.kind === 'and' ? tree.children : [];
+  const eq = new Set<string>();
+  for (const c of leaves as any[]) {
+    if (c.kind === 'leaf' && c.op === 'eq' && c.rhsField === undefined && c.value != null && !c.jsonPath) eq.add(c.field);
+  }
+  if (eq.size === 0) return false;
+  for (const f of eq) {
+    const fd = m.fields[f] as FieldDef | undefined;
+    if (fd && (fd.kind === 'id' || fd.unique)) return true;
+  }
+  return (m.uniques ?? []).some((cols) => cols.length > 0 && cols.every((c) => eq.has(c)));
 }
 
 /**
@@ -921,7 +1037,7 @@ export function compileUpdate(
   const whereClause = where ? `WHERE ${where}` : '';
   // For updateOne (many=false) the statement is constrained to one row by
   // primary key — see singleRowWhere, and why it is not `ctid`.
-  const finalWhere = node.many ? whereClause : singleRowWhere(dialect, m, table, where);
+  const finalWhere = node.many ? whereClause : singleRowWhere(dialect, m, table, where, node.where);
   const returning = node.returning?.exclusive && node.returning.fields.length
     ? ` RETURNING ${node.returning.fields.map((f) => dialect.quoteIdent(f)).join(', ')}`
     : ' RETURNING *';
@@ -942,7 +1058,7 @@ export function compileDelete(
   const ctx: CompileCtx = { d: dialect, model: m, table, params, aliasCount: { n: 0 }, schemaOverride };
   const where = compileWhere(ctx, node.where);
   const whereClause = where ? `WHERE ${where}` : '';
-  const finalWhere = node.many ? whereClause : singleRowWhere(dialect, m, table, where);
+  const finalWhere = node.many ? whereClause : singleRowWhere(dialect, m, table, where, node.where);
   const sql = `DELETE FROM ${table} ${finalWhere} RETURNING *`;
   return { kind: 'sql', dialect: dialect.name, sql, params };
 }

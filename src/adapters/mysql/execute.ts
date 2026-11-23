@@ -18,11 +18,28 @@ import {
   compileUpdate,
 } from './compile-from-ir';
 import { withMysqlErrors } from './errors';
-import { decodeWideIntegers } from '../shared/wide-int';
+import { rowDecoder, parseJsonText, type Convert } from '../shared/row-decoder';
 import { buildSelect, buildWhereTree } from '../../ir/build';
 import { fromDriverBytes } from '../../bytes';
-import { hydrateManyRelation, hydrateOneRelation } from '../../ir/hydrate-many';
-import { softDeleteField } from '../../ir/build/soft-delete';
+import { hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
+
+// MySQL 8 and MariaDB 10.2 number rows per parent with ROW_NUMBER(); 5.7 has
+// no window functions and answers with a syntax error. The first such error
+// turns the one-query page off for that pool, and its loads go per parent.
+const windowedByPool = new WeakMap<object, WindowedPaging>();
+function windowedFor(pool: MysqlPool): WindowedPaging {
+  let w = windowedByPool.get(pool);
+  if (!w) {
+    w = { enabled: true, unsupported: isNoWindowFunctions };
+    windowedByPool.set(pool, w);
+  }
+  return w;
+}
+function isNoWindowFunctions(err: unknown): boolean {
+  const e = err as { errno?: number; sqlMessage?: string; message?: string } | null;
+  if (!e || (e.errno !== 1064 && e.errno !== 1235)) return false;
+  return /\bOVER\b|PARTITION BY|ROW_NUMBER/i.test(e.sqlMessage ?? e.message ?? '');
+}
 
 // MySQL has no RETURNING: insert/update/delete mutate, then re-SELECT the
 // affected rows (by id, or by insertId range for auto-increment) within the
@@ -41,38 +58,36 @@ export interface MysqlPool extends MysqlConn {
 
 export interface MysqlExecOpts {
   conn?: MysqlConn;
+  /** MariaDB 10.5+: INSERT and DELETE take RETURNING, so no read-back. */
+  returning?: boolean;
 }
 
 // mysql2 returns bools as 0/1, dates as Date, JSON pre-parsed; re-hydrate to
 // the schema's JS types.
-export function decodeRow(model: ModelDef<any>, row: any): any {
-  if (!row || typeof row !== 'object') return row;
-  const out: any = {};
-  for (const k of Object.keys(row)) {
-    const field = model.fields[k];
-    const v = row[k];
-    if (!field || v == null) { out[k] = v; continue; }
-    switch (field.kind) {
-      // better-sqlite3 / mysql2 hand back a Buffer, the wasm build a
-      // Uint8Array. Normalise so the row shape is driver-independent.
-      case 'bytes':      out[k] = fromDriverBytes(v); break;
-      case 'bool':       out[k] = v === 1 || v === true; break;
-      case 'json':
-      case 'embed':
-      case 'embedMany':
-      case 'stringArray':
-      case 'intArray':
-        // mysql2 auto-parses JSON columns; a TEXT-backed string still needs parsing.
-        out[k] = typeof v === 'string' ? safeParse(v) : v;
-        break;
-      default:           out[k] = v;
-    }
+const decodePlans = new WeakMap<object, any>();
+const toBool = (v: any) => v === 1 || v === true;
+function mysqlConvert(kind: string): Convert | null {
+  switch (kind) {
+    // better-sqlite3 / mysql2 hand back a Buffer, the wasm build a
+    // Uint8Array. Normalise so the row shape is driver-independent.
+    case 'bytes': return fromDriverBytes;
+    case 'bool': return toBool;
+    // mysql2 auto-parses JSON columns; a TEXT-backed string still needs parsing.
+    case 'json': case 'embed': case 'embedMany': case 'stringArray': case 'intArray':
+      return parseJsonText;
+    default: return null;
   }
-  return decodeWideIntegers(model, out);
 }
 
-function safeParse(s: string): any {
-  try { return JSON.parse(s); } catch { return s; }
+/** Decodes a driver row in place (the driver hands each call fresh objects). */
+export function decodeRow(model: ModelDef<any>, row: any): any {
+  return rowDecoder(decodePlans, model, mysqlConvert)(row);
+}
+
+function decodeRows(model: ModelDef<any>, rows: any[]): any[] {
+  const dec = rowDecoder(decodePlans, model, mysqlConvert);
+  for (let i = 0; i < rows.length; i++) rows[i] = dec(rows[i]);
+  return rows;
 }
 
 export async function executeMysqlSelect(
@@ -84,15 +99,12 @@ export async function executeMysqlSelect(
   const exec = opts.conn ?? pool;
   const a = compileSelect(node, model);
   const [rows] = await withMysqlErrors(() => exec.query(a.sql, a.params));
-  let out = (rows as any[]).map((r) => decodeRow(model, r));
+  let out = decodeRows(model, rows as any[]);
   if (node.distinct?.length) out = dedupeBy(out, node.distinct);
   // Fallback geoPoint refinement — bbox prefilter → exact circle + sort.
-  const { extractFallbackGeoOps, applyHaversinePostFilter } = await import('../shared/haversine');
-  const geoOps = extractFallbackGeoOps(node, model);
-  if (geoOps.near || geoOps.nearTo || geoOps.withinPolygon) {
-    out = applyHaversinePostFilter(out, geoOps.near, geoOps.nearTo, geoOps.withinPolygon);
-  }
-  if (node.projection?.counts?.length) await applyRelationCounts(exec, out, model, node.projection.counts);
+  const { refineFallbackGeo } = await import('../shared/haversine');
+  out = refineFallbackGeo(out, node, model);
+  if (node.projection?.counts?.length) liftRelationCounts(out, node.projection.counts);
   if (node.hydration?.length) await hydrate(pool, opts, out, model, node.hydration);
   return out;
 }
@@ -141,7 +153,16 @@ export async function executeMysqlInsert(
 ): Promise<{ docs: any[]; count: number }> {
   const exec = opts.conn ?? pool;
   const a = compileInsert(node, model);
+  if (opts.returning && !node.countOnly && !node.skipDuplicates) {
+    const [rows] = await withMysqlErrors(() => exec.query(`${a.sql} RETURNING *`, a.params));
+    return { docs: (rows as any[]).map((r) => decodeRow(model, r)), count: (rows as any[]).length };
+  }
   const [result]: any = await withMysqlErrors(() => exec.execute(a.sql, a.params));
+  if (node.countOnly) return { docs: [], count: result.affectedRows };
+  // Every column's value is already known (written by us, or a literal
+  // default, or the insert id): hand the rows back without reading them.
+  const known = knownInsertedRows(model, node, result);
+  if (known) return { docs: known, count: result.affectedRows };
   const ids = node.rows.map((r) => r.id).filter((id) => id != null);
   if (ids.length === 0) {
     // No ids supplied — recover the auto-incremented range via insertId / affectedRows.
@@ -199,6 +220,12 @@ export async function executeMysqlDelete(
     const [result]: any = await withMysqlErrors(() => exec.execute(a.sql, a.params));
     return { count: result.affectedRows };
   }
+  if (opts.returning) {
+    const a = compileDelete(node, model);
+    const [rows] = await withMysqlErrors(() => exec.query(`${a.sql} RETURNING *`, a.params));
+    const doc = (rows as any[])[0];
+    return doc ? { doc: decodeRow(model, doc), count: 1 } : { doc: undefined, count: 0 };
+  }
   // Single-row delete: SELECT first to capture the row, then DELETE.
   const selectArtifact = compileSelect(
     buildSelect(node.model, model, { where: irWhereToObject(node.where), take: 1 }, 'one'),
@@ -213,6 +240,83 @@ export async function executeMysqlDelete(
   // SELECT found the (unguarded) row.
   if (whereHasNonEq(node.where) && result.affectedRows === 0) return { doc: undefined, count: 0 };
   return { doc: decodeRow(model, doc), count: result.affectedRows };
+}
+
+type ColPlan = { name: string; kind: string; absent: 'null' | 'unknown' | { value: unknown }; autoInc: boolean };
+const insertPlans = new WeakMap<object, ColPlan[] | null>();
+
+// How each column of an inserted row can be known without reading it back.
+// Null when some column can never be (a generated column, a geometry, a
+// DECIMAL the driver hands back as text): those models always read back.
+function insertPlan(model: ModelDef<any>): ColPlan[] | null {
+  if (insertPlans.has(model)) return insertPlans.get(model)!;
+  let plan: ColPlan[] | null = [];
+  for (const [name, fd] of Object.entries(model.fields)) {
+    const f = fd as any;
+    if (f.dbGenerated || ['decimal', 'geoPoint', 'vector'].includes(f.kind)) { plan = null; break; }
+    let absent: ColPlan['absent'] = 'unknown';
+    if (f.default) {
+      if (f.default.kind === 'literal') absent = { value: f.default.value };
+    } else if (!(f.kind === 'uuid' && f.uuidDefault) && !(f.kind === 'embedMany' && !f.optional) && f.optional) {
+      absent = 'null';
+    }
+    plan.push({ name, kind: f.kind, absent, autoInc: f.kind === 'id' && f.idType === 'bigserial' });
+  }
+  insertPlans.set(model, plan);
+  return plan;
+}
+
+// A value whose stored form reads back as exactly itself.
+function roundTrips(kind: string, v: unknown): boolean {
+  switch (kind) {
+    case 'id': case 'objectId': case 'string': case 'text': case 'enum': case 'uuid':
+      return typeof v === 'string';
+    case 'int': return typeof v === 'number' && Number.isSafeInteger(v);
+    case 'float': return typeof v === 'number' && Number.isFinite(v);
+    case 'bigint': return typeof v === 'bigint' || (typeof v === 'number' && Number.isSafeInteger(v));
+    case 'bool': return v === 0 || v === 1;
+    case 'dateTime': return v instanceof Date && !Number.isNaN(v.getTime());
+    case 'json': case 'embed': case 'embedMany': case 'stringArray': case 'intArray':
+      return typeof v === 'string';
+    case 'bytes': return v instanceof Uint8Array;
+    default: return false;
+  }
+}
+
+function knownInsertedRows(model: ModelDef<any>, node: InsertNode, result: any): any[] | null {
+  if (node.skipDuplicates || result.affectedRows !== node.rows.length) return null;
+  const plan = insertPlan(model);
+  if (!plan) return null;
+  // A column some rows name and this one does not is sent as NULL (the
+  // INSERT's column list is the union), not left to its default.
+  const named = new Set<string>();
+  for (const r of node.rows) for (const k of Object.keys(r)) named.add(k);
+  const out: any[] = [];
+  for (const row of node.rows) {
+    const doc: any = {};
+    for (const c of plan) {
+      const v = named.has(c.name) ? (row[c.name] ?? null) : undefined;
+      if (v !== undefined && v !== null) {
+        if (!roundTrips(c.kind, v)) return null;
+        doc[c.name] = v;
+      } else if (v === null && c.absent !== 'unknown') {
+        doc[c.name] = null;
+      } else if (c.autoInc) {
+        // insertId is exact for one row; a multi-row range depends on the
+        // server's auto_increment_increment, so that case reads back.
+        if (node.rows.length !== 1 || result.insertId == null) return null;
+        doc[c.name] = Number(result.insertId);
+      } else if (c.absent === 'null') {
+        doc[c.name] = null;
+      } else if (c.absent !== 'unknown') {
+        doc[c.name] = c.absent.value;
+      } else {
+        return null;
+      }
+    }
+    out.push(decodeRow(model, doc));
+  }
+  return out;
 }
 
 // Extract the stable EQ-identity predicates from an IR WhereTree to rebuild the
@@ -282,43 +386,8 @@ async function hydrateMany(
   await hydrateManyRelation({
     rows, rel, keyOf: (v) => String(v),
     runSelect: (node) => executeMysqlSelect(pool, node, targetModel, opts),
+    windowed: windowedFor(pool),
   });
-}
-
-async function applyRelationCounts(
-  exec: MysqlConn, rows: any[], parentModel: ModelDef<any>, counts: string[],
-): Promise<void> {
-  if (rows.length === 0) return;
-  const relMap = parentModel.relations();
-  for (const r of rows) r._count = r._count ?? {};
-  for (const relName of counts) {
-    const rel = relMap[relName];
-    if (!rel) continue;
-    const targetModel = (schema as any)[rel.target] as ModelDef<any> | undefined;
-    if (!targetModel) continue;
-    const refs = unique(rows.map((r) => r[rel.refs]).filter((v) => v != null));
-    if (refs.length === 0) { for (const r of rows) r._count[relName] = 0; continue; }
-    const placeholders = refs.map(() => '?').join(',');
-    // Soft-deleted children are excluded, so `_count` agrees with the rows
-    // `include` hands back. Without it `_count: { posts: true }` said 7 while
-    // `include: { posts: true }` returned 5.
-    const sd = softDeleteField(targetModel);
-    const sql = `SELECT \`${rel.on}\` AS fk, COUNT(*) AS c FROM \`${targetModel.collection}\` `
-      + `WHERE \`${rel.on}\` IN (${placeholders})`
-      + (sd ? ` AND \`${sd}\` IS NULL` : '')
-      + ` GROUP BY \`${rel.on}\``;
-    const [groups]: any = await withMysqlErrors(() => exec.query(sql, refs));
-    const byFk = new Map<string, number>();
-    for (const g of groups as any[]) byFk.set(String(g.fk), Number(g.c));
-    for (const r of rows) r._count[relName] = byFk.get(String(r[rel.refs])) ?? 0;
-  }
-}
-
-function unique<T>(arr: T[]): T[] {
-  const seen = new Set<string>();
-  const out: T[] = [];
-  for (const v of arr) { const k = String(v); if (seen.has(k)) continue; seen.add(k); out.push(v); }
-  return out;
 }
 
 function dedupeBy(rows: any[], fields: string[]): any[] {

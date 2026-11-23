@@ -86,11 +86,8 @@ describe('CollectionWrapper + PostgresAdapter — write path', () => {
     const w = new CollectionWrapper(User, undefined, adapterWithPool(pool));
     const out = await w.update({ where: { id: 'u1' }, data: { active: true } });
     expect(out).toMatchObject({ id: 'u1', active: true });
-    expect(pool.log[0].sql).toMatch(/UPDATE "users" SET "active" = \$1 WHERE "id" = \(SELECT "id" FROM "users" WHERE/);
-    // Not `ctid`: an update moves the tuple, so a second concurrent writer
-    // would look for an address that no longer holds the row.
-    expect(pool.log[0].sql).not.toMatch(/ctid/);
-    expect(pool.log[0].sql).toMatch(/FOR UPDATE\)/);
+    // By primary key: one row at most, so no single-row subselect.
+    expect(pool.log[0].sql).toBe('UPDATE "users" SET "active" = $1 WHERE "users"."id" = $2 RETURNING *');
   });
 
   it('updateMany returns count only', async () => {
@@ -107,8 +104,7 @@ describe('CollectionWrapper + PostgresAdapter — write path', () => {
     expect(out).toMatchObject({ id: 'u1' });
     // Single DELETE statement, no follow-up cascade walker queries.
     expect(pool.log.length).toBe(1);
-    expect(pool.log[0].sql).toMatch(/DELETE FROM "users" WHERE "id" = \(SELECT "id" FROM "users"/);
-    expect(pool.log[0].sql).not.toMatch(/ctid/);
+    expect(pool.log[0].sql).toBe('DELETE FROM "users" WHERE "users"."id" = $1 RETURNING *');
   });
 });
 

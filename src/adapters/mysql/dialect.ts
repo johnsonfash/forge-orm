@@ -192,6 +192,10 @@ export const MysqlDialect: Dialect = {
     return `DISTANCE(${quotedCol}, STRING_TO_VECTOR(${ph}), '${metric}')`;
   },
 
+  jsonNumberExpr(quotedCol, key) {
+    return `(JSON_EXTRACT(${quotedCol}, '$.${key}') + 0)`;
+  },
+
   jsonPathExpr(quotedCol, path, _operand, params) {
     // MySQL JSON_EXTRACT returns JSON-encoded values; for strings that means
     // a wrapping `"…"`. Wrap with JSON_UNQUOTE so equality against a plain

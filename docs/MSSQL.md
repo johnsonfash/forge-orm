@@ -181,7 +181,7 @@ when `forge push` runs against MSSQL:
 | `f.dateTime()`           | `DATETIMEOFFSET`          | Preserves the timezone offset. `DATETIME2` is the no-tz alternative — drop down via `$queryRaw` if you need it. `DATETIME` (the legacy 1900-9999 type) is intentionally not emitted; its 3.33ms precision is a footgun. |
 | `f.uuid()`               | `UNIQUEIDENTIFIER`        | Distinct from `id(\|'uuid')` only in that this is a regular column. |
 | `f.json()`               | `NVARCHAR(MAX)`           | SQL Server 2025 adds a real `JSON` type — forge stays on `NVARCHAR(MAX)` for portability. `ISJSON()` check constraint not added; declare it via `$executeRaw` if you want write-time validation. |
-| `f.embed(...)` / `embedMany(...)` | `NVARCHAR(MAX)` | Adapter `coerceInbound` does `JSON.stringify` on write. Reads come back as text — see [EMBED](./EMBED.md#per-dialect-storage) for the auto-parse hook. |
+| `f.embed(...)` / `embedMany(...)` | `NVARCHAR(MAX)` | Adapter `coerceInbound` does `JSON.stringify` on write. Reads are parsed back into objects (2.25.0; before it they came back as the stored text), as are `f.json()`, `f.stringArray()` and `f.intArray()`. |
 | `f.stringArray()` / `intArray()` | `NVARCHAR(MAX)` | T-SQL has no array type. Stored as JSON, read with `OPENJSON` or `JSON_VALUE`. The IR's array operators (`in`, `contains`) compile to `OPENJSON`-backed subqueries. |
 | `f.enumOf(...)`            | `NVARCHAR(255)` + CHECK   | `CHECK ([col] IN ('a', 'b', …))` added at table-create time. Adding a value later means dropping + recreating the CHECK — see [MIGRATIONS](./MIGRATIONS.md). |
 | `f.geoPoint()`           | `GEOGRAPHY`               | Default — WGS84. See [Spatial](#spatial--geography-and-geometry). |
@@ -559,8 +559,12 @@ ranked `CONTAINSTABLE` / `FREETEXTTABLE`), but it needs a catalog
 created out of band — `CREATE FULLTEXT CATALOG`, `CREATE FULLTEXT
 INDEX ON … KEY INDEX <pk>`. forge **does not** emit catalog DDL on
 `push`. The `.searchable()` marker is preserved on the schema (doctor
-and introspect can see it), but the runtime `searchClause` falls back
-to `LIKE '%q%'` so portability holds.
+and introspect can see it). At run time (2.25.0) the adapter reads
+`sys.fulltext_index_columns` the first time a table is searched; a column
+in a full-text index is searched with `CONTAINS([col], @p)`, the term
+bound as `"word1" AND "word2"` (every word required, as `plainto_tsquery`
+does on Postgres). A column without one falls back to `LIKE '%q%'`, so
+portability holds. The index matches words, the fallback substrings.
 
 ```ts
 const Post = model('posts', {
@@ -576,7 +580,8 @@ await db.Posts.findMany({ where: { title: { search: 'forge orm' } } });
 
 LIKE-mode is fine for low-volume search and gives portable behavior
 across the six dialects, but it never uses an index — every query
-table-scans. For production, install the FTS catalog and rewrite via
+table-scans. For production, install the FTS catalog; forge then uses
+CONTAINS by itself. Ranking (`CONTAINSTABLE`) still goes through
 `$queryRaw`:
 
 ```sql

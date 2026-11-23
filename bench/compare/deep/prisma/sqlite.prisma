@@ -1,0 +1,87 @@
+// Prisma's view of the deep-bench tables. forge creates them; Prisma only
+// generates a client against them (never run prisma migrate here).
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "./generated/sqlite"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model User {
+  id         String   @id
+  email      String   @unique
+  name       String
+  role       String
+  active     Boolean
+  created_at DateTime
+  prefs      Json
+  profile    Profile?
+  posts      Post[]
+  comments   Comment[]
+
+  @@map("users")
+}
+
+model Profile {
+  id      String @id
+  user_id String @unique
+  bio     String
+  user    User   @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("profiles")
+}
+
+model Post {
+  id           String    @id
+  author_id    String
+  title        String
+  body         String
+  status       String
+  views        Int
+  version      Int
+  published_at DateTime?
+  created_at   DateTime
+  meta         Json
+  author       User      @relation(fields: [author_id], references: [id], onDelete: Cascade)
+  comments     Comment[]
+  post_tags    PostTag[]
+
+  @@map("posts")
+}
+
+model Comment {
+  id         String    @id
+  post_id    String
+  author_id  String?
+  parent_id  String?
+  body       String
+  created_at DateTime
+  post       Post      @relation(fields: [post_id], references: [id], onDelete: Cascade)
+  author     User?     @relation(fields: [author_id], references: [id], onDelete: SetNull)
+  parent     Comment?  @relation("Replies", fields: [parent_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  replies    Comment[] @relation("Replies")
+
+  @@map("comments")
+}
+
+model Tag {
+  id        String    @id
+  name      String    @unique
+  post_tags PostTag[]
+
+  @@map("tags")
+}
+
+model PostTag {
+  id      String @id
+  post_id String
+  tag_id  String
+  post    Post   @relation(fields: [post_id], references: [id], onDelete: Cascade)
+  tag     Tag    @relation(fields: [tag_id], references: [id], onDelete: Cascade)
+
+  @@unique([post_id, tag_id])
+  @@map("post_tags")
+}

@@ -8,7 +8,7 @@ comes out the other end — what the database stores, who enforces
 it, and what engine knobs the forge surface doesn't expose. If
 something here disagrees with the source, the source is right
 (`src/schema/types.ts` for the shape, `src/adapters/<dialect>/ddl.ts`
-for the emit, `src/adapters/mongo/cascade.ts` for the app-side
+for the emit, `src/builder/cascade.ts` for the app-side
 walker).
 
 ## Contents
@@ -94,10 +94,10 @@ patterns that need deferral.
 The four actions forge exposes, what each emits, and what the database
 does at delete time.
 
-| Action    | Postgres / MySQL / MSSQL / DuckDB              | SQLite                               | Mongo (app-side walker)              |
+| Action    | Postgres / MySQL / MSSQL                       | SQLite                               | Mongo / DuckDB (app-side walker)     |
 |-----------|------------------------------------------------|--------------------------------------|--------------------------------------|
 | `Cascade` | `ON DELETE CASCADE` — delete child rows        | same (PRAGMA must be on)             | recursive `deleteMany` on children   |
-| `SetNull` | `ON DELETE SET NULL` — null the FK column      | same                                 | `updateMany` with `$unset` on the FK |
+| `SetNull` | `ON DELETE SET NULL` — null the FK column      | same                                 | `updateMany` setting the FK to null  |
 | `Restrict`| `ON DELETE RESTRICT` — block the delete        | same                                 | precount; throws if any child found  |
 | `NoAction`| `ON DELETE NO ACTION` (default)                | same                                 | no-op; orphans stay                  |
 
@@ -341,36 +341,47 @@ generated columns are rejected; stored generated columns are fine.
 
 Mongo has no FK concept at the storage layer. Forge implements the
 same `onDelete` semantics application-side via the walker in
-`src/adapters/mongo/cascade.ts`. On every `delete` / `deleteMany`, the
-walker:
+`src/builder/cascade.ts`, which runs for every adapter whose database
+cannot (`nativeCascades: false`: Mongo, DuckDB, IndexedDB). On every
+`delete` / `deleteMany` — including a nested `delete` / `deleteMany`
+inside an `update` — the walker:
 
-1. Inspects the schema for every owning relation pointing at the
-   model being deleted (`rel.one` with matching `target`; inverse-side
-   `rel.many` is skipped).
-2. For each owning relation with `onDelete: 'Cascade'`, recursively
-   collects child rows and deletes them.
-3. For each `onDelete: 'SetNull'`, runs `updateMany` with
-   `$unset: { <fk>: '' }`.
-4. Carries a `visited` set (collection + `_id`) across the recursion
+1. Reads the key columns of the rows about to go (the primary key and
+   every column a child relation `refs`).
+2. Finds every owning relation in the **active schema** pointing at the
+   model (`rel.one` with a matching `target`; inverse `rel.many` is
+   skipped).
+3. Checks every `onDelete: 'Restrict'` first: a child row found throws
+   `P2003` before anything is written, so a blocked delete leaves the
+   tree untouched even with no transaction to roll back.
+4. For `onDelete: 'SetNull'`, runs one `updateMany` setting the FK to
+   null.
+5. For `onDelete: 'Cascade'`, recurses into children that are parents
+   themselves (reading their keys), then deletes the children with one
+   `deleteMany` per relation. Leaves go first, so the parent is deleted
+   last. A join table (`post_tags` → `post`, `tag`) is just another
+   child.
+6. Carries a `visited` set (model + primary key) across the recursion
    to break cycles.
-5. Walks leaves first — recursive call before the local `deleteMany`,
-   so children are gone before parents.
 
-`Restrict` runs a `countDocuments` precount; > 0 throws.
+`NoAction` (and an omitted `onDelete`) leaves children alone.
 
-### Atomicity caveat
+Before 2.25.0 the Mongo walker built its relation map once, at module
+load, from the bundled sample schema — so a consumer's own models never
+cascaded at all, and its writes ignored the caller's session. DuckDB had
+no walker, though this page said it did.
 
-On standalone Mongo (no replica set) the walker is **best-effort** —
-if the second cascade level fails after the first succeeded, the
-partial state is left behind. There's no compensating "uncreate"
-pass. On a replica set, `db.$transaction` pins every cascade write to
-one session and the whole tree commits or aborts together:
+### Atomicity
 
-```ts
-await db.$transaction(async (tx) => {
-  await tx.user.delete({ where: { id: 'u1' } });
-});
-```
+The walk and the parent delete run in one transaction whenever the
+database has one and the caller is not already in one: DuckDB always,
+Mongo on a replica set or mongos. Inside `db.$transaction` the walk joins
+the caller's transaction and rolls back with it.
+
+On standalone Mongo (no replica set) and IndexedDB the walker is
+**best-effort**: `Restrict` is still checked before any write, but if a
+later step fails after an earlier one succeeded, the partial state is
+left behind.
 
 ### Raw delete bypass
 
@@ -390,7 +401,8 @@ DuckDB accepts FK DDL at `CREATE TABLE` time but doesn't enforce the
 constraint at runtime — DuckDB is OLAP-shaped and treats relational
 integrity as documentation (`src/adapters/duckdb/adapter.ts:23`). The
 `nativeCascades: false` capability flag triggers the same app-side
-walker on DuckDB that runs on Mongo.
+walker on DuckDB that runs on Mongo (2.25.0; before it, DuckDB deletes
+did not cascade at all).
 
 ---
 
@@ -465,7 +477,7 @@ deleting a category promotes its children to root rather than wiping
 the subtree. `Cascade` is fine for audit trees where the children only
 make sense alongside their parent.
 
-The Mongo walker's `visited` set (`src/adapters/mongo/cascade.ts:103`)
+The Mongo walker's `visited` set (`src/builder/cascade.ts`)
 tracks `(collection, _id)` pairs and skips already-seen rows, so
 self-referential cascades terminate.
 
@@ -780,7 +792,7 @@ long-term fix; the patterns above are short-term unblock.
 
 Cycles plus `Cascade` on both sides would loop forever without the
 `visited` set in the Mongo walker
-(`src/adapters/mongo/cascade.ts:103`) — it tracks
+(`src/builder/cascade.ts`) — it tracks
 `(collection, _id)` pairs and terminates after one round each side.
 
 ---

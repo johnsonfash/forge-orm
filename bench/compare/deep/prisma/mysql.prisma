@@ -1,0 +1,88 @@
+// Prisma's view of the deep-bench tables. forge creates them; Prisma only
+// generates a client against them (never run prisma migrate here).
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "./generated/mysql"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+model User {
+  id         String   @id @db.VarChar(255)
+  email      String   @unique @db.VarChar(255)
+  name       String @db.VarChar(255)
+  role       String @db.VarChar(64)
+  active     Boolean
+  created_at DateTime @db.DateTime(3)
+  prefs      Json
+  profile    Profile?
+  posts      Post[]
+  comments   Comment[]
+
+  @@map("users")
+}
+
+model Profile {
+  id      String @id @db.VarChar(255)
+  user_id String @unique @db.VarChar(255)
+  bio     String @db.Text
+  user    User   @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("profiles")
+}
+
+model Post {
+  id           String    @id @db.VarChar(255)
+  author_id    String @db.VarChar(255)
+  title        String @db.VarChar(255)
+  body         String @db.Text
+  status       String @db.VarChar(64)
+  views        Int
+  version      Int
+  published_at DateTime? @db.DateTime(3)
+  created_at   DateTime @db.DateTime(3)
+  meta         Json
+  author       User      @relation(fields: [author_id], references: [id], onDelete: Cascade)
+  comments     Comment[]
+  post_tags    PostTag[]
+
+  @@fulltext([body])
+  @@map("posts")
+}
+
+model Comment {
+  id         String    @id @db.VarChar(255)
+  post_id    String @db.VarChar(255)
+  author_id  String? @db.VarChar(255)
+  parent_id  String? @db.VarChar(255)
+  body       String @db.Text
+  created_at DateTime @db.DateTime(3)
+  post       Post      @relation(fields: [post_id], references: [id], onDelete: Cascade)
+  author     User?     @relation(fields: [author_id], references: [id], onDelete: SetNull)
+  parent     Comment?  @relation("Replies", fields: [parent_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  replies    Comment[] @relation("Replies")
+
+  @@map("comments")
+}
+
+model Tag {
+  id        String    @id @db.VarChar(255)
+  name      String    @unique @db.VarChar(255)
+  post_tags PostTag[]
+
+  @@map("tags")
+}
+
+model PostTag {
+  id      String @id @db.VarChar(255)
+  post_id String @db.VarChar(255)
+  tag_id  String @db.VarChar(255)
+  post    Post   @relation(fields: [post_id], references: [id], onDelete: Cascade)
+  tag     Tag    @relation(fields: [tag_id], references: [id], onDelete: Cascade)
+
+  @@unique([post_id, tag_id])
+  @@map("post_tags")
+}

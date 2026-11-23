@@ -8,6 +8,7 @@ import type {
   RelationPlan,
   SelectNode,
   UpdateNode,
+  WhereTree,
 } from '../../ir/types';
 import type { ModelDef } from '../../schema/types';
 import { schema } from '../../schema';
@@ -19,15 +20,28 @@ import {
   compileInsert,
   compileSelect,
   compileUpdate,
+  compileMatchStages,
+  compileSelectPipeline,
+  hasRelationFilter,
 } from './compile-from-ir';
-import { applyCascadesForDelete } from './cascade';
 import { notFoundError, rethrowMongoError } from './errors';
 import type { ObjectId } from 'mongodb';
 import { mongo } from './bson';
-import { hydrateManyRelation, hydrateOneRelation } from '../../ir/hydrate-many';
+import { hydrateManyRelation, hydrateOneRelation, type WindowedPaging } from '../../ir/hydrate-many';
 import { softDeleteField } from '../../ir/build/soft-delete';
 
-interface ExecOpts { session?: ClientSession; db?: Db }
+interface ExecOpts {
+  session?: ClientSession;
+  db?: Db;
+  /**
+   * Set on the loads an include makes. They are always read to the end, so
+   * the driver's default first batch of 101 documents only adds a getMore
+   * round trip to any level with more children than that.
+   */
+  wholeResult?: boolean;
+}
+
+const WHOLE_RESULT_BATCH = 100_000;
 
 /**
  * The `Db` this call runs against.
@@ -47,6 +61,10 @@ export async function executeSelect(
   model: ModelDef<any>,
   opts: ExecOpts = {},
 ): Promise<any[]> {
+  if (hasRelationFilter(node.where)) {
+    node = { ...node, where: await resolveRelationFilters(model, node.where!, opts) };
+  }
+
   // Geo / vector bridge — `orderBy: { col: { nearTo } }` routes through an
   // aggregation pipeline:
   //   • geoPoint → $geoNear (sphere distances, `_distanceMeters`)
@@ -58,6 +76,10 @@ export async function executeSelect(
       return executeSelectWithVectorSearch(node, model, nearToEntry, opts);
     }
     return executeSelectWithGeoNear(node, model, nearToEntry, opts);
+  }
+
+  if (hasRelationFilter(node.where) || (node.partitionBy && (node.limit != null || node.offset != null))) {
+    return executeSelectAsPipeline(node, model, opts);
   }
 
   const artifact = compileSelect(node, model);
@@ -81,6 +103,7 @@ export async function executeSelect(
     if (options.sort) cursor = cursor.sort(options.sort);
     if (options.skip) cursor = cursor.skip(options.skip);
     if (options.limit) cursor = cursor.limit(options.limit);
+    if (opts.wholeResult) cursor = cursor.batchSize(WHOLE_RESULT_BATCH);
     rows = await cursor.toArray();
   }
 
@@ -92,6 +115,104 @@ export async function executeSelect(
 
   await applyProjectionAndHydration(out, model, node, opts);
   return out;
+}
+
+// Relation filters ($lookup) and per-parent pages ($setWindowFields) — the
+// two selects a find cannot express — as one aggregation.
+async function executeSelectAsPipeline(
+  node: SelectNode,
+  model: ModelDef<any>,
+  opts: ExecOpts,
+): Promise<any[]> {
+  const pipeline = compileSelectPipeline(node, model);
+  const docs = await mongoDb(opts)
+    .collection(model.collection)
+    .aggregate(pipeline, {
+      ...(opts.session ? { session: opts.session } : {}),
+      ...(opts.wholeResult ? { batchSize: WHOLE_RESULT_BATCH } : {}),
+    })
+    .toArray();
+  let out: any[] = docs.map((r) => decodeRow(model, r));
+  if (node.distinct?.length) out = dedupeBy(out, node.distinct);
+  await applyProjectionAndHydration(out, model, node, opts);
+  return out;
+}
+
+// Above this many distinct parent keys a relation filter is left for $lookup
+// rather than inlined as an $in list.
+const RELATION_KEYS_INLINE_MAX = 10_000;
+
+/**
+ * Turn each relation filter into a plain `$in` / `$nin` on the parent's join
+ * key, by asking the child collection which keys qualify — one grouped
+ * aggregation per filter, the semi-join a SQL planner would make of the
+ * EXISTS:
+ *
+ *   some / is     parent key IN  { child keys matching the filter }
+ *   none / isNot  parent key NIN { child keys matching the filter }
+ *   every         parent key NIN { child keys FAILING the filter }
+ *
+ * `$nin` keeps a parent whose key is null, as NOT EXISTS does. This beats a
+ * $lookup per parent whenever matches are sparse: `none` over a thousand users
+ * otherwise joins nearly all of them to fill one page. A key set too large to
+ * inline is left as a relation filter, which the pipeline path then answers
+ * with $lookup, so the result never depends on which way it went.
+ */
+async function resolveRelationFilters(model: ModelDef<any>, tree: WhereTree, opts: ExecOpts): Promise<WhereTree> {
+  switch (tree.kind) {
+    case 'and':
+    case 'or':
+      return { kind: tree.kind, children: await Promise.all(tree.children.map((c) => resolveRelationFilters(model, c, opts))) };
+    case 'not':
+      return { kind: 'not', child: await resolveRelationFilters(model, tree.child, opts) };
+    case 'leaf':
+      return tree;
+    case 'relation':
+      break;
+  }
+  const rel = model.relations()[tree.relation];
+  const target = rel ? ((schema as any)[rel.target] as ModelDef<any> | undefined) : undefined;
+  if (!rel || !target) return tree;
+  const owning = model.fields[rel.on] != null;
+  const parentField = owning ? rel.on : rel.refs;
+  const childKey = appKeyToDbKey(owning ? rel.refs : rel.on);
+
+  const nested = tree.nested ? await resolveRelationFilters(target, tree.nested, opts) : null;
+  const negate = tree.mode === 'every' && nested != null;
+  const parts: WhereTree[] = [];
+  const sd = tree.withDeleted ? undefined : softDeleteField(target);
+  if (sd) parts.push({ kind: 'leaf', field: sd, op: 'eq', value: null });
+  if (nested) parts.push(negate ? { kind: 'not', child: nested } : nested);
+  const { stages } = compileMatchStages(target, { kind: 'and', children: parts }, { [childKey]: { $ne: null } });
+  const keys = await mongoDb(opts)
+    .collection(target.collection)
+    .aggregate(
+      [...stages, { $group: { _id: `$${childKey}` } }, { $limit: RELATION_KEYS_INLINE_MAX + 1 }],
+      { ...(opts.session ? { session: opts.session } : {}), batchSize: RELATION_KEYS_INLINE_MAX + 1 },
+    )
+    .toArray();
+  if (keys.length > RELATION_KEYS_INLINE_MAX) return { ...tree, nested };
+  const found = tree.mode === 'some' || tree.mode === 'is' || (tree.mode === 'every' && !negate);
+  return { kind: 'leaf', field: parentField, op: found ? 'in' : 'nin', value: keys.map((k) => k._id) };
+}
+
+// $setWindowFields arrived in MongoDB 5.0. An older server rejects the stage
+// by name; the first such error sends that database's nested pages back to a
+// query per parent.
+const windowedByDb = new WeakMap<object, WindowedPaging>();
+function windowedFor(db: Db): WindowedPaging {
+  let w = windowedByDb.get(db);
+  if (!w) {
+    w = {
+      enabled: true,
+      unsupported: (err) => {
+        const e = err as { code?: number; message?: string } | null;
+        return !!e && (e.code === 40324 || /setWindowFields/.test(e.message ?? ''));
+      },
+    };
+    windowedByDb.set(db, w);
+  }
+  return w;
 }
 
 /**
@@ -334,6 +455,17 @@ export async function executeUpdate(
   const update = artifact.args.update;
   const options = artifact.args.options ?? {};
   try {
+    // No scalar changes (an update whose data is only nested relation writes,
+    // or an emptied patch): Mongo rejects an empty update document, so read
+    // the row the update would have returned.
+    const emptyPatch = update && typeof update === 'object' && !Array.isArray(update) && Object.keys(update).length === 0;
+    if (emptyPatch && !node.upsertCreate) {
+      if (artifact.op === 'findOneAndUpdate') {
+        const doc = await coll.findOne(filter, sessOpt);
+        return doc ? { doc, count: 1 } : { doc: undefined, count: 0 };
+      }
+      return { count: await coll.countDocuments(filter, sessOpt) };
+    }
     if (artifact.op === 'findOneAndUpdate') {
       // Force the ModifyResult wrapper so the return shape is deterministic
       // across driver versions: v5 defaults to `{ value, ok, lastErrorObject }`,
@@ -357,7 +489,9 @@ export async function executeUpdate(
       return { doc, count: 1 };
     }
     const r = await coll.updateMany(filter, update, sessOpt);
-    return { count: r.modifiedCount };
+    // matchedCount, not modifiedCount: a row already holding the new value is
+    // still a row the filter selected, and every SQL dialect counts it.
+    return { count: r.matchedCount };
   } catch (err) {
     rethrowMongoError(err, model.collection);
     throw err; // unreachable
@@ -373,21 +507,20 @@ export async function executeDelete(
   const coll = mongoDb(opts).collection(artifact.collection);
   const sessOpt = opts.session ? { session: opts.session } : undefined;
   const filter = artifact.args.filter ?? {};
-  if (artifact.op === 'findOneAndDelete') {
-    // Fetch first so we can run cascade enforcement against the pre-delete row.
-    const target = await coll.findOne(filter, sessOpt);
-    if (!target) return { doc: undefined, count: 0 };
-    await coll.deleteOne({ _id: (target as any)._id }, sessOpt);
-    await applyCascadesForDelete(model, [target as any], undefined, mongoDb(opts));
-    return { doc: target, count: 1 };
+  // onDelete actions run in the wrapper before this, on the same session, so
+  // the delete itself is one round trip.
+  try {
+    if (artifact.op === 'findOneAndDelete') {
+      const raw: any = await coll.findOneAndDelete(filter, { ...(sessOpt ?? {}), includeResultMetadata: true });
+      const doc = raw ? raw.value : null;
+      return doc ? { doc, count: 1 } : { doc: undefined, count: 0 };
+    }
+    const r = await coll.deleteMany(filter, sessOpt);
+    return { count: r.deletedCount };
+  } catch (err) {
+    rethrowMongoError(err, model.collection);
+    throw err; // unreachable
   }
-  // Fetch first so cascade enforcement runs against the pre-delete rows.
-  const targets = await coll.find(filter, sessOpt).toArray();
-  if (targets.length === 0) return { count: 0 };
-  const ids = targets.map((d) => (d as any)._id);
-  const r = await coll.deleteMany({ _id: { $in: ids } }, sessOpt);
-  await applyCascadesForDelete(model, targets as any[], undefined, mongoDb(opts));
-  return { count: r.deletedCount };
 }
 
 // Re-export for the wrapper's return-one path so it can layer select/include
@@ -429,6 +562,23 @@ export async function executeCount(
   model: ModelDef<any>,
   opts: ExecOpts = {},
 ): Promise<number> {
+  if (hasRelationFilter(node.where)) {
+    node = { ...node, where: await resolveRelationFilters(model, node.where!, opts) };
+  }
+  if (hasRelationFilter(node.where)) {
+    const pipeline = compileMatchStages(model, node.where).stages;
+    if (node.distinct?.length) {
+      const groupId: Record<string, string> = {};
+      for (const fieldName of node.distinct) groupId[fieldName] = '$' + appKeyToDbKey(fieldName);
+      pipeline.push({ $group: { _id: groupId } });
+    }
+    pipeline.push({ $count: 'n' });
+    const res = await mongoDb(opts)
+      .collection(model.collection)
+      .aggregate(pipeline, opts.session ? { session: opts.session } : undefined)
+      .toArray();
+    return res.length ? (res[0] as any).n : 0;
+  }
   const artifact = compileCount(node, model);
   const coll = mongoDb(opts).collection(artifact.collection);
   const sessOpt = opts.session ? { session: opts.session } : undefined;
@@ -487,7 +637,7 @@ async function hydrateOwningOne(
     targetField: rel.refs,
     keyOf: stringKey,
     mapRef: (v) => coerceFieldValue(refDef, v),
-    runSelect: (node) => executeSelect(node, targetModel, opts),
+    runSelect: (node) => executeSelect(node, targetModel, { ...opts, wholeResult: true }),
   });
 }
 
@@ -507,7 +657,7 @@ async function hydrateInverseOne(
     targetField: rel.on,
     keyOf: stringKey,
     mapRef: (v) => coerceFieldValue(fkDef, v),
-    runSelect: (node) => executeSelect(node, targetModel, opts),
+    runSelect: (node) => executeSelect(node, targetModel, { ...opts, wholeResult: true }),
   });
 }
 
@@ -524,7 +674,9 @@ async function hydrateMany(
     keyOf: stringKey,
     mapRef: (v) =>
       coerceFieldValue(fkDef ?? targetModel.fields[rel.on] ?? ({ kind: 'objectId' } as any), v),
-    runSelect: (node) => executeSelect(node, targetModel, opts),
+    runSelect: (node) => executeSelect(node, targetModel, { ...opts, wholeResult: true }),
+    windowed: windowedFor(mongoDb(opts)),
+    keyFirst: true,
   });
 }
 

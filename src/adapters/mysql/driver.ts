@@ -26,6 +26,8 @@ export interface MysqlDriver extends MysqlQueryable {
    */
   reserve?(): Promise<MysqlReservedSession>;
   stream?(sql: string, params: unknown[]): AsyncIterable<any>;
+  // The same stream, `size` rows at a time.
+  streamBatches?(sql: string, params: unknown[], size: number): AsyncIterable<any[]>;
   close(): Promise<void>;
 }
 
@@ -72,6 +74,37 @@ export function mysql2Driver(pool: any): MysqlDriver {
         const raw = (conn as any).connection ?? conn;
         const s: any = raw.query({ ...exact(sql, params), values: params }).stream({ highWaterMark: 200 });
         for await (const row of s) yield row;
+      } finally {
+        if (typeof (conn as any).release === 'function') (conn as any).release();
+      }
+    },
+    streamBatches: async function* (sql, params, size) {
+      const conn = await pool.getConnection();
+      try {
+        const raw = (conn as any).connection ?? conn;
+        const s: any = raw.query({ ...exact(sql, params), values: params }).stream({ highWaterMark: size });
+        // Collected from 'data' events rather than the stream's own async
+        // iterator, which costs a promise per row.
+        let buf: any[] = [];
+        let ended = false;
+        let failed: unknown;
+        let wake: (() => void) | undefined;
+        const poke = () => { const w = wake; wake = undefined; w?.(); };
+        s.on('data', (r: any) => { buf.push(r); if (buf.length >= size) { s.pause(); poke(); } });
+        s.on('end', () => { ended = true; poke(); });
+        s.on('error', (e: unknown) => { failed = e; poke(); });
+        for (;;) {
+          if (failed) throw failed;
+          if (buf.length >= size || (ended && buf.length)) {
+            const out = buf;
+            buf = [];
+            yield out;
+            if (!ended) s.resume();
+            continue;
+          }
+          if (ended) return;
+          await new Promise<void>((r) => { wake = r; });
+        }
       } finally {
         if (typeof (conn as any).release === 'function') (conn as any).release();
       }

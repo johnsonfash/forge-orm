@@ -22,12 +22,20 @@ import {
 } from './compile-from-ir';
 import { withMssqlErrors } from './errors';
 import { decodeWideIntegerRows, decodeWideIntegers } from '../shared/wide-int';
+import { decodeJsonColumns } from '../shared/json-columns';
+
+const MSSQL_JSON = { arrays: true };
 import type { MssqlQueryable } from './driver';
-import { hydrateManyRelation, hydrateOneRelation } from '../../ir/hydrate-many';
-import { softDeleteField } from '../../ir/build/soft-delete';
+import type { Dialect } from '../postgres/dialect';
+import { hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
+
+// Window functions are always available here, so a nested page is one query.
+const WINDOWED: WindowedPaging = { enabled: true };
 
 export interface MssqlExecOpts {
   client?: MssqlQueryable;
+  /** The adapter's dialect when a full-text index was found. */
+  dialect?: Dialect;
 }
 
 export async function executeMssqlSelect(
@@ -37,21 +45,18 @@ export async function executeMssqlSelect(
   opts: MssqlExecOpts = {},
 ): Promise<any[]> {
   const exec = opts.client ?? driver;
-  const artifact = compileSelect(node, model);
+  const artifact = compileSelect(node, model, opts.dialect);
   const { rows } = await withMssqlErrors(() => exec.query(artifact.sql, artifact.params));
 
-  let out = decodeWideIntegerRows(model, rows);
+  let out = decodeWideIntegerRows(model, decodeJsonColumns(model, rows, MSSQL_JSON));
   if (node.distinct?.length) out = dedupeBy(out, node.distinct);
 
   // Fallback geoPoint refinement — exact-circle + sort post-process.
-  const { extractFallbackGeoOps, applyHaversinePostFilter } = await import('../shared/haversine');
-  const geoOps = extractFallbackGeoOps(node, model);
-  if (geoOps.near || geoOps.nearTo || geoOps.withinPolygon) {
-    out = applyHaversinePostFilter(out, geoOps.near, geoOps.nearTo, geoOps.withinPolygon);
-  }
+  const { refineFallbackGeo } = await import('../shared/haversine');
+  out = refineFallbackGeo(out, node, model);
 
   if (node.projection?.counts?.length) {
-    await applyRelationCounts(exec, out, model, node.projection.counts);
+    liftRelationCounts(out, node.projection.counts);
   }
   if (node.hydration?.length) {
     await hydrate(exec, out, model, node.hydration);
@@ -91,7 +96,7 @@ export async function executeMssqlCount(
   opts: MssqlExecOpts = {},
 ): Promise<number> {
   const exec = opts.client ?? driver;
-  const artifact = compileCount(node, model);
+  const artifact = compileCount(node, model, opts.dialect);
   const { rows } = await withMssqlErrors(() => exec.query(artifact.sql, artifact.params));
   return Number(rows[0]?.count ?? 0);
 }
@@ -105,7 +110,7 @@ export async function executeMssqlInsert(
   const exec = opts.client ?? driver;
   const artifact = compileInsert(node, model);
   const { rows, rowCount } = await withMssqlErrors(() => exec.query(artifact.sql, artifact.params));
-  return { docs: decodeWideIntegerRows(model, rows), count: rowCount ?? rows.length };
+  return { docs: decodeWideIntegerRows(model, decodeJsonColumns(model, rows, MSSQL_JSON)), count: rowCount ?? rows.length };
 }
 
 export async function executeMssqlUpdate(
@@ -118,7 +123,7 @@ export async function executeMssqlUpdate(
   const artifact = compileUpdate(node, model);
   const { rows, rowCount } = await withMssqlErrors(() => exec.query(artifact.sql, artifact.params));
   if (node.many) return { count: rowCount ?? rows.length };
-  return { doc: decodeWideIntegers(model, rows[0]), count: rows.length };
+  return { doc: decodeWideIntegers(model, decodeJsonColumns(model, rows, MSSQL_JSON)[0]), count: rows.length };
 }
 
 export async function executeMssqlDelete(
@@ -131,7 +136,7 @@ export async function executeMssqlDelete(
   const artifact = compileDelete(node, model);
   const { rows, rowCount } = await withMssqlErrors(() => exec.query(artifact.sql, artifact.params));
   if (node.many) return { count: rowCount ?? rows.length };
-  return { doc: decodeWideIntegers(model, rows[0]), count: rows.length };
+  return { doc: decodeWideIntegers(model, decodeJsonColumns(model, rows, MSSQL_JSON)[0]), count: rows.length };
 }
 
 // Hydration (same shape as PG/DuckDB).
@@ -168,38 +173,10 @@ async function hydrateMany(exec: MssqlQueryable, rows: any[], rel: RelationPlan,
   await hydrateManyRelation({
     rows, rel, keyOf: stringKey,
     runSelect: (node) => executeMssqlSelect(exec, node, targetModel),
+    windowed: WINDOWED,
   });
 }
 
-async function applyRelationCounts(exec: MssqlQueryable, rows: any[], parentModel: ModelDef<any>, counts: string[]): Promise<void> {
-  if (rows.length === 0) return;
-  const relMap = parentModel.relations();
-  for (const r of rows) r._count = r._count ?? {};
-  for (const relName of counts) {
-    const rel = relMap[relName]; if (!rel) continue;
-    const targetModel = (schema as any)[rel.target] as ModelDef<any> | undefined;
-    if (!targetModel) continue;
-    const refs = unique(rows.map((r) => r[rel.refs]).filter(notNull));
-    if (refs.length === 0) { for (const row of rows) row._count[relName] = 0; continue; }
-    // T-SQL doesn't have ANY(@p). Build an IN list with positional placeholders.
-    const placeholders = refs.map((_, i) => `@p${i + 1}`).join(', ');
-    // Soft-deleted children are excluded, so `_count` agrees with the rows
-    // `include` hands back. Without it `_count: { posts: true }` said 7 while
-    // `include: { posts: true }` returned 5.
-    const sd = softDeleteField(targetModel);
-    const sqlText = `SELECT [${rel.on}] AS fk, COUNT(*) AS c FROM [${targetModel.collection}] `
-      + `WHERE [${rel.on}] IN (${placeholders})`
-      + (sd ? ` AND [${sd}] IS NULL` : '')
-      + ` GROUP BY [${rel.on}]`;
-    const { rows: groups } = await exec.query(sqlText, refs);
-    const byFk = new Map<string, number>();
-    for (const g of groups) byFk.set(stringKey(g.fk), Number(g.c));
-    for (const row of rows) row._count[relName] = byFk.get(stringKey(row[rel.refs])) ?? 0;
-  }
-}
-
-function notNull<T>(v: T | null | undefined): v is T { return v != null; }
-function unique<T>(arr: T[]): T[] { const seen = new Set<string>(); const out: T[] = []; for (const v of arr) { const k = stringKey(v); if (seen.has(k)) continue; seen.add(k); out.push(v); } return out; }
 function stringKey(v: any): string { if (v == null) return '\x00'; return String(v); }
 function dedupeBy(rows: any[], fields: string[]): any[] {
   const seen = new Set<string>(); const out: any[] = [];

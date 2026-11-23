@@ -84,8 +84,11 @@ describe("Phase 2 — orderBy { nearTo } with _distanceMeters synthetic field", 
       orderBy: { location: { nearTo: POINT } },
     });
     expect(art.sql).toMatch(/ST_Distance\(/);
-    expect(art.sql).toMatch(/AS _distanceMeters/);
+    expect(art.sql).toMatch(/AS ["`\[]?_distanceMeters["`\]]?/);
     expect(art.sql).toMatch(/ORDER BY "_distanceMeters" ASC/);
+    // Quoted in both places: unquoted, Postgres folds the alias to
+    // _distancemeters and the ORDER BY names a column that does not exist.
+    expect(art.sql).toMatch(/AS "_distanceMeters"/);
   });
 
   it('MySQL emits ST_Distance_Sphere AS _distanceMeters', () => {
@@ -93,7 +96,7 @@ describe("Phase 2 — orderBy { nearTo } with _distanceMeters synthetic field", 
       orderBy: { location: { nearTo: POINT } },
     });
     expect(art.sql).toMatch(/ST_Distance_Sphere\(/);
-    expect(art.sql).toMatch(/AS _distanceMeters/);
+    expect(art.sql).toMatch(/AS ["`\[]?_distanceMeters["`\]]?/);
   });
 
   it('DuckDB emits ST_Distance_Sphere AS _distanceMeters', () => {
@@ -101,14 +104,14 @@ describe("Phase 2 — orderBy { nearTo } with _distanceMeters synthetic field", 
       orderBy: { location: { nearTo: POINT } },
     });
     expect(art.sql).toMatch(/ST_Distance_Sphere\(/);
-    expect(art.sql).toMatch(/AS _distanceMeters/);
+    expect(art.sql).toMatch(/AS ["`\[]?_distanceMeters["`\]]?/);
   });
 
   it('SQLite emits Distance AS _distanceMeters', () => {
     const art = buildSqliteCompileApi(geoModel()).findMany({
       orderBy: { location: { nearTo: POINT } },
     });
-    expect(art.sql).toMatch(/Distance\(.+\) AS _distanceMeters/);
+    expect(art.sql).toMatch(/Distance\(.+\) AS "_distanceMeters"/);
   });
 
   it('MSSQL emits .STDistance AS _distanceMeters', () => {
@@ -116,7 +119,7 @@ describe("Phase 2 — orderBy { nearTo } with _distanceMeters synthetic field", 
       orderBy: { location: { nearTo: POINT } },
     });
     expect(art.sql).toMatch(/\.STDistance\(/);
-    expect(art.sql).toMatch(/AS _distanceMeters/);
+    expect(art.sql).toMatch(/AS ["`\[]?_distanceMeters["`\]]?/);
   });
 
   it('combines near filter + nearTo ordering naturally', () => {
@@ -127,7 +130,7 @@ describe("Phase 2 — orderBy { nearTo } with _distanceMeters synthetic field", 
     });
     // The synthetic column lands AT $1/$2 (rendered before WHERE for natural
     // param ordering); WHERE clause params follow.
-    expect(art.sql).toMatch(/SELECT.*ST_Distance.*AS _distanceMeters.*FROM.*WHERE.*ST_DWithin/s);
+    expect(art.sql).toMatch(/SELECT.*ST_Distance.*AS "_distanceMeters".*FROM.*WHERE.*ST_DWithin/s);
     expect(art.sql).toMatch(/ORDER BY "_distanceMeters" ASC/);
     expect(art.sql).toMatch(/LIMIT 20/);
   });

@@ -180,6 +180,10 @@ export const MssqlDialect: Dialect = {
     return `VECTOR_DISTANCE('${metric}', ${quotedCol}, CAST(${ph} AS VECTOR(${dims})))`;
   },
 
+  jsonNumberExpr(quotedCol, key) {
+    return `CAST(JSON_VALUE(${quotedCol}, '$.${key}') AS FLOAT)`;
+  },
+
   jsonPathExpr(quotedCol, path, _operand, params) {
     // T-SQL accepts a variable for the path, and a bound parameter is one.
     return `JSON_VALUE(${quotedCol}, ${this.placeholder(params, jsonPathSpec(path))})`;
@@ -193,3 +197,27 @@ export const MssqlDialect: Dialect = {
     return `geography::STGeomFromText(${pp}, ${srid}).STContains(${quotedCol}) = 1`;
   },
 };
+
+/** A CONTAINS condition for a plain search term: every word required. */
+export function containsCondition(term: string): string {
+  return term.split(/\s+/).filter(Boolean).map((w) => `"${w.replace(/"/g, '""')}"`).join(' AND ');
+}
+
+/**
+ * MssqlDialect with `.searchable()` routed to CONTAINS on a column covered by
+ * a full-text index. `indexed` maps a table to those columns; any other
+ * column keeps the LIKE fallback (CONTAINS on an unindexed column is an
+ * error, not a slow query).
+ */
+export function mssqlFtsDialect(indexed: ReadonlyMap<string, ReadonlySet<string>>): Dialect {
+  return {
+    ...MssqlDialect,
+    searchExpr(quotedColumn, ctx) {
+      const cond = containsCondition(ctx.term);
+      if (!cond || !indexed.get(ctx.baseTable)?.has(ctx.rawColumn)) {
+        return MssqlDialect.searchClause(quotedColumn, ctx.placeholder(ctx.term), ctx);
+      }
+      return `CONTAINS(${quotedColumn}, ${ctx.placeholder(cond)})`;
+    },
+  };
+}

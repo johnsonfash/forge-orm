@@ -47,6 +47,20 @@ export class MongoAdapter implements Adapter {
     return this._client.client;
   }
 
+  private _canTransact?: Promise<boolean>;
+
+  /** Transactions need a replica set or a mongos; a standalone has none. Asked once. */
+  supportsTransactions(): Promise<boolean> {
+    return (this._canTransact ??= (async () => {
+      try {
+        const h: any = await this._client.db.admin().command({ hello: 1 });
+        return !!(h?.setName || h?.msg === 'isdbgrid');
+      } catch {
+        return false;
+      }
+    })());
+  }
+
   async connect(url: string): Promise<void> {
     this._url = url;
     // The first adapter also becomes the process default, so the exported
@@ -151,6 +165,27 @@ export class MongoAdapter implements Adapter {
       yield decodeRow(model, raw);
     }
   }
+  async *streamSelectBatches(node: any, model: any, opts?: ExecOpts & { batchSize?: number }): AsyncIterable<any[]> {
+    const { compileSelect } = await import('./compile-from-ir');
+    const a: any = compileSelect(node, model);
+    const cursor = this._client.db.collection(model.collection).find(a.args.filter, {
+      ...a.args.options,
+      session: this.mongoOpts(opts).session,
+      batchSize: opts?.batchSize ?? 1000,
+    });
+    try {
+      // hasNext() fetches the next server batch when the buffer is empty;
+      // the buffer is then taken whole instead of one awaited doc at a time.
+      while (await cursor.hasNext()) {
+        const docs = cursor.readBufferedDocuments();
+        for (let i = 0; i < docs.length; i++) docs[i] = decodeRow(model, docs[i]);
+        yield docs;
+      }
+    } finally {
+      await cursor.close().catch(() => {});
+    }
+  }
+
   applyProjectionAndHydration(rows: any[], model: any, node: any, opts?: ExecOpts) {
     return applyMongoProjectionAndHydration(rows, model, node, this.mongoOpts(opts));
   }

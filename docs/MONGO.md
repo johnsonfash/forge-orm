@@ -16,7 +16,7 @@ shared with every other adapter.
 * [Index types forge emits](#index-types-forge-emits)
 * [Atlas-specific features](#atlas-specific-features)
 * [The aggregation pipeline](#the-aggregation-pipeline)
-* [Relation filters throw (behaviour change in 2.18.0)](#relation-filters-throw-behaviour-change-in-2180)
+* [Relation filters](#relation-filters)
 * [Transactions](#transactions)
 * [Change streams](#change-streams)
 * [Read concerns and write concerns](#read-concerns-and-write-concerns)
@@ -209,11 +209,20 @@ Two reasons for the choice:
    sub-pipeline per relation and a final `$project` to peel it apart.
 
 The single batched fetch shown above is what runs when the nested
-`include` has no paging of its own. Add a nested `take` or `skip` and the
-hydration step switches to one `find` per parent, because a nested page
-is per parent — the shared logic lives in `src/ir/hydrate-many.ts` and
-behaves identically on all six adapters. See
-[N-PLUS-ONE](./N-PLUS-ONE.md) for the cost and the reasoning.
+`include` has no paging of its own. A nested `take` or `skip` is per
+parent, and since 2.25.0 it is still one round trip for the level: an
+aggregation that numbers each parent's children with `$setWindowFields`
+(MongoDB 5.0+). A server that rejects the stage — older MongoDB, or a
+compatible server without it — is detected on the first such load and
+that database falls back to one `find` per parent. The shared logic lives
+in `src/ir/hydrate-many.ts`; see
+[RELATIONS](./RELATIONS.md#nested-take-and-skip-are-per-parent).
+
+Two details of the batched fetch, both 2.25.0: when the level has its own
+`orderBy` the join key is sorted first (`{ post_id: 1, _id: 1 }`), which
+stops the planner choosing the `_id` index and scanning the whole
+collection for a `post_id: { $in }` filter; and the level is read in one
+batch, so more than 101 children no longer costs a `getMore`.
 
 If you need a true server-side join (avoiding the round-trip overhead
 on a fan-out of thousands), reach for `db.<model>.aggregate(...)`
@@ -248,28 +257,24 @@ for the full surface.
 
 ### Cascades, application-side
 
-Mongo has no foreign-key enforcement. `onDelete: 'Cascade'` and
-`'SetNull'` are walked in `src/adapters/mongo/cascade.ts`:
+Mongo has no foreign-key enforcement. `onDelete: 'Cascade'`, `'SetNull'`
+and `'Restrict'` are applied by forge's walker (`src/builder/cascade.ts`,
+shared with DuckDB and IndexedDB) on every `delete`, `deleteMany` and
+nested delete: Restrict checks first (a child found throws `P2003` before
+anything is written), SetNull is one `updateMany` per relation, Cascade
+recurses leaves-first with one `deleteMany` per relation, join tables
+included. On a replica set the walk and the parent delete run in one
+transaction, or in the caller's. On a standalone server they are
+best-effort. Full detail in
+[FOREIGN-KEYS.md](./FOREIGN-KEYS.md#mongo--no-native-fks-the-cascade-walker).
 
-```ts
-export async function applyCascadesForDelete(parentModel, parentDocs, ctx) {
-  const children = findChildRelations(parentModel);
-  for (const { childModel, rel } of children) {
-    const onDelete = rel.onDelete || 'NoAction';
-    if (onDelete === 'NoAction' || onDelete === 'Restrict') continue;
-    // ... resolve parent refs, coerce to ObjectId, fetch children, recurse, delete ...
-  }
-}
-```
+Before 2.25.0 the walker built its relation map once at module load from
+the bundled sample schema, so a consumer's models never cascaded, and
+`Restrict` was ignored.
 
-The walker recurses (Business → videos → likes/comments → replies) with
-a visited set guarding pathological loops. Leaves are deleted before
-parents so a concurrent reader does not see a dangling FK mid-walk.
-
-`Restrict` is honoured by surfacing the cascade as a no-op — the parent
-delete proceeds but children stay. If you want strict enforcement
-(refuse the parent delete when any child exists), wrap the call in a
-`$transaction` and run a pre-flight `count` on the child collection.
+`updateMany` returns the number of documents the filter **matched**
+(2.25.0), as every SQL dialect does. It returned `modifiedCount`, so an
+update that left rows at the value they already had reported 0.
 
 ---
 
@@ -519,13 +524,23 @@ Stage-by-stage notes:
 
 ---
 
-## Relation filters throw (behaviour change in 2.18.0)
+## Relation filters
 
-A relation filter — `where: { author: { is: { … } } }`,
-`where: { posts: { some: { … } } }` — cannot be compiled for Mongo,
-because a `find` has no join. Up to 2.17.0 `compileWhereNode` returned
-`{}` for it: match-all. That is the most dangerous answer available,
-because the same compiler builds the filter for reads **and** for writes:
+Reads and `count` accept relation filters on Mongo since 2.25.0 —
+`where: { posts: { some: { … } } }`, `none`, `every`, `is`, `isNot`,
+nested to any depth — and return the same rows as the SQL dialects. A
+`find` has no join, so each filter is resolved first: one grouped
+aggregation over the child collection yields the parent keys that
+qualify, and the parent query becomes a plain `find` with `$in` (some /
+is) or `$nin` (none / isNot / every, which collects the children that
+FAIL the filter). Above 10 000 qualifying keys the list is not inlined
+and the whole query runs as one aggregation with a bounded `$lookup` per
+filter instead. Both forms are in
+[RELATIONS.md](./RELATIONS.md#per-dialect-emit).
+
+**Writes still refuse them.** Up to 2.17.0 `compileWhereNode` returned
+`{}` for a relation filter — match-all — and the same compiler builds the
+filter for writes, so
 
 ```ts
 // On 2.17.0 and earlier this compiled to deleteMany({})
@@ -533,10 +548,9 @@ because the same compiler builds the filter for reads **and** for writes:
 await db.post.deleteMany({ where: { author: { is: { email: 'x' } } } });
 ```
 
-A read was no better — it returned every row in the collection instead of
-the matching ones, with no error and nothing in the logs.
-
-From 2.18.0 it throws, naming the relation and its mode:
+From 2.18.0 `updateMany` / `deleteMany` (and the `compile` API, which
+has no second round trip to make) throw, naming the relation and its
+mode:
 
 ```
 [forge:mongo] a relation filter on 'author' (is) cannot be compiled for
@@ -546,31 +560,17 @@ Mongo — a find has no join. Resolve it in two steps:
 Or use db.<model>.aggregate([{ $lookup: … }]) for a single round trip.
 ```
 
-So the rewrite is two queries — resolve the related ids, then filter on
-the foreign key:
+Resolve the ids with a read (which now takes the relation filter), then
+write by id:
 
 ```ts
-const ids = (await db.author.findMany({
-  where:  { email: 'x' },
+const ids = (await db.post.findMany({
+  where:  { author: { is: { email: 'x' } } },
   select: { id: true },
-})).map((a) => a.id);
+})).map((p) => p.id);
 
-await db.post.findMany({ where: { author_id: { in: ids } } });
+await db.post.deleteMany({ where: { id: { in: ids } } });
 ```
-
-Or one round trip, with the join written out by hand:
-
-```ts
-await db.post.aggregate([
-  { $lookup: { from: 'authors', localField: 'author_id', foreignField: '_id', as: 'author' } },
-  { $match:  { 'author.email': 'x' } },
-]);
-```
-
-**This is a behaviour change.** Code written against 2.17.0 or earlier
-that leant on the match-all — knowingly or not — now errors instead of
-running. That is the point: an error is recoverable, and a `deleteMany`
-that ignored its filter was not.
 
 `aggregate()` is two methods behind one name, and only one of them is
 Mongo-specific. Forge dispatches on the arguments: any of the five
@@ -1449,7 +1449,7 @@ compose well into typed `include`.
 | Inbound / outbound coercion (ObjectId, Date, embeds, defaults, extended-JSON) | `src/adapters/mongo/coerce.ts` |
 | `executeSelect` + `$geoNear` + `$vectorSearch` bridges + hydration | `src/adapters/mongo/execute.ts` |
 | Relation hydration — batched vs. per-parent paging (shared by all six adapters) | `src/ir/hydrate-many.ts` |
-| Cascade walker (`onDelete: Cascade` / `SetNull`) | `src/adapters/mongo/cascade.ts` |
+| Cascade walker (`onDelete: Cascade` / `SetNull`) | `src/builder/cascade.ts` |
 | Error translation (`P2002`, `P2025`) | `src/adapters/mongo/errors.ts` |
 | `forge push` — collect specs, fingerprint, ensureIndex | `src/adapters/mongo/scripts/push.ts` |
 

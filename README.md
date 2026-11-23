@@ -1493,14 +1493,16 @@ const full = await db.user.findFirst({
   include: { posts: { include: { comments: true } } },
 });
 
-// you can filter and limit an included relation. `take` is PER PARENT
-// (fixed in 2.18 — it used to cap the whole batch), which costs one query
-// per parent; without inner paging the include stays a single batched query.
+// you can filter and limit an included relation. `take` is PER PARENT, and
+// each include level is still one query however many parents it has (since
+// 2.25 a paged level uses ROW_NUMBER() / $setWindowFields instead of a query
+// per parent).
 await db.user.findFirst({
   include: { posts: { where: { status: 'PUBLISHED' }, orderBy: { created_at: 'desc' }, take: 5 } },
 });
 
-// _count returns relation cardinalities
+// _count returns relation cardinalities (a correlated subquery in the same
+// SELECT on SQL, so no extra round trip)
 await db.user.findMany({ include: { _count: { select: { posts: true, comments: true } } } });
 // → user.{_count: { posts: 5, comments: 12 }}
 ```

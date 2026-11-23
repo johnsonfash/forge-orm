@@ -168,14 +168,21 @@ describe('PG compile — INSERT', () => {
 describe('PG compile — UPDATE', () => {
   it('update with set', () => {
     const a = compileUpdate(buildUpdate('user', User, {
-      where: { email: 'a@b.co' }, data: { active: true }, many: false,
+      where: { active: false }, data: { active: true }, many: false,
     }), User);
     // Single-row idiom, keyed on the primary key and locking the row it
-            // picks. NOT `ctid` — see singleRowWhere in the PG compiler.
+    // picks. NOT `ctid` — see singleRowWhere in the PG compiler.
     expect(a.sql).toMatch(/UPDATE "users" SET "active" = \$1/);
-    expect(a.sql).toMatch(/WHERE "id" = \(SELECT "id" FROM "users" WHERE "users"\."email" = \$2 LIMIT 1 FOR UPDATE\)/);
+    expect(a.sql).toMatch(/WHERE "id" = \(SELECT "id" FROM "users" WHERE "users"\."active" = \$2 LIMIT 1 FOR UPDATE\)/);
     expect(a.sql).not.toMatch(/ctid/);
-    expect(a.params).toEqual([true, 'a@b.co']);
+    expect(a.params).toEqual([true, false]);
+  });
+
+  it('a where on a unique column needs no single-row subselect', () => {
+    const a = compileUpdate(buildUpdate('user', User, {
+      where: { email: 'a@b.co' }, data: { active: true }, many: false,
+    }), User);
+    expect(a.sql).toBe('UPDATE "users" SET "active" = $1 WHERE "users"."email" = $2 RETURNING *');
   });
 
   it('updateMany emits a flat WHERE', () => {
@@ -207,10 +214,12 @@ describe('PG compile — UPDATE', () => {
 
 describe('PG compile — DELETE', () => {
   it('deleteOne is keyed on the pk, not ctid', () => {
-    const a = compileDelete(buildDelete('user', User, { where: { email: 'a@b.co' }, many: false }), User);
-    expect(a.sql).toMatch(/DELETE FROM "users" WHERE "id" = \(SELECT "id" FROM "users" WHERE "users"\."email" = \$1 LIMIT 1 FOR UPDATE\) RETURNING \*/);
+    const a = compileDelete(buildDelete('user', User, { where: { active: true }, many: false }), User);
+    expect(a.sql).toMatch(/DELETE FROM "users" WHERE "id" = \(SELECT "id" FROM "users" WHERE "users"\."active" = \$1 LIMIT 1 FOR UPDATE\) RETURNING \*/);
     expect(a.sql).not.toMatch(/ctid/);
-    expect(a.params).toEqual(['a@b.co']);
+    expect(a.params).toEqual([true]);
+    const byEmail = compileDelete(buildDelete('user', User, { where: { email: 'a@b.co' }, many: false }), User);
+    expect(byEmail.sql).toBe('DELETE FROM "users" WHERE "users"."email" = $1 RETURNING *');
   });
 
   it('deleteMany emits flat WHERE', () => {

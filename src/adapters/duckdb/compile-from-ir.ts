@@ -16,6 +16,7 @@ import {
   compileGroupBy as pgCompileGroupBy,
 } from '../postgres/compile-from-ir';
 import { DuckdbDialect } from './dialect';
+import type { Dialect } from '../postgres/dialect';
 
 function toDuckdb(a: SQLArtifact): SQLArtifact {
   // PG compiler tags artifacts with dialect: 'postgres'; rewrite to 'duckdb'.
@@ -33,21 +34,21 @@ function toDuckdb(a: SQLArtifact): SQLArtifact {
   return { ...a, dialect: 'duckdb', sql };
 }
 
-export function compileSelect(node: SelectNode, model?: ModelDef<any>): SQLArtifact {
-  return toDuckdb(pgCompileSelect(node, model, DuckdbDialect));
+export function compileSelect(node: SelectNode, model?: ModelDef<any>, dialect: Dialect = DuckdbDialect): SQLArtifact {
+  return toDuckdb(pgCompileSelect(node, model, dialect));
 }
-export function compileCount(node: CountNode, model?: ModelDef<any>): SQLArtifact {
-  return toDuckdb(pgCompileCount(node, model, DuckdbDialect));
+export function compileCount(node: CountNode, model?: ModelDef<any>, dialect: Dialect = DuckdbDialect): SQLArtifact {
+  return toDuckdb(pgCompileCount(node, model, dialect));
 }
-export function compileInsert(node: InsertNode, model?: ModelDef<any>): SQLArtifact {
-  return toDuckdb(pgCompileInsert(node, model, DuckdbDialect));
+export function compileInsert(node: InsertNode, model?: ModelDef<any>, dialect: Dialect = DuckdbDialect): SQLArtifact {
+  return toDuckdb(pgCompileInsert(node, model, dialect));
 }
-export function compileUpdate(node: UpdateNode, model?: ModelDef<any>): SQLArtifact {
-  return toDuckdb(pgCompileUpdate(node, model, DuckdbDialect));
+export function compileUpdate(node: UpdateNode, model?: ModelDef<any>, dialect: Dialect = DuckdbDialect): SQLArtifact {
+  return toDuckdb(pgCompileUpdate(node, model, dialect));
 }
-export function compileDelete(node: DeleteNode, model?: ModelDef<any>): SQLArtifact {
-  return toDuckdb(pgCompileDelete(node, model, DuckdbDialect));
+export function compileDelete(node: DeleteNode, model?: ModelDef<any>, dialect: Dialect = DuckdbDialect): SQLArtifact {
+  return toDuckdb(pgCompileDelete(node, model, dialect));
 }
-export function compileGroupBy(node: GroupByNode, model?: ModelDef<any>): SQLArtifact {
-  return toDuckdb(pgCompileGroupBy(node, model, DuckdbDialect));
+export function compileGroupBy(node: GroupByNode, model?: ModelDef<any>, dialect: Dialect = DuckdbDialect): SQLArtifact {
+  return toDuckdb(pgCompileGroupBy(node, model, dialect));
 }

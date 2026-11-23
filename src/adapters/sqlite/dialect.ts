@@ -168,6 +168,10 @@ export const SqliteDialect: Dialect = {
     return '0';
   },
 
+  jsonNumberExpr(quotedCol, key) {
+    return `CAST(json_extract(${quotedCol}, '$.${key}') AS REAL)`;
+  },
+
   jsonPathExpr(quotedCol, path, _operand, params) {
     return `json_extract(${quotedCol}, ${this.placeholder(params, jsonPathSpec(path))})`;
   },

@@ -19,13 +19,14 @@ import {
 } from './compile-from-ir';
 import { withPgErrors } from './errors';
 import { decodeWideIntegerRows, decodeWideIntegers } from '../shared/wide-int';
-import { hydrateManyRelation, hydrateOneRelation } from '../../ir/hydrate-many';
-import { softDeleteField } from '../../ir/build/soft-delete';
+import { hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
 
 // Postgres IR executor — wires SQLArtifacts to a pg pool.
 //
-// Hydration is batched-IN: for each include relation, one SELECT with
-// `WHERE fk = ANY($1)`.
+// Hydration is one SELECT per include level, `WHERE fk IN (…)`, paged per
+// parent with ROW_NUMBER() when the include has a take or skip.
+
+const WINDOWED: WindowedPaging = { enabled: true };
 
 export interface PgPoolHandle {
   query(sql: string, params?: unknown[]): Promise<{ rows: any[]; rowCount: number | null }>;
@@ -54,14 +55,11 @@ export async function executePgSelect(
   // orderBy references a fallback-mode geo column, the SQL emitted a bbox
   // prefilter only (over-inclusive). Refine to the exact circle + annotate
   // _distanceMeters in app.
-  const { extractFallbackGeoOps, applyHaversinePostFilter } = await import('../shared/haversine');
-  const ops = extractFallbackGeoOps(node, model);
-  if (ops.near || ops.nearTo || ops.withinPolygon) {
-    out = applyHaversinePostFilter(out, ops.near, ops.nearTo, ops.withinPolygon);
-  }
+  const { refineFallbackGeo } = await import('../shared/haversine');
+  out = refineFallbackGeo(out, node, model);
 
   if (node.projection?.counts?.length) {
-    await applyRelationCounts(exec, out, model, node.projection.counts);
+    liftRelationCounts(out, node.projection.counts);
   }
   if (node.hydration?.length) {
     await hydrate(exec, out, model, node.hydration);
@@ -207,49 +205,8 @@ async function hydrateMany(
   await hydrateManyRelation({
     rows, rel, keyOf: stringKey,
     runSelect: (node) => executePgSelect(exec, node, targetModel),
+    windowed: WINDOWED,
   });
-}
-
-async function applyRelationCounts(
-  exec: PgPoolHandle,
-  rows: any[],
-  parentModel: ModelDef<any>,
-  counts: string[],
-): Promise<void> {
-  if (rows.length === 0) return;
-  const relMap = parentModel.relations();
-  for (const r of rows) r._count = r._count ?? {};
-  for (const relName of counts) {
-    const rel = relMap[relName];
-    if (!rel) continue;
-    const targetModel = (schema as any)[rel.target] as ModelDef<any> | undefined;
-    if (!targetModel) continue;
-    const refs = unique(rows.map((r) => r[rel.refs]).filter(notNull));
-    if (refs.length === 0) { for (const row of rows) row._count[relName] = 0; continue; }
-    // Soft-deleted children are excluded, so `_count` agrees with the rows
-    // `include` hands back. Without it `_count: { posts: true }` said 7 while
-    // `include: { posts: true }` returned 5.
-    const sd = softDeleteField(targetModel);
-    const sql =
-      `SELECT "${rel.on}" AS fk, COUNT(*)::bigint AS c ` +
-      `FROM "${targetModel.collection}" ` +
-      `WHERE "${rel.on}" = ANY($1)` +
-      (sd ? ` AND "${sd}" IS NULL` : '') +
-      ` GROUP BY "${rel.on}"`;
-    const { rows: groups } = await exec.query(sql, [refs]);
-    const byFk = new Map<string, number>();
-    for (const g of groups) byFk.set(stringKey(g.fk), Number(g.c));
-    for (const row of rows) row._count[relName] = byFk.get(stringKey(row[rel.refs])) ?? 0;
-  }
-}
-
-function notNull<T>(v: T | null | undefined): v is T { return v != null; }
-
-function unique<T>(arr: T[]): T[] {
-  const seen = new Set<string>();
-  const out: T[] = [];
-  for (const v of arr) { const k = stringKey(v); if (seen.has(k)) continue; seen.add(k); out.push(v); }
-  return out;
 }
 
 function stringKey(v: any): string {

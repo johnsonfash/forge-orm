@@ -18,7 +18,7 @@ has the one-paragraph summary. This is the long form.
   * [SQLite — `better-sqlite3.iterate()`](#sqlite--better-sqlite3iterate)
   * [SQLite — libsql / Turso](#sqlite--libsql--turso)
   * [Mongo — `cursor.stream()`](#mongo--cursorstream)
-  * [DuckDB and MSSQL — chunked fallback](#duckdb-and-mssql--chunked-fallback)
+  * [DuckDB and MSSQL — keyset pages](#duckdb-and-mssql--keyset-pages)
 * [Memory profile per driver](#memory-profile-per-driver)
 * [Batching vs streaming — picking a chunk size](#batching-vs-streaming--picking-a-chunk-size)
 * [Backpressure](#backpressure)
@@ -93,10 +93,11 @@ The signature is deliberately narrower than `findMany`:
 |---|---|---|
 | `where` | yes | translates straight to the underlying SELECT |
 | `orderBy` | yes | required if you care about row order; the cursor reads in heap/insertion order otherwise |
-| `chunkSize` | yes | only used by the OFFSET/LIMIT fallback (DuckDB, MSSQL) — adapters with a native cursor ignore it |
+| `chunkSize` | yes | rows per batch: the Postgres FETCH size, the SQLite / MySQL / Mongo batch, the DuckDB / MSSQL page |
 | `select` | no | not exposed on the stream signature; rows come back as full leaf rows |
 | `include` | **no** | batched relation hydration would need to buffer the whole stream — defeats the point |
-| `take` / `skip` / `cursor` (pagination) | no | the stream already runs to the end of the query; cap it by the `where` instead |
+| `take` / `skip` | yes | caps / offsets the whole stream |
+| `cursor` | no | the stream already runs to the end of the query |
 
 Where it diverges from `findMany`:
 
@@ -110,42 +111,43 @@ Where it diverges from `findMany`:
   per-row `decodeRow` (so timestamps still become `Date`, JSON still
   decodes, but no relation join happens).
 
-Internally, `findManyStream` in `src/builder/collection.ts` prefers
-adapter-native streaming via `streamSelect`, and falls back to an
-OFFSET/LIMIT loop when the adapter does not implement it:
+Internally, `findManyStream` in `src/builder/collection.ts` tries, in
+order:
 
-```ts
-async *findManyStream(args): AsyncIterable<ResolvedRow<F>> {
-  if (typeof (this.adapter as any).streamSelect === 'function') {
-    const node = buildSelect(/* … */);
-    const iter = this.adapter.streamSelect(node, this.model, { session: this._session });
-    for await (const row of iter) yield row as ResolvedRow<F>;
-    return;
-  }
-  const chunkSize = args.chunkSize ?? 1000;
-  let offset = 0;
-  while (true) {
-    const batch = await this._find({ ...args, take: chunkSize, skip: offset }, undefined);
-    if (!Array.isArray(batch) || batch.length === 0) return;
-    for (const row of batch) yield row as ResolvedRow<F>;
-    if (batch.length < chunkSize) return;
-    offset += batch.length;
-  }
-}
-```
+1. `adapter.streamSelectBatches(node, model, { session, batchSize })` —
+   an `AsyncIterable<row[]>`. Postgres (`pg` cursor), MySQL (`mysql2`),
+   SQLite (`better-sqlite3`) and Mongo implement it. The wrapper yields
+   the rows of each batch, so the per-row cost is one generator step
+   instead of one per layer (driver, adapter, wrapper). That per-row
+   awaiting was most of what a stream cost before 2.25.0.
+2. `adapter.streamSelect(node, model, opts)` — one row at a time.
+3. **Keyset paging** (2.25.0) when the adapter has neither — DuckDB,
+   MSSQL. Each page asks for the rows after the last row's sort key
+   (`(a > A) OR (a = A AND id > ID)`), so page 50 costs what page 1
+   costs, and a write between pages cannot shift the window. It needs an
+   order on non-null scalar columns; forge appends the primary key to
+   make the order total. Ordering on a nullable column falls back to:
+4. OFFSET / LIMIT chunks of `chunkSize`.
 
-The adapter contract is one optional method, `streamSelect?(node,
-model, opts?): AsyncIterable<any>`. Adapters that implement it own
-the cursor mechanics. Adapters that don't get the OFFSET/LIMIT
-fallback for free — same call shape, worse guarantees (concurrent
-inserts during the stream can shift the window).
+`chunkSize` sets the batch size on every path (the cursor's FETCH size on
+Postgres, the page size on the keyset path). `take` / `skip` are honoured.
+
+DuckDB's own streaming result is deliberately not used: any other
+statement on the same connection ends it **silently** — the stream just
+stops early, with no error — and a loop that writes while it reads is the
+normal shape of an export job.
 
 ## Per-driver internals
 
 ### Postgres — `pg` server-side cursor
 
 The `pg` driver opens a transaction, declares a server-side cursor,
-and `FETCH`es 200 rows at a time:
+and `FETCH`es 1000 rows at a time (`chunkSize` overrides it; it was a
+fixed 200 before 2.25.0, which made 10 000 rows 55 round trips instead
+of 15). Inside `db.$transaction` the cursor is declared on the
+transaction's own connection, so the stream sees the transaction's
+uncommitted writes — it used to open a separate connection and could not.
+The shape of the outside-a-transaction path:
 
 ```ts
 // src/adapters/postgres/driver.ts (pgDriver)
@@ -177,9 +179,7 @@ process-monotonic counter (`Date.now()` would collide on concurrent
 streams sharing a connection). The `BEGIN`/`COMMIT` wrap is
 mandatory because PG closes a non-`WITH HOLD` cursor at
 transaction end — without it, the cursor is invalid on the second
-`FETCH`. The fetch window is fixed at 200 rows and is not a public
-knob today; wrap the driver and adjust the constant if you need it
-different. One streaming call holds *one* pool connection from
+`FETCH`. One streaming call holds *one* pool connection from
 `BEGIN` to `COMMIT` — see [Pooling caveats](#pooling-caveats).
 
 ### Postgres — `postgres.js` (porsager)
@@ -316,15 +316,14 @@ does on early `break`). Mongo cursors honour `session`, so a
 against the same logical session — replica set / mongos required
 as usual.
 
-### DuckDB and MSSQL — chunked fallback
+### DuckDB and MSSQL — keyset pages
 
-Neither adapter exposes `streamSelect` in forge today. Both rely on
-the builder-level fallback: a loop of `take` + `skip` chunks. The
-iterator shape is preserved but it inherits OFFSET/LIMIT's failure
-modes — concurrent inserts can shift the window (rows skipped or
-duplicated), and the cost of `OFFSET N` grows linearly on most
-engines. On DuckDB the per-chunk overhead is also high (round-trip
-+ plan + scan) relative to a single materialised query. A better
+Neither adapter exposes a native stream. Both use the builder-level
+keyset pager described above: `chunkSize` rows per statement, each page
+starting after the previous page's last sort key. An order on a nullable
+column cannot be resumed that way and falls back to OFFSET / LIMIT, which
+inherits its failure modes — concurrent inserts can shift the window, and
+`OFFSET N` grows linearly. A better
 path for DuckDB exports is `$queryRaw` with `COPY (…) TO STDOUT
 (FORMAT PARQUET)` and pipe the binary stream — see [worked example B](#worked-example-b--postgres--duckdb--parquet-etl).
 
@@ -334,14 +333,14 @@ What is actually resident in V8 heap at any moment during a stream:
 
 | Driver | Held in heap | Held server-side |
 |---|---|---|
-| Postgres (`pg`) | current row + fetch window (200 rows) | the cursor's portal (negligible) |
+| Postgres (`pg`) | current row + fetch window (1000 rows, `chunkSize`) | the cursor's portal (negligible) |
 | Postgres (`postgres.js`) | **full result** (no cursor today) | none |
 | MySQL (`mysql2`) | current row + `highWaterMark` (200 rows) | the open query buffer |
 | MariaDB / PlanetScale | **full result** (no cursor today) | none |
 | SQLite (`better-sqlite3`) | current row | the open prepared statement (negligible) |
 | SQLite (libsql) | **full result** (no cursor) | none |
 | Mongo | current row + batch (`batchSize` docs, default ~101) | the cursor's BSON buffer |
-| DuckDB / MSSQL | `chunkSize` rows (default 1000) | none |
+| DuckDB / MSSQL | `chunkSize` rows (default 1000), one keyset page | none |
 
 "Current row" is one decoded JS object plus the driver's
 connection buffer (TLS frame, TCP receive). For 1 KB rows that is
@@ -641,13 +640,12 @@ held, though, which is the next section.
 
 ## Transactions and streaming
 
-The Postgres cursor is inherently transactional — the `pg` driver
-opens its own `BEGIN`/`COMMIT` around the stream. Two consequences:
-you cannot nest a `findManyStream` inside another `db.$transaction`
-on `pg` and have them share a transaction (the inner stream opens
-a *different* connection with its own BEGIN; the outer
-transaction's uncommitted writes are not visible to the stream).
-And if the consumer takes a long time, the BEGIN sits idle and
+The Postgres cursor is inherently transactional. Outside a transaction
+the `pg` driver opens its own `BEGIN`/`COMMIT` around the stream; inside
+`db.$transaction` (2.25.0) the cursor is declared on the transaction's
+connection, so it reads the transaction's uncommitted writes. Before
+2.25.0 the stream always took a different connection and could not see
+them. If the consumer takes a long time, the BEGIN sits idle and
 shows up as `idle in transaction` in `pg_stat_activity` — some
 managed Postgres deployments kill sessions via
 `idle_in_transaction_session_timeout`. Bump the timeout for the
@@ -655,9 +653,10 @@ export user or chunk the export.
 
 MySQL streams without an implicit transaction. The session-level
 isolation default (`REPEATABLE READ`) gives a consistent view for
-the cursor's lifetime. For a stricter snapshot, wrap the stream in
-`db.$transaction` — mysql2's pool returns the same connection for
-both, and the stream runs against it:
+the cursor's lifetime. Inside `db.$transaction` the rows are read on the
+transaction's connection (buffered, not streamed, since 2.25.0 — the
+stream used to run on another pooled connection and missed the
+transaction's own writes):
 
 ```ts
 await db.$transaction(async (tx) => {

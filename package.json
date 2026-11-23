@@ -1,6 +1,6 @@
 {
   "name": "forge-orm",
-  "version": "2.24.0",
+  "version": "2.25.0",
   "description": "Prisma-shape multi-database ORM/wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB & SQL Server from one codebase — typed geo / vector / JSON path / full-text search, no codegen, no query engine. Bring your own schema.",
   "license": "MIT",
   "author": "johnsonfash",
@@ -156,7 +156,9 @@
     "forge:features:pg": "SMOKE_DIALECT=pg ts-node --transpile-only --project tsconfig.json regression-dialect-features.ts",
     "forge:features:mysql": "SMOKE_DIALECT=mysql ts-node --transpile-only --project tsconfig.json regression-dialect-features.ts",
     "forge:check": "npm run forge:test && npm run forge:typesafety && npm run forge:autocomplete && npm run forge:regression:transactions && npm run forge:regression:indexeddb && npm run forge:integration:duckdb",
-    "forge:all": "npm run forge:check && npm run forge:integration && npm run forge:bench"
+    "forge:all": "npm run forge:check && npm run forge:integration && npm run forge:bench",
+    "forge:bench:deep": "TZ=UTC ts-node --transpile-only --project tsconfig.json bench/compare/deep/run.ts",
+    "forge:bench:deep:gen": "prisma generate --schema=bench/compare/deep/prisma/pg.prisma && prisma generate --schema=bench/compare/deep/prisma/mysql.prisma && prisma generate --schema=bench/compare/deep/prisma/sqlite.prisma"
   },
   "peerDependencies": {
     "@electric-sql/pglite": ">=0.2.0",

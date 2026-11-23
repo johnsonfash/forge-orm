@@ -19,7 +19,7 @@
 //
 // Invoked by bench/db-bench.ts when COMPARE=1 (see runCompare()).
 
-import { createDb } from "../../src";
+import { createDb, betterSqlite3Driver } from "../../src";
 import { schema } from "../../src/schema";
 import { buildSchemaDDL as buildPgDDL } from "../../src/adapters/postgres/ddl";
 import { applyMigration as applyPgMigration } from "../../src/adapters/postgres/migrate";
@@ -139,7 +139,7 @@ async function comparePg(): Promise<CompareResult | null> {
     await applyPgMigration(pool, buildPgDDL(schema as any));
     const seed = Array.from({ length: BENCH_SEED }, (_, i) => ({
       id: `u_${i}`, email: `bench${i}@x.co`, name: `User ${i}`,
-      role: i % 3 === 0 ? "EDITOR" : "USER",
+      role: (i % 3 === 0 ? "EDITOR" : "USER") as "EDITOR" | "USER",
     }));
     await db.user.createMany({ data: seed });
 
@@ -233,7 +233,7 @@ async function compareMysql(): Promise<CompareResult | null> {
     await applyMysqlMigration(pool, buildMysqlDDL(schema as any));
     const seed = Array.from({ length: BENCH_SEED }, (_, i) => ({
       id: `u_${i}`, email: `bench${i}@x.co`, name: `User ${i}`,
-      role: i % 3 === 0 ? "EDITOR" : "USER",
+      role: (i % 3 === 0 ? "EDITOR" : "USER") as "EDITOR" | "USER",
     }));
     await db.user.createMany({ data: seed });
     const sampleId = (idx: number) => `u_${idx}`;
@@ -323,14 +323,19 @@ async function compareSqlite(): Promise<CompareResult | null> {
   const URL = `sqlite:${file}`;
   console.log(`[cmp:sqlite] file database: ${file}`);
 
-  const db = await createDb({ url: URL });
-  const handle = (db.adapter as any).db;
+  // forge's adapter exposes only its driver port, so open the handle here and
+  // hand it to forge: raw and Drizzle need better-sqlite3's own handle.
+  const Database = require("better-sqlite3");
+  const handle = new Database(file);
+  handle.pragma("journal_mode = WAL");
+  const db: any = await createDb({ driver: betterSqlite3Driver(handle) } as any);
+  void URL;
 
   try {
-    await applySqliteMigration(handle, buildSqliteDDL(schema as any));
+    await applySqliteMigration(betterSqlite3Driver(handle), buildSqliteDDL(schema as any));
     const seed = Array.from({ length: BENCH_SEED }, (_, i) => ({
       id: `u_${i}`, email: `bench${i}@x.co`, name: `User ${i}`,
-      role: i % 3 === 0 ? "EDITOR" : "USER",
+      role: (i % 3 === 0 ? "EDITOR" : "USER") as "EDITOR" | "USER",
     }));
     await db.user.createMany({ data: seed });
     const sampleId = (idx: number) => `u_${idx}`;
@@ -414,7 +419,7 @@ async function compareMongo(): Promise<CompareResult | null> {
   try {
     await pushAllIndexes();
     const seed = Array.from({ length: BENCH_SEED }, (_, i) => ({
-      email: `bench${i}@x.co`, name: `User ${i}`, role: i % 3 === 0 ? "EDITOR" : "USER",
+      email: `bench${i}@x.co`, name: `User ${i}`, role: (i % 3 === 0 ? "EDITOR" : "USER") as "EDITOR" | "USER",
     }));
     await db.user.createMany({ data: seed });
     const sample: any = await db.user.findFirst({ where: { email: "bench0@x.co" } });

@@ -120,6 +120,25 @@ is emitted — the executor computes `_distanceMeters` by haversine and
 sorts on it after the rows come back. Before 2.16.0 the ordering path
 asked for `ST_GeogFromText` against the JSON column and failed.
 
+`take` / `skip` are applied **after** that sort (2.25.0). The SQL has no
+distance order to page by, so a `LIMIT 20` in it kept 20 arbitrary rows
+of the box and only then sorted them: a "nearest 20" query returned 20
+nearby rows, not the nearest. The page now comes off the refined, sorted
+set, which means the whole box is read; keep the radius tight.
+
+The bbox reads lng/lat with each dialect's own JSON functions:
+`("loc"->>'lng')::float8` on Postgres and DuckDB,
+`CAST(json_extract("loc", '$.lng') AS REAL)` on SQLite,
+`(JSON_EXTRACT(`loc`, '$.lng') + 0)` on MySQL,
+`CAST(JSON_VALUE([loc], '$.lng') AS FLOAT)` on SQL Server. Before 2.25.0
+every dialect got the Postgres form, and SQLite rejected it
+(`unrecognized token: ":"`).
+
+A native Postgres `nearTo` selected its distance as an unquoted
+`_distanceMeters`, which Postgres folds to `_distancemeters`, so the
+`ORDER BY "_distanceMeters"` that followed failed with "column does not
+exist". The alias is quoted now (2.25.0).
+
 Set `f.geoPoint({ fallback: true })` when the dialect's spatial
 extension isn't available. Three common reasons:
 

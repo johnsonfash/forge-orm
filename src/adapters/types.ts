@@ -169,6 +169,11 @@ export interface Adapter {
   // on throw.
   $transaction<T>(fn: (session: unknown) => Promise<T>): Promise<T>;
 
+  // Whether $transaction gives real atomicity on this connection. Absent
+  // means yes. Mongo answers false on a standalone server; IndexedDB has no
+  // interactive transaction to offer.
+  supportsTransactions?(): Promise<boolean>;
+
   // Inbound coercion — app-shape data → wire-shape. Mongo remaps `id` to
   // `_id`, converts string ids to ObjectId, ISO dates to Date, applies create
   // defaults. PG is mostly identity (lets pg's type coercion do the work), but
@@ -197,6 +202,11 @@ export interface Adapter {
   // return undefined → wrapper falls back to OFFSET/LIMIT chunking in
   // CollectionWrapper.findManyStream.
   streamSelect?(node: any, model: any, opts?: ExecOpts): AsyncIterable<any>;
+
+  // The same stream, a batch of decoded rows at a time. Preferred by the
+  // wrapper when present: one async step per batch instead of one per row
+  // through every layer, which is most of what a row-by-row stream costs.
+  streamSelectBatches?(node: any, model: any, opts?: ExecOpts & { batchSize?: number }): AsyncIterable<any[]>;
 
   // Introspect the live database schema for drift detection.
   introspect?(): Promise<DbIntrospection>;

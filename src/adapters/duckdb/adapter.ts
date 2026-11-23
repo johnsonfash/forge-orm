@@ -1,4 +1,5 @@
 import type { Adapter, AdapterCapabilities, DoctorReport, ExecOpts } from '../types';
+import { TxQueue } from '../shared/tx-queue';
 import { ForgeEmitter } from '../../events';
 import { isDriverInstalled, loadDriver } from '../missing-driver';
 import {
@@ -11,6 +12,9 @@ import {
   type DuckdbExecOpts,
 } from './execute';
 import { duckdbDriver, type DuckdbDriver, type DuckdbQueryable } from './driver';
+import { duckdbFtsDialect } from './dialect';
+import type { Dialect } from '../postgres/dialect';
+import { searchedFields } from '../shared/search-fields';
 import { bytesForDriver } from '../../bytes';
 
 // DuckdbAdapter — drives a DuckdbDriver port (driver.ts). By default it opens
@@ -88,7 +92,7 @@ export class DuckdbAdapter implements Adapter {
           ? 'Custom driver injected via createDb({ driver }).'
           : 'Driver: @duckdb/node-api. Embedded OLAP — single-writer concurrency model.',
         'Foreign keys are accepted at DDL time but NOT enforced at write time. Cascades go through forge\'s app-side walker.',
-        'Full-text search via .searchable() falls back to ILIKE — install the fts extension and pre-build a docs_fts index for real search.',
+        'Full-text search via .searchable() uses the fts extension\'s match_bm25 when the table has an index (PRAGMA create_fts_index(table, pk, column)); otherwise ILIKE. The index is a snapshot: rebuild it after writes.',
       ],
     };
   }
@@ -98,8 +102,41 @@ export class DuckdbAdapter implements Adapter {
     return this._driver;
   }
 
-  private duckdbOpts(opts?: ExecOpts): DuckdbExecOpts {
-    return opts?.session ? { client: opts.session as DuckdbQueryable } : {};
+  private duckdbOpts(opts?: ExecOpts, dialect?: Dialect): DuckdbExecOpts {
+    const o: DuckdbExecOpts = opts?.session ? { client: opts.session as DuckdbQueryable } : {};
+    if (dialect) o.dialect = dialect;
+    return o;
+  }
+
+  // table → columns covered by its full-text index, as last read. A table
+  // with none is asked again after a few seconds, so an index built after
+  // connect (it is built after loading, being a snapshot) is picked up.
+  private readonly _fts = new Map<string, { cols: Set<string>; at: number }>();
+  private _ftsDialect?: { key: string; dialect: Dialect };
+
+  /** The dialect for a node: the full-text one when it searches an indexed column. */
+  private async dialectFor(node: any, model: any, opts?: ExecOpts): Promise<Dialect | undefined> {
+    const fields = searchedFields(node?.where);
+    if (!fields.length || !model?.collection) return undefined;
+    const table = String(model.collection);
+    let e = this._fts.get(table);
+    if (!e || (e.cols.size === 0 && Date.now() - e.at > 5000)) {
+      const cols = new Set<string>();
+      try {
+        const ident = `"fts_main_${table.replace(/"/g, '""')}"`;
+        const { rows } = await this.handle(opts).query(`SELECT field FROM ${ident}.fields`, []);
+        for (const r of rows) cols.add(String((r as any).field));
+      } catch { /* no index */ }
+      e = { cols, at: Date.now() };
+      this._fts.set(table, e);
+    }
+    if (!fields.some((f) => e!.cols.has(f))) return undefined;
+    const key = [...this._fts].map(([t, v]) => `${t}:${[...v.cols].join(',')}`).join(';');
+    if (this._ftsDialect?.key !== key) {
+      const indexed = new Map([...this._fts].map(([t, v]) => [t, v.cols] as const));
+      this._ftsDialect = { key, dialect: duckdbFtsDialect(indexed) };
+    }
+    return this._ftsDialect.dialect;
   }
 
   private async _track<T>(
@@ -109,32 +146,35 @@ export class DuckdbAdapter implements Adapter {
     exec: () => Promise<T>,
     countRows: (r: T) => number,
     semanticOp?: ExecOpts['semanticOp'],
+    dialect?: Dialect,
   ): Promise<T> {
     if (!this.emitter.hasListeners()) return exec();
     const { compileSelect, compileCount, compileGroupBy, compileInsert, compileUpdate, compileDelete } =
       await import('./compile-from-ir');
     const artifact =
-      op === 'select'  ? compileSelect(node, model)  :
-      op === 'count'   ? compileCount(node, model)   :
-      op === 'groupBy' ? compileGroupBy(node, model) :
-      op === 'insert'  ? compileInsert(node, model)  :
-      op === 'update'  ? compileUpdate(node, model)  :
-                         compileDelete(node, model);
+      op === 'select'  ? compileSelect(node, model, dialect)  :
+      op === 'count'   ? compileCount(node, model, dialect)   :
+      op === 'groupBy' ? compileGroupBy(node, model, dialect) :
+      op === 'insert'  ? compileInsert(node, model, dialect)  :
+      op === 'update'  ? compileUpdate(node, model, dialect)  :
+                         compileDelete(node, model, dialect);
     return this.emitter.track(
       { adapter: 'duckdb' as any, model: node.model ?? '', op, sql: artifact.sql, params: artifact.params, ...(semanticOp ? { semanticOp } : {}) },
       exec, countRows,
     );
   }
 
-  executeSelect(node: any, model: any, opts?: ExecOpts) {
+  async executeSelect(node: any, model: any, opts?: ExecOpts) {
+    const d = await this.dialectFor(node, model, opts);
     return this._track('select', node, model,
-      () => executeDuckdbSelect(this.handle(opts), node, model, this.duckdbOpts(opts)),
-      (r) => r.length);
+      () => executeDuckdbSelect(this.handle(opts), node, model, this.duckdbOpts(opts, d)),
+      (r) => r.length, undefined, d);
   }
-  executeCount(node: any, model: any, opts?: ExecOpts) {
+  async executeCount(node: any, model: any, opts?: ExecOpts) {
+    const d = await this.dialectFor(node, model, opts);
     return this._track('count', node, model,
-      () => executeDuckdbCount(this.handle(opts), node, model, this.duckdbOpts(opts)),
-      () => 1);
+      () => executeDuckdbCount(this.handle(opts), node, model, this.duckdbOpts(opts, d)),
+      () => 1, undefined, d);
   }
   executeInsert(node: any, model: any, opts?: ExecOpts) {
     return this._track('insert', node, model,
@@ -208,7 +248,13 @@ export class DuckdbAdapter implements Adapter {
     return rowCount ?? 0;
   }
 
+  private readonly _tx = new TxQueue();
+
+  get inTransaction(): boolean {
+    return this._tx.active;
+  }
+
   async $transaction<T>(fn: (session: unknown) => Promise<T>): Promise<T> {
-    return this.driver.transaction((qc) => fn(qc));
+    return this._tx.run(() => this.driver.transaction((qc) => fn(qc)));
   }
 }

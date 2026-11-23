@@ -105,6 +105,19 @@ export interface Dialect {
     ctx: { rawColumn: string; baseTable: string; quoteIdent: (s: string) => string },
   ): string;
   /**
+   * A full-text predicate that binds its own parameters, for a dialect whose
+   * search argument is not the raw term (SQL Server's CONTAINS condition) or
+   * whose clause depends on an index found at run time. Preferred over
+   * `searchClause` when present.
+   */
+  searchExpr?(
+    quotedColumn: string,
+    ctx: {
+      rawColumn: string; baseTable: string; quoteIdent: (s: string) => string;
+      term: string; primaryKey: string; placeholder: (v: unknown) => string;
+    },
+  ): string;
+  /**
    * Per-field value expression for INSERT VALUES / UPDATE SET. Default
    * behaviour is to bind the value as a positional parameter (`placeholder`),
    * but special field kinds (geoPoint) need to wrap the parameter in a
@@ -168,7 +181,10 @@ export interface Dialect {
    * `operand` is provided so the dialect can choose the right cast on
    * dialects that need typed comparisons (PG mostly).
    */
-  jsonPathExpr?(quotedCol: string, path: string[], operand: unknown, params: unknown[]): string;
+  jsonPathExpr?(quotedCol: string, path: string[], operand: unknown, params: unknown[], subOp?: string): string;
+
+  /** A numeric member of a JSON object column, for the fallback geo bbox. */
+  jsonNumberExpr?(quotedCol: string, key: string): string;
   /**
    * Compile a "vector near + optional withinDistance" filter. Per dialect:
    *   PG     → ($col <=> $vec) < $d   (cosine via pgvector — also <-> for L2, <#> for dot)

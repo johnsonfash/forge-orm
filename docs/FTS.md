@@ -57,9 +57,9 @@ What forge emits when the table is created:
 | Postgres | `CREATE INDEX … ON posts USING gin(to_tsvector('simple', "title"))` (one per searchable column) |
 | MySQL    | ``ALTER TABLE posts ADD FULLTEXT "ft_posts_title" (`title`)`` (one per searchable column) |
 | SQLite   | One shared `posts_fts` virtual table — `CREATE VIRTUAL TABLE posts_fts USING fts5(title, body, content=posts, content_rowid='rowid')` + 3 triggers (`AFTER INSERT`, `AFTER UPDATE`, `AFTER DELETE`) that keep the shadow in sync |
-| DuckDB   | `PRAGMA create_fts_index('posts', 'id', 'title', 'body')` (uses the `fts` extension; one call per table covers every searchable column) |
+| DuckDB   | Nothing. The `fts` extension's index is a snapshot that never sees later writes, so an index built at CREATE TABLE time would be empty for ever. Build it yourself once the rows are in: `PRAGMA create_fts_index('posts', 'id', 'title', 'body')` (the second argument must be the model's primary key). forge finds it and uses it — see below |
 | Mongo    | `db.posts.createIndex({ title: 'text', body: 'text' })` — Mongo only allows one text index per collection so all searchable fields share it |
-| MSSQL    | No DDL emitted. SQL Server's full-text engine needs a catalog created out-of-band; the `searchable` marker is preserved on the schema so doctor + introspect can see it. At query time `searchClause` falls back to `LIKE '%q%'` so portability holds — see the MSSQL section below |
+| MSSQL    | No DDL emitted. SQL Server's full-text engine needs a catalog created out-of-band (`CREATE FULLTEXT CATALOG` + `CREATE FULLTEXT INDEX ON posts(body) KEY INDEX <pk index>`). forge finds the index and uses CONTAINS; with none it falls back to `LIKE '%q%'` — see below |
 
 The Postgres index name follows the pattern
 `forge_<table>_fts_<column>`. MySQL uses `ft_<table>_<column>`. SQLite
@@ -120,9 +120,9 @@ The dialects implement it like this:
 | Postgres | `to_tsvector('simple', "title") @@ plainto_tsquery('simple', $1)` |
 | MySQL    | `` MATCH(`title`) AGAINST (? IN NATURAL LANGUAGE MODE) `` |
 | SQLite   | `"posts".rowid IN (SELECT rowid FROM "posts_fts" WHERE "posts_fts" MATCH ?)` |
-| DuckDB   | `"title" ILIKE '%' || ? || '%'` — the DuckDB FTS extension is opt-in; the portable clause stays case-insensitive without it |
+| DuckDB   | with an fts index on the column: `"fts_main_posts".match_bm25("posts"."id", $1, fields := 'title', conjunctive := 1) IS NOT NULL`; without one: `"title" ILIKE '%' \|\| $1 \|\| '%'` |
 | Mongo    | `{ $text: { $search: 'query' } }` — promoted to top level of the filter, not nested under the field key |
-| MSSQL    | `"title" LIKE '%' + @p1 + '%'` — fallback; rewrite to `CONTAINS("title", @p1)` in raw if you've installed and configured the SQL Server Full-Text Search component |
+| MSSQL    | with a full-text index on the column: `CONTAINS([title], @p1)`, the term bound as `"word1" AND "word2"`; without one: `[title] LIKE '%' + @p1 + '%'` |
 
 A few things to notice:
 
@@ -440,6 +440,27 @@ DuckDB's `fts` extension exposes `match_bm25(score)` after you call
 `PRAGMA create_fts_index(...)`. MSSQL with the FTS component exposes
 `CONTAINSTABLE(table, col, q)` which returns a `RANK` column — same
 pattern as the others.
+
+#### Which one ran (2.25.0)
+
+Before 2.25.0 both dialects always compiled `.searchable()` to a
+`LIKE '%term%'` scan, whatever index existed. Now the adapter looks the
+index up the first time a table is searched — DuckDB reads
+`fts_main_<table>.fields`, SQL Server reads `sys.fulltext_index_columns`
+— and compiles to `match_bm25` / `CONTAINS` for a column the index
+covers. The lookup is one extra statement per table, once; a table found
+without an index is asked again after five seconds, so an index you build
+after connecting is picked up.
+
+The SQL in `db.$on('query', …)` events shows which form ran.
+
+The two forms do not match the same rows. The index matches **words**
+(with stemming on DuckDB, word breaking and stop words on SQL Server);
+the LIKE fallback matches **substrings**, so `kilo` finds `kilogram`
+only on the fallback. And DuckDB's index is a snapshot: rows written
+after `PRAGMA create_fts_index` are invisible to it until you rebuild it
+(`overwrite = 1`). Search a DuckDB table you keep writing to only if you
+rebuild after the writes.
 
 ---
 

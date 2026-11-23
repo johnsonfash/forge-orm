@@ -174,8 +174,17 @@ export const DuckdbDialect: Dialect = {
     return `${fn}(${quotedCol}, [${vector.join(',')}]::FLOAT[${dims}])`;
   },
 
-  jsonPathExpr(quotedCol, path, _operand, params) {
-    return `json_extract(${quotedCol}, ${this.placeholder(params, jsonPathSpec(path))})`;
+  // json_extract returns JSON, and comparing JSON with a VARCHAR parameter
+  // makes DuckDB parse the parameter as JSON: `= 'dark'` failed with
+  // "Malformed JSON". Extract as the operand's own type instead.
+  jsonPathExpr(quotedCol, path, operand, params, subOp) {
+    const p = this.placeholder(params, jsonPathSpec(path));
+    if (subOp === 'has') return `json_extract(${quotedCol}, ${p})`;
+    const sample = Array.isArray(operand) ? operand.find((v) => v != null) : operand;
+    if (typeof sample === 'number' || typeof sample === 'bigint') return `TRY_CAST(json_extract(${quotedCol}, ${p}) AS DOUBLE)`;
+    if (typeof sample === 'boolean') return `TRY_CAST(json_extract(${quotedCol}, ${p}) AS BOOLEAN)`;
+    if (sample instanceof Date) return `TRY_CAST(json_extract_string(${quotedCol}, ${p}) AS TIMESTAMPTZ)`;
+    return `json_extract_string(${quotedCol}, ${p})`;
   },
 
   geoWithinPolygonClause(quotedCol, _field, multiPolygon, params) {
@@ -186,3 +195,25 @@ export const DuckdbDialect: Dialect = {
     return `ST_Within(${quotedCol}, ST_GeomFromText(${pp}::VARCHAR))`;
   },
 };
+
+/**
+ * DuckdbDialect with `.searchable()` routed to a full-text index where one
+ * exists: `PRAGMA create_fts_index('<table>', '<pk>', '<col>', …)` builds the
+ * schema `fts_main_<table>`, whose `match_bm25` scores a row (NULL means no
+ * match). `indexed` maps a table to the columns its index covers; any other
+ * column keeps the ILIKE fallback.
+ */
+export function duckdbFtsDialect(indexed: ReadonlyMap<string, ReadonlySet<string>>): Dialect {
+  return {
+    ...DuckdbDialect,
+    searchExpr(quotedColumn, ctx) {
+      if (!indexed.get(ctx.baseTable)?.has(ctx.rawColumn)) {
+        return DuckdbDialect.searchClause(quotedColumn, ctx.placeholder(ctx.term), ctx);
+      }
+      const fts = ctx.quoteIdent(`fts_main_${ctx.baseTable}`);
+      const id = `${ctx.quoteIdent(ctx.baseTable)}.${ctx.quoteIdent(ctx.primaryKey)}`;
+      const field = `'${ctx.rawColumn.replace(/'/g, "''")}'`;
+      return `${fts}.match_bm25(${id}, ${ctx.placeholder(ctx.term)}, fields := ${field}, conjunctive := 1) IS NOT NULL`;
+    },
+  };
+}

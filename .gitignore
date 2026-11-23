@@ -50,3 +50,8 @@ docs-site/src/changelog.md
 docs-site/src/reference/
 docs-site/.vitepress/dist/
 docs-site/.vitepress/cache/
+
+# Deep comparison bench: run output, generated Prisma clients, resume notes
+bench/compare/results/
+bench/compare/**/generated/
+bench/compare/DEEP_BENCH_PROGRESS.md

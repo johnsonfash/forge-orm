@@ -120,6 +120,28 @@ export function extractFallbackGeoOps(
   return { near, nearTo, withinPolygon };
 }
 
+/** True when the select carries a fallback-mode geo filter or nearTo sort. */
+export function hasFallbackGeo(node: SelectNode, model: ModelDef<any> | undefined): boolean {
+  if (!model) return false;
+  const ops = extractFallbackGeoOps(node, model);
+  return !!(ops.near || ops.nearTo || ops.withinPolygon);
+}
+
+/**
+ * The exact refinement of a fallback geo query, then its page. The SQL only
+ * prefilters by bounding box, and (being unsorted by distance) cannot apply
+ * LIMIT / OFFSET without cutting the nearest rows, so the compiler leaves the
+ * page off and it is applied here, after the circle test and the sort.
+ */
+export function refineFallbackGeo<T>(rows: T[], node: SelectNode, model: ModelDef<any>): T[] {
+  const ops = extractFallbackGeoOps(node, model);
+  if (!(ops.near || ops.nearTo || ops.withinPolygon)) return rows;
+  const out = applyHaversinePostFilter(rows, ops.near, ops.nearTo, ops.withinPolygon);
+  if (node.limit == null && node.offset == null) return out;
+  const start = node.offset ?? 0;
+  return out.slice(start, node.limit != null ? start + node.limit : undefined);
+}
+
 function walkWhere(tree: any, cb: (leaf: any) => void): void {
   if (!tree) return;
   if (tree.kind === 'leaf') return cb(tree);

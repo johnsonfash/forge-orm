@@ -11,6 +11,9 @@ import {
   type MssqlExecOpts,
 } from './execute';
 import { mssqlDriver, type MssqlDriver, type MssqlQueryable } from './driver';
+import { mssqlFtsDialect } from './dialect';
+import type { Dialect } from '../postgres/dialect';
+import { searchedFields } from '../shared/search-fields';
 import { bytesForDriver } from '../../bytes';
 
 const CAPS: AdapterCapabilities = {
@@ -78,8 +81,43 @@ export class MssqlAdapter implements Adapter {
     return this._driver;
   }
 
-  private mssqlOpts(opts?: ExecOpts): MssqlExecOpts {
-    return opts?.session ? { client: opts.session as MssqlQueryable } : {};
+  private mssqlOpts(opts?: ExecOpts, dialect?: Dialect): MssqlExecOpts {
+    const o: MssqlExecOpts = opts?.session ? { client: opts.session as MssqlQueryable } : {};
+    if (dialect) o.dialect = dialect;
+    return o;
+  }
+
+  // table → columns in its full-text index. A table with none is asked
+  // again after a few seconds, so an index created later is picked up.
+  private readonly _fts = new Map<string, { cols: Set<string>; at: number }>();
+  private _ftsDialect?: { key: string; dialect: Dialect };
+
+  private async dialectFor(node: any, model: any, opts?: ExecOpts): Promise<Dialect | undefined> {
+    const fields = searchedFields(node?.where);
+    if (!fields.length || !model?.collection) return undefined;
+    const table = String(model.collection);
+    let e = this._fts.get(table);
+    if (!e || (e.cols.size === 0 && Date.now() - e.at > 5000)) {
+      const cols = new Set<string>();
+      try {
+        const { rows } = await this.handle(opts).query(
+          'SELECT c.name AS field FROM sys.fulltext_index_columns ic ' +
+          'JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id ' +
+          'WHERE ic.object_id = OBJECT_ID(@p1)',
+          [table],
+        );
+        for (const r of rows) cols.add(String((r as any).field));
+      } catch { /* full-text not installed */ }
+      e = { cols, at: Date.now() };
+      this._fts.set(table, e);
+    }
+    if (!fields.some((f) => e!.cols.has(f))) return undefined;
+    const key = [...this._fts].map(([t, v]) => `${t}:${[...v.cols].join(',')}`).join(';');
+    if (this._ftsDialect?.key !== key) {
+      const indexed = new Map([...this._fts].map(([t, v]) => [t, v.cols] as const));
+      this._ftsDialect = { key, dialect: mssqlFtsDialect(indexed) };
+    }
+    return this._ftsDialect.dialect;
   }
 
   private async _track<T>(
@@ -89,13 +127,14 @@ export class MssqlAdapter implements Adapter {
     exec: () => Promise<T>,
     countRows: (r: T) => number,
     semanticOp?: ExecOpts['semanticOp'],
+    dialect?: Dialect,
   ): Promise<T> {
     if (!this.emitter.hasListeners()) return exec();
     const { compileSelect, compileCount, compileGroupBy, compileInsert, compileUpdate, compileDelete } =
       await import('./compile-from-ir');
     const artifact =
-      op === 'select'  ? compileSelect(node, model)  :
-      op === 'count'   ? compileCount(node, model)   :
+      op === 'select'  ? compileSelect(node, model, dialect)  :
+      op === 'count'   ? compileCount(node, model, dialect)   :
       op === 'groupBy' ? compileGroupBy(node, model) :
       op === 'insert'  ? compileInsert(node, model)  :
       op === 'update'  ? compileUpdate(node, model)  :
@@ -106,15 +145,17 @@ export class MssqlAdapter implements Adapter {
     );
   }
 
-  executeSelect(node: any, model: any, opts?: ExecOpts) {
+  async executeSelect(node: any, model: any, opts?: ExecOpts) {
+    const d = await this.dialectFor(node, model, opts);
     return this._track('select', node, model,
-      () => executeMssqlSelect(this.handle(opts), node, model, this.mssqlOpts(opts)),
-      (r) => r.length);
+      () => executeMssqlSelect(this.handle(opts), node, model, this.mssqlOpts(opts, d)),
+      (r) => r.length, undefined, d);
   }
-  executeCount(node: any, model: any, opts?: ExecOpts) {
+  async executeCount(node: any, model: any, opts?: ExecOpts) {
+    const d = await this.dialectFor(node, model, opts);
     return this._track('count', node, model,
-      () => executeMssqlCount(this.handle(opts), node, model, this.mssqlOpts(opts)),
-      () => 1);
+      () => executeMssqlCount(this.handle(opts), node, model, this.mssqlOpts(opts, d)),
+      () => 1, undefined, d);
   }
   executeInsert(node: any, model: any, opts?: ExecOpts) {
     return this._track('insert', node, model,

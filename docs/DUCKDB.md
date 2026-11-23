@@ -163,7 +163,7 @@ DuckDB values:
 
 | Capability | Value | Meaning |
 |---|---|---|
-| `nativeCascades` | `false` | DuckDB accepts `ON DELETE CASCADE` syntactically but does not enforce FK constraints at write time. Forge's app-side cascade walker takes over for `Cascade` and `SetNull` rules. |
+| `nativeCascades` | `false` | DuckDB refuses `ON DELETE CASCADE` / `SET NULL`. Forge's app-side cascade walker applies `Cascade`, `SetNull` and `Restrict` instead, in a transaction (2.25.0; before it, nothing cascaded). |
 | `nativeUpsert` | `true` | `ON CONFLICT (cols) DO UPDATE SET …` works since DuckDB 0.8; the typed `upsert()` compiles to that shape directly. |
 | `nullsOrdering` | `true` | `ORDER BY … NULLS FIRST / NULLS LAST` is honoured. The wrapper does not have to emulate ordering with `CASE`. |
 | `jsonPath` | `true` | `json_extract(col, '$.a.b')` is the JSON path operator, same as SQLite. See [JSON-PATH.md → DuckDB](./JSON-PATH.md#duckdb). |
@@ -556,7 +556,7 @@ DuckDB has a native `JSON` logical type — it stores as text
 internally but presents as a typed column with dedicated functions.
 Forge's `f.json()`, `f.embed()`, and `f.embedMany()` all map to it.
 
-The path operator the dialect emits is `json_extract`:
+The path read is typed by the operand (2.25.0):
 
 ```ts
 const adults = await db.user.findMany({
@@ -566,8 +566,20 @@ const adults = await db.user.findMany({
 });
 
 // Compiles to:
-// SELECT … FROM "user" WHERE json_extract("profile", '$.age') >= $1
+// SELECT … FROM "user" WHERE TRY_CAST(json_extract("profile", $1) AS DOUBLE) >= $2
+
+// A string operand: json_extract_string("prefs", $1) = $2
+// A boolean:        TRY_CAST(json_extract("prefs", $1) AS BOOLEAN) = $2
+// has (array):      json_extract("prefs", $1)::text LIKE $2
 ```
+
+`json_extract` alone returns a JSON value, and comparing that with a
+VARCHAR parameter makes DuckDB parse the parameter as JSON, so before
+2.25.0 `{ prefs: { path: 'theme', eq: 'dark' } }` failed with
+`Malformed JSON … Input: "dark"`.
+
+`f.json()`, `f.embed()` and `f.embedMany()` come back as objects (2.25.0;
+the node API hands them over as text, and forge returned that text).
 
 The `$.a.b[0].c` path string is built by the dialect's `jsonPathExpr`
 — numeric segments become `[N]`, named segments become `.name`. Same
@@ -603,41 +615,31 @@ DuckDB see [EMBED.md → DuckDB](./EMBED.md#per-dialect-storage).
 
 ## Full-text search — `fts` and the ILIKE fallback
 
-DuckDB has an `fts` extension (`INSTALL fts; LOAD fts;`) but the API
-shape is opt-in per-table via `PRAGMA create_fts_index`, which doesn't
-map cleanly onto forge's `.searchable()` column flag. The DuckDB
-dialect's `searchClause` therefore falls back to `ILIKE`:
+`.searchable()` uses the `fts` extension when the table has an index
+(2.25.0). forge does not build one: the extension's index is a snapshot
+that later writes never reach, so an index made at CREATE TABLE time
+would stay empty. Build it once the rows are in, keyed on the model's
+primary key:
 
 ```ts
-const hits = await db.post.findMany({
-  where: { title: { contains: q, mode: 'insensitive' } },
-});
+await db.$executeRaw`PRAGMA create_fts_index('posts', 'id', 'title', 'body', overwrite = 1)`;
 
-// Emit:
-// SELECT … FROM "post" WHERE "title" ILIKE '%' || $1 || '%'
+const hits = await db.post.findMany({ where: { body: { search: 'kilo' } } });
+// SELECT … WHERE "fts_main_posts".match_bm25("posts"."id", $1, fields := 'body', conjunctive := 1) IS NOT NULL
 ```
 
-This works without any extensions and is portable to schemas that have
-not enabled `fts`. The downside is no index — it's a sequential scan
-of every row's `title`. For a thousand-row table that's fine; for a
-million-row corpus it isn't.
-
-If you want real FTS on DuckDB, the pattern is to build the index
-yourself via `PRAGMA create_fts_index` and query through `$queryRaw`:
+The adapter finds the index by reading `fts_main_<table>.fields` the first
+time the table is searched (one statement, once). A column the index does
+not cover, or a table with none, keeps the portable fallback:
 
 ```ts
-// One-time setup — after `LOAD fts`.
-await db.$executeRaw`PRAGMA create_fts_index('post', 'id', 'title', 'body')`;
-
-// Query — uses the match_bm25() scoring function.
-const hits = await db.$queryRaw<{ id: string; score: number }>`
-  SELECT p.id, fts_main_post.match_bm25(p.id, ${q}) AS score
-  FROM post p
-  WHERE fts_main_post.match_bm25(p.id, ${q}) IS NOT NULL
-  ORDER BY score DESC
-  LIMIT 20
-`;
+// SELECT … FROM "posts" WHERE "posts"."title" ILIKE '%' || $1 || '%'
 ```
+
+The two match differently: the index matches stemmed words, ILIKE
+matches substrings (`kilo` finds `kilogram` only on the fallback). Rows
+written after the index was built are invisible to it until you rebuild
+it with `overwrite = 1`. See [FTS.md](./FTS.md#which-one-ran-2250).
 
 The `fts_main_post` schema and the `match_bm25` function names come
 from `create_fts_index`. Treat this as opt-in per table, re-build
@@ -953,7 +955,8 @@ DuckDB-specific limitations the forge adapter handles silently:
   app-side walker.
 - **No `SAVEPOINT`.** Nested `$transaction` calls collapse into the
   outer transaction.
-- **`fts` is opt-in.** `.searchable()` falls back to `ILIKE`.
+- **`fts` is opt-in.** `.searchable()` uses an fts index you built with
+  `PRAGMA create_fts_index`, and falls back to `ILIKE` without one.
 
 A foot-gun the adapter cannot prevent: DuckDB is **single-writer**.
 If two Node processes open the same `.duckdb` file with write

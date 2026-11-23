@@ -18,11 +18,13 @@ import {
   compileUpdate,
 } from './compile-from-ir';
 import { withSqliteErrors } from './errors';
-import { decodeWideIntegers } from '../shared/wide-int';
+import { rowDecoder, parseJsonText, type Convert } from '../shared/row-decoder';
 import type { SqliteDriver } from './driver';
 import { fromDriverBytes } from '../../bytes';
-import { hydrateManyRelation, hydrateOneRelation } from '../../ir/hydrate-many';
-import { softDeleteField } from '../../ir/build/soft-delete';
+import { hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
+
+// Window functions are always available here, so a nested page is one query.
+const WINDOWED: WindowedPaging = { enabled: true };
 
 // SQLite IR executor. Talks to a SqliteDriver port (see driver.ts), so it works
 // over a synchronous driver (better-sqlite3) or an async one (expo-sqlite,
@@ -38,36 +40,33 @@ export interface SqliteExecOpts {
 
 // SQLite returns bools as 0/1, dates as ISO strings, JSON columns as strings;
 // re-hydrate at the executor edge to the schema's JS types.
-export function decodeRow(model: ModelDef<any>, row: any): any {
-  if (!row || typeof row !== 'object') return row;
-  const out: any = {};
-  for (const k of Object.keys(row)) {
-    const field = model.fields[k];
-    if (!field) { out[k] = row[k]; continue; }
-    const v = row[k];
-    if (v == null) { out[k] = v; continue; }
-    switch (field.kind) {
-      // better-sqlite3 / mysql2 hand back a Buffer, the wasm build a
-      // Uint8Array. Normalise so the row shape is driver-independent.
-      case 'bytes':      out[k] = fromDriverBytes(v); break;
-      case 'bool':       out[k] = v === 1 || v === true; break;
-      case 'dateTime':   out[k] = typeof v === 'string' ? new Date(v) : v; break;
-      case 'json':
-      case 'embed':
-      case 'embedMany':
-      case 'stringArray':
-      case 'intArray':
-        out[k] = typeof v === 'string' ? safeParse(v) : v;
-        break;
-      default:           out[k] = v;
-    }
+const decodePlans = new WeakMap<object, any>();
+const toBool = (v: any) => v === 1 || v === true;
+const toDate = (v: any) => (typeof v === 'string' ? new Date(v) : v);
+function sqliteConvert(kind: string): Convert | null {
+  switch (kind) {
+    // better-sqlite3 / mysql2 hand back a Buffer, the wasm build a
+    // Uint8Array. Normalise so the row shape is driver-independent.
+    case 'bytes': return fromDriverBytes;
+    case 'bool': return toBool;
+    case 'dateTime': return toDate;
+    case 'json': case 'embed': case 'embedMany': case 'stringArray': case 'intArray':
+      return parseJsonText;
+    default: return null;
   }
-  return decodeWideIntegers(model, out);
 }
 
-function safeParse(s: string): any {
-  try { return JSON.parse(s); } catch { return s; }
+/** Decodes a driver row in place (the driver hands each call fresh objects). */
+export function decodeRow(model: ModelDef<any>, row: any): any {
+  return rowDecoder(decodePlans, model, sqliteConvert)(row);
 }
+
+function decodeRows(model: ModelDef<any>, rows: any[]): any[] {
+  const dec = rowDecoder(decodePlans, model, sqliteConvert);
+  for (let i = 0; i < rows.length; i++) rows[i] = dec(rows[i]);
+  return rows;
+}
+
 
 // Encode params for the driver: dates → ISO strings, bools → 0/1, JSON-ish
 // values → JSON.stringify. The compiler already coerces known schema fields;
@@ -103,15 +102,12 @@ export async function executeSqliteSelect(
   const exec = opts.db ?? db;
   const artifact = compileSelect(node, model);
   const raw = await withSqliteErrors(() => exec.all(artifact.sql, encodeParams(artifact.params)));
-  let rows = raw.map((r) => decodeRow(model, r));
+  let rows = decodeRows(model, raw);
   if (node.distinct?.length) rows = dedupeBy(rows, node.distinct);
   // Fallback geoPoint refinement — exact-circle + sort post-process.
-  const { extractFallbackGeoOps, applyHaversinePostFilter } = await import('../shared/haversine');
-  const geoOps = extractFallbackGeoOps(node, model);
-  if (geoOps.near || geoOps.nearTo || geoOps.withinPolygon) {
-    rows = applyHaversinePostFilter(rows, geoOps.near, geoOps.nearTo, geoOps.withinPolygon);
-  }
-  if (node.projection?.counts?.length) await applyRelationCounts(exec, rows, model, node.projection.counts);
+  const { refineFallbackGeo } = await import('../shared/haversine');
+  rows = refineFallbackGeo(rows, node, model);
+  if (node.projection?.counts?.length) liftRelationCounts(rows, node.projection.counts);
   if (node.hydration?.length) await hydrate(exec, rows, model, node.hydration);
   return rows;
 }
@@ -162,6 +158,10 @@ export async function executeSqliteInsert(
 ): Promise<{ docs: any[]; count: number }> {
   const exec = opts.db ?? db;
   const artifact = compileInsert(node, model);
+  if (node.countOnly) {
+    const r = await withSqliteErrors(() => exec.run(artifact.sql, encodeParams(artifact.params)));
+    return { docs: [], count: r.changes };
+  }
   const raw = await withSqliteErrors(() => exec.all(artifact.sql, encodeParams(artifact.params)));
   const docs = raw.map((r) => decodeRow(model, r));
   return { docs, count: docs.length };
@@ -237,47 +237,8 @@ async function hydrateMany(
   await hydrateManyRelation({
     rows, rel, keyOf: (v) => String(v),
     runSelect: (node) => executeSqliteSelect(db, node, targetModel),
+    windowed: WINDOWED,
   });
-}
-
-async function applyRelationCounts(
-  db: SqliteDriver,
-  rows: any[],
-  parentModel: ModelDef<any>,
-  counts: string[],
-): Promise<void> {
-  if (rows.length === 0) return;
-  const relMap = parentModel.relations();
-  for (const r of rows) r._count = r._count ?? {};
-  for (const relName of counts) {
-    const rel = relMap[relName];
-    if (!rel) continue;
-    const targetModel = (schema as any)[rel.target] as ModelDef<any> | undefined;
-    if (!targetModel) continue;
-    const refs = unique(rows.map((r) => r[rel.refs]).filter((v) => v != null));
-    if (refs.length === 0) { for (const r of rows) r._count[relName] = 0; continue; }
-    // SQLite supports IN (?, ?, ?, …) but not ANY($1) array syntax.
-    const placeholders = refs.map(() => '?').join(', ');
-    // Soft-deleted children are excluded, so `_count` agrees with the rows
-    // `include` hands back. Without it `_count: { posts: true }` said 7 while
-    // `include: { posts: true }` returned 5.
-    const sd = softDeleteField(targetModel);
-    const sql = `SELECT "${rel.on}" AS fk, COUNT(*) AS c FROM "${targetModel.collection}" `
-      + `WHERE "${rel.on}" IN (${placeholders})`
-      + (sd ? ` AND "${sd}" IS NULL` : '')
-      + ` GROUP BY "${rel.on}"`;
-    const groups = await withSqliteErrors(() => db.all(sql, encodeParams(refs)));
-    const byFk = new Map<string, number>();
-    for (const g of groups) byFk.set(String(g.fk), Number(g.c));
-    for (const r of rows) r._count[relName] = byFk.get(String(r[rel.refs])) ?? 0;
-  }
-}
-
-function unique<T>(arr: T[]): T[] {
-  const seen = new Set<string>();
-  const out: T[] = [];
-  for (const v of arr) { const k = String(v); if (seen.has(k)) continue; seen.add(k); out.push(v); }
-  return out;
 }
 
 function dedupeBy(rows: any[], fields: string[]): any[] {

@@ -42,7 +42,7 @@ reads.
 | Postgres   | `(col->'a'->'b'->>'c')::<cast>` — cast picked by operand | `("meta"->'profile'->>'age')::numeric = $1`                  |
 | MySQL 8 / MariaDB 10.7+ | `JSON_UNQUOTE(JSON_EXTRACT(col, ?))`        | ``JSON_UNQUOTE(JSON_EXTRACT(`meta`, ?))`` `>= ?` — params `'$.profile.age'`, `18` |
 | SQLite     | `json_extract(col, ?)` — JSON1, always built-in          | `json_extract("meta", ?) >= ?`                              |
-| DuckDB     | `json_extract(col, ?)`                                   | `json_extract("meta", ?) >= ?`                              |
+| DuckDB     | typed by operand: `json_extract_string(col, ?)`, `TRY_CAST(json_extract(col, ?) AS DOUBLE)`, `… AS BOOLEAN` | `TRY_CAST(json_extract("meta", ?) AS DOUBLE) >= ?` |
 | MSSQL 2016+| `JSON_VALUE(col, @p)` — scalars only                     | `JSON_VALUE([meta], @p1) >= @p2`                            |
 | Mongo      | Dotted key — `{ 'col.a.b.c': … }`                        | `{ 'meta.profile.age': { $gte: 18 } }`                      |
 

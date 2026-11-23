@@ -192,6 +192,34 @@ export class PostgresAdapter implements Adapter {
     }
   }
 
+  async *streamSelectBatches(node: any, model: any, opts?: ExecOpts & { batchSize?: number }): AsyncIterable<any[]> {
+    const { compileSelect } = await import('./compile-from-ir');
+    const { decodeWideIntegerRows } = await import('../shared/wide-int');
+    const a = compileSelect(node, model);
+    const size = opts?.batchSize ?? 1000;
+    const session = opts?.session as { query?: (s: string, p?: unknown[]) => Promise<{ rows: any[] }> } | undefined;
+    if (session?.query) {
+      const { cursorBatches } = await import('./driver');
+      for await (const rows of cursorBatches(session as any, a.sql, a.params, size)) yield decodeWideIntegerRows(model, rows);
+      return;
+    }
+    if (this.driver.streamBatches) {
+      for await (const rows of this.driver.streamBatches(a.sql, a.params, size)) yield decodeWideIntegerRows(model, rows);
+      return;
+    }
+    if (this.driver.stream) {
+      let buf: any[] = [];
+      for await (const r of this.driver.stream(a.sql, a.params)) {
+        buf.push(r);
+        if (buf.length >= size) { yield decodeWideIntegerRows(model, buf); buf = []; }
+      }
+      if (buf.length) yield decodeWideIntegerRows(model, buf);
+      return;
+    }
+    const { rows } = await this.driver.query(a.sql, a.params);
+    for (let i = 0; i < rows.length; i += size) yield decodeWideIntegerRows(model, rows.slice(i, i + size));
+  }
+
   async applyProjectionAndHydration(): Promise<void> {
     // No-op: executePgSelect applies projection/hydration inline.
   }

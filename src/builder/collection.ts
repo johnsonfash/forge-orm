@@ -54,9 +54,13 @@ import type { CompileApi, MongoCompileApi, SQLCompileApi } from '../compile';
 import { buildCount, buildDelete, buildGroupBy, buildInsert, buildProjection, buildSelect, buildUpdate, buildUpdateData, type RowLockOption } from '../ir/build';
 import type { RowLockSpec, UpdateNode } from '../ir/types';
 import { rowLockSql } from '../adapters/row-lock';
+import { stripKeys, withJoinKeys } from '../ir/hydrate-many';
 import type { Adapter } from '../adapters/types';
 import { getDefaultMongoAdapter } from '../adapters/mongo/adapter';
 import { currentSession } from '../session-context';
+import { getActiveSchema } from '../schema/active';
+import { applyCascades, cascadeKeyFields, hasCascadeWork } from './cascade';
+import { runAtomic } from './atomic';
 
 type ResolvedRow<F extends Record<string, Field<any, any>>> = {
   [K in keyof F]: F[K] extends Field<infer T, any> ? T : never;
@@ -216,7 +220,17 @@ export class CollectionWrapper<
   // adapter's session type (Mongo: ClientSession, PG: PoolClient) flows through
   // opaquely via _session.
   withSession(session: unknown): CollectionWrapper<F, R, SM> {
-    return new CollectionWrapper<F, R, SM>(this.model, session, this._adapter, this._strict);
+    return new CollectionWrapper<F, R, SM>(this.model, session, this._adapter, this._strict, this._defaultIdType);
+  }
+
+  private _bound(session: unknown): CollectionWrapper<F, R, SM> {
+    return session === undefined || session === this._session ? this : this.withSession(session);
+  }
+
+  // A wrapper for a related model on the same connection, session and id
+  // policy as this one.
+  private _wrapperFor(target: ModelDef<any>): CollectionWrapper<any> {
+    return new CollectionWrapper(target, this._session, this._adapter, this._strict, this._defaultIdType);
   }
 
   // Compile namespace — same arg shape as the execute methods, but returns a
@@ -402,24 +416,76 @@ export class CollectionWrapper<
     orderBy?: OrderByInput<F> | OrderByInput<F>[];
     chunkSize?: number;
   }>(args: A = {} as A): AsyncIterable<ResolvedRow<F>> {
-    // Prefer adapter-native streaming; fall back to OFFSET/LIMIT chunking.
-    if (typeof (this.adapter as any).streamSelect === 'function') {
+    const a = args as A & { take?: number; limit?: number; skip?: number; offset?: number };
+    const chunkSize = args.chunkSize ?? 1000;
+    // Adapter-native streaming first, a batch at a time where it can.
+    const adapter = this.adapter as Adapter;
+    if (adapter.streamSelectBatches || adapter.streamSelect) {
       const mk = this._modelKey();
-      const filtered = this._withSoftDeleteFilter(args);
+      const filtered = this._withSoftDeleteFilter({ ...args, chunkSize: undefined });
       const node = buildSelect(mk, this.model, filtered ?? {}, 'many', schema as any);
-      const iter = (this.adapter as any).streamSelect(node, this.model, { session: this.session });
-      for await (const row of iter) yield row as ResolvedRow<F>;
+      if (adapter.streamSelectBatches) {
+        for await (const batch of adapter.streamSelectBatches(node, this.model, { session: this.session, batchSize: args.chunkSize })) {
+          for (const row of batch) yield row as ResolvedRow<F>;
+        }
+        return;
+      }
+      for await (const row of adapter.streamSelect!(node, this.model, { session: this.session })) yield row as ResolvedRow<F>;
       return;
     }
-    const chunkSize = args.chunkSize ?? 1000;
-    let offset = 0;
+    // Otherwise page through it. By key where the order allows (each page
+    // starts after the last row's sort key, so page k costs what page 1
+    // does); by OFFSET where it does not.
+    let remaining = a.take ?? a.limit ?? Infinity;
+    let skip = a.skip ?? a.offset;
+    const keys = this._keysetOrder(args.orderBy);
+    if (keys) {
+      const orderBy = keys.map((k) => ({ [k.field]: k.dir }));
+      let after: any;
+      for (;;) {
+        const page = Math.min(chunkSize, remaining);
+        if (page <= 0) return;
+        const where = after ? (args.where ? { AND: [args.where, after] } : after) : args.where;
+        const batch = await this._find({ where, orderBy, take: page, skip }, undefined);
+        skip = undefined;
+        for (const row of batch) yield row as ResolvedRow<F>;
+        if (batch.length < page) return;
+        remaining -= batch.length;
+        after = keysetAfter(keys, batch[batch.length - 1]);
+      }
+    }
+    let offset = skip ?? 0;
     while (true) {
-      const batch = await this._find({ ...args, take: chunkSize, skip: offset, chunkSize: undefined }, undefined);
+      const page = Math.min(chunkSize, remaining);
+      if (page <= 0) return;
+      const batch = await this._find({ where: args.where, orderBy: args.orderBy, take: page, skip: offset }, undefined);
       if (!Array.isArray(batch) || batch.length === 0) return;
       for (const row of batch) yield row as ResolvedRow<F>;
-      if (batch.length < chunkSize) return;
+      if (batch.length < page) return;
+      remaining -= batch.length;
       offset += batch.length;
     }
+  }
+
+  // The sort a keyset page can resume from: plain ascending/descending
+  // columns that are never null, with the primary key appended so the order
+  // is total. Null when the order has anything else in it.
+  private _keysetOrder(orderBy: any): Array<{ field: string; dir: 'asc' | 'desc' }> | null {
+    const entries = orderBy == null ? [] : Array.isArray(orderBy) ? orderBy : [orderBy];
+    const out: Array<{ field: string; dir: 'asc' | 'desc' }> = [];
+    for (const e of entries) {
+      if (!e || typeof e !== 'object') return null;
+      for (const [field, dir] of Object.entries(e)) {
+        const fd: any = this.model.fields[field];
+        if (!fd || fd.optional || (dir !== 'asc' && dir !== 'desc')) return null;
+        if (['json', 'embed', 'embedMany', 'geoPoint', 'vector', 'bytes', 'stringArray', 'intArray'].includes(fd.kind)) return null;
+        out.push({ field, dir });
+      }
+    }
+    const pk = Object.entries(this.model.fields).find(([, fd]) => (fd as any).kind === 'id')?.[0];
+    if (!pk) return null;
+    if (!out.some((k) => k.field === pk)) out.push({ field: pk, dir: 'asc' });
+    return out;
   }
 
   async count(args: { where?: WhereInput<F>; distinct?: Array<keyof F & string> } = {}): Promise<number> {
@@ -581,42 +647,136 @@ export class CollectionWrapper<
     omit?: { [K in keyof F]?: boolean };
   }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A, SM>> {
     this._assertWritable('create');
-    const mk = this._modelKey();
-    const { scalar, nested } = this._splitNestedWrites(args.data, /*forCreate*/ true);
-    // Resolve owning-side connectOrCreate first — sets the FK on `scalar` so the
-    // parent insert satisfies the FK constraint.
-    const resolvedScalar = await this._resolveOwningConnectOrCreate(scalar, nested);
-    const row = this.adapter.coerceInbound(this.model, this._fillAutoId(resolvedScalar));
-    const node = buildInsert(mk, this.model, { rows: [row] }, schema as any);
-    const { docs } = await this.adapter.executeInsert(node, this.model, { session: this.session });
-    const doc = docs[0];
-    if (nested.length > 0) await this._applyNestedWrites(doc, nested);
-    return this._returnOne(doc, args);
+    const split = this._splitNestedWrites(args.data, /*forCreate*/ true);
+    if (split.nested.length === 0) {
+      const [doc] = await this._insertRows([split], this.session);
+      return this._returnOne(doc, args);
+    }
+    // A create with nested writes is several statements; it commits or rolls
+    // back as one wherever the database has transactions.
+    return runAtomic(this.adapter, this.session, async (s) => {
+      const w = this._bound(s);
+      const [doc] = await w._insertRows([split], s ?? w.session);
+      return w._returnOne(doc, args);
+    });
   }
 
-  // Resolve owning-side `connectOrCreate` specs eagerly — sets the FK column
-  // on `scalar` before insert. Mutates `nested` to remove processed specs so
-  // _applyNestedWrites doesn't double-process them.
-  private async _resolveOwningConnectOrCreate(scalar: any, nested: NestedSpec[]): Promise<any> {
-    if (!nested.length) return scalar;
-    const out = { ...scalar };
-    for (let i = nested.length - 1; i >= 0; i--) {
-      const spec = nested[i];
-      if (spec.op !== 'connectOrCreate' || spec.rel.inverse) continue;
-      const target = (schema as any)[spec.rel.target] as ModelDef<any> | undefined;
-      if (!target) continue;
-      const w = new CollectionWrapper(target, this._session, this._adapter, this._strict);
-      const items: any[] = Array.isArray(spec.data) ? spec.data : [spec.data];
-      // Owning-one expects a single item — first wins.
-      const it = items[0];
-      if (!it?.where) continue;
-      let existing: any = await w.findFirst({ where: it.where });
-      if (!existing) existing = await w.create({ data: it.create ?? {} });
-      const tId = existing[spec.rel.refs] ?? existing.id ?? existing._id;
-      out[spec.rel.on] = tId;
-      nested.splice(i, 1);
+  /**
+   * Insert rows that may carry nested writes, in as few statements as the
+   * shape allows: owning-side connectOrCreate / create are resolved for all
+   * rows together, the rows go in as one INSERT, then each row's inverse-side
+   * nested writes run against its own inserted document.
+   */
+  private async _insertRows(
+    splits: Array<{ scalar: any; nested: NestedSpec[] }>,
+    session: unknown,
+    needDocs = true,
+  ): Promise<any[]> {
+    const mk = this._modelKey();
+    await this._resolveOwning(splits);
+    const rows = splits.map((sp) => this.adapter.coerceInbound(this.model, this._fillAutoId(sp.scalar)));
+    const node = buildInsert(mk, this.model, { rows }, schema as any);
+    if (!needDocs && splits.every((sp) => sp.nested.length === 0)) node.countOnly = true;
+    const { docs } = await this.adapter.executeInsert(node, this.model, { session });
+    const ordered = this._alignDocs(rows, docs);
+    for (let i = 0; i < splits.length; i++) {
+      if (splits[i].nested.length > 0) await this._applyNestedWrites(ordered[i], splits[i].nested);
     }
-    return out;
+    return ordered;
+  }
+
+  // executeInsert's docs are not guaranteed to follow the input order (MySQL
+  // reads them back by id). Match on the primary key when every row has one.
+  private _alignDocs(rows: any[], docs: any[]): any[] {
+    if (docs.length !== rows.length || rows.length < 2) return docs;
+    const pk = Object.entries(this.model.fields).find(([, fd]) => (fd as any).kind === 'id')?.[0];
+    if (!pk) return docs;
+    const keyOf = (d: any) => {
+      const v = d?.[pk] ?? d?._id;
+      return v == null ? undefined : String(v);
+    };
+    const byKey = new Map<string, any>();
+    for (const d of docs) {
+      const k = keyOf(d);
+      if (k === undefined) return docs;
+      byKey.set(k, d);
+    }
+    const out = rows.map((r) => byKey.get(keyOf(r) ?? '\u0000'));
+    return out.every((d) => d !== undefined) ? out : docs;
+  }
+
+  // Owning-side relations resolved before the INSERT, because the FK lives on
+  // the row being inserted: `connectOrCreate` finds or makes the target, and
+  // `create` makes it. Done per relation across every row at once, so ten
+  // rows that each connectOrCreate a tag cost one lookup and one insert, not
+  // twenty statements. Processed specs are removed from each row's `nested`.
+  private async _resolveOwning(splits: Array<{ scalar: any; nested: NestedSpec[] }>): Promise<void> {
+    // Keyed by target + FK column: relations() builds fresh objects per call,
+    // so two rows' specs for the same relation are not the same object.
+    const groups = new Map<string, Array<{ split: { scalar: any; nested: NestedSpec[] }; spec: NestedSpec }>>();
+    for (const split of splits) {
+      for (let i = split.nested.length - 1; i >= 0; i--) {
+        const spec = split.nested[i];
+        if (spec.rel.inverse || spec.rel.kind !== 'one') continue;
+        if (spec.op !== 'connectOrCreate' && spec.op !== 'create') continue;
+        const key = `${spec.rel.target}\u0000${spec.rel.on}`;
+        const list = groups.get(key) ?? [];
+        list.unshift({ split, spec });
+        groups.set(key, list);
+        split.nested.splice(i, 1);
+      }
+    }
+    for (const entries of groups.values()) {
+      const rel = entries[0].spec.rel;
+      const target = (schema as any)[rel.target] as ModelDef<any> | undefined;
+      if (!target) continue;
+      const w = this._wrapperFor(target);
+      const refOf = (row: any) => row?.[rel.refs] ?? row?.id ?? row?._id;
+
+      const creates = entries.filter((e) => e.spec.op === 'create');
+      if (creates.length) {
+        const made = await w._insertRows(
+          creates.map((e) => w._splitNestedWrites(Array.isArray(e.spec.data) ? e.spec.data[0] : e.spec.data, true)),
+          w.session,
+        );
+        creates.forEach((e, i) => { e.split.scalar[rel.on] = refOf(w.adapter.decodeOutbound(target, made[i])); });
+      }
+
+      const cocs = entries
+        .filter((e) => e.spec.op === 'connectOrCreate')
+        .map((e) => ({ e, it: Array.isArray(e.spec.data) ? e.spec.data[0] : e.spec.data }))
+        .filter((x) => x.it?.where);
+      if (cocs.length === 0) continue;
+
+      const plain = cocs.every((x) => isPlainEqWhere(target, x.it.where));
+      if (!plain || cocs.length === 1) {
+        for (const { e, it } of cocs) {
+          let existing: any = await w.findFirst({ where: it.where });
+          if (!existing) existing = await w.create({ data: it.create ?? {} });
+          e.split.scalar[rel.on] = refOf(existing);
+        }
+        continue;
+      }
+      const found = await w.findMany({ where: lookupWhere(dedupeWheres(cocs.map((x) => x.it.where))) } as any);
+      const missing: typeof cocs = [];
+      const seen = new Set<string>();
+      for (const x of cocs) {
+        const hit = (found as any[]).find((r) => matchesPlainWhere(r, x.it.where));
+        if (hit) { x.e.split.scalar[rel.on] = refOf(hit); continue; }
+        const k = whereKey(x.it.where);
+        if (!seen.has(k)) { seen.add(k); missing.push(x); }
+      }
+      if (missing.length) {
+        const made = (await w._insertRows(missing.map((x) => w._splitNestedWrites(x.it.create ?? {}, true)), w.session))
+          .map((d) => w.adapter.decodeOutbound(target, d));
+        const byWhere = new Map<string, any>();
+        missing.forEach((x, i) => byWhere.set(whereKey(x.it.where), made.find((r) => matchesPlainWhere(r, x.it.where)) ?? made[i]));
+        for (const x of cocs) {
+          if (x.e.split.scalar[rel.on] !== undefined) continue;
+          x.e.split.scalar[rel.on] = refOf(byWhere.get(whereKey(x.it.where)));
+        }
+      }
+    }
   }
 
   async createMany(args: {
@@ -632,6 +792,7 @@ export class CollectionWrapper<
       { rows, skipDuplicates: args.skipDuplicates },
       schema as any,
     );
+    node.countOnly = true;
     const { count } = await this.adapter.executeInsert(node, this.model, { session: this.session });
     return { count };
   }
@@ -666,16 +827,20 @@ export class CollectionWrapper<
       },
       schema as any,
     ));
-    const { doc } = await this.adapter.executeUpdate(node, this.model, {
-      session: this.session,
-      semanticOp: _internal?.semanticOp,
-    });
-    if (!doc) {
-      if (_internal?.tolerateMissing) return null as never;
-      throw notFoundError(this.model.collection, args.where);
-    }
-    if (nested.length > 0) await this._applyNestedWrites(doc, nested);
-    return this._returnOne(doc, args);
+    const run = async (w: CollectionWrapper<F, R, SM>) => {
+      const { doc } = await w.adapter.executeUpdate(node, w.model, {
+        session: w.session,
+        semanticOp: _internal?.semanticOp,
+      });
+      if (!doc) {
+        if (_internal?.tolerateMissing) return null as never;
+        throw notFoundError(w.model.collection, args.where);
+      }
+      if (nested.length > 0) await w._applyNestedWrites(doc, nested);
+      return w._returnOne(doc, args);
+    };
+    if (nested.length === 0) return run(this);
+    return runAtomic(this.adapter, this.session, (s) => run(this._bound(s)));
   }
 
   /**
@@ -851,12 +1016,12 @@ export class CollectionWrapper<
     // v2: delete() is ALWAYS a hard delete (Prisma parity) — no schema magic.
     // For the recoverable path on models that declare a `.softDeleteAt()`
     // field, use softDelete() / softDeleteMany() and restore() / restoreMany().
-    const node = buildDelete(
-      mk, this.model,
-      { where: args.where, many: false },
-      schema as any,
-    );
-    const { doc } = await this.adapter.executeDelete(node, this.model, { session: this.session });
+    const { doc } = this._walksCascades(mk)
+      ? await this._deleteWithCascades(mk, args.where, false)
+      : await this.adapter.executeDelete(
+        buildDelete(mk, this.model, { where: args.where, many: false }, schema as any),
+        this.model, { session: this.session },
+      );
     if (!doc) {
       if (_internal?.tolerateMissing) return null as never;
       throw notFoundError(this.model.collection, args.where);
@@ -869,6 +1034,7 @@ export class CollectionWrapper<
     this._assertStrictWhere(args?.where);
     const mk = this._modelKey();
     // v2: hard delete always. See softDeleteMany() for the recoverable path.
+    if (this._walksCascades(mk)) return { count: (await this._deleteWithCascades(mk, args.where, true)).count };
     const node = buildDelete(
       mk, this.model,
       { where: args.where, many: true },
@@ -876,6 +1042,32 @@ export class CollectionWrapper<
     );
     const r = await this.adapter.executeDelete(node, this.model, { session: this.session });
     return { count: r.count };
+  }
+
+  // onDelete in the wrapper, for a database that cannot do it itself (Mongo,
+  // DuckDB, IndexedDB). SQL dialects with real foreign keys never get here.
+  private _walksCascades(mk: string): boolean {
+    if (this.adapter.capabilities?.nativeCascades !== false) return false;
+    return hasCascadeWork(getActiveSchema() as any, mk);
+  }
+
+  private async _deleteWithCascades(mk: string, where: any, many: boolean): Promise<{ doc?: any; count: number }> {
+    const models = getActiveSchema() as any;
+    return runAtomic(this.adapter, this.session, async (s) => {
+      const opts = { session: s ?? this.session };
+      const fields = cascadeKeyFields(models, mk, this.model);
+      const select = Object.fromEntries(fields.map((f) => [f, true]));
+      const targets = await this.adapter.executeSelect(
+        buildSelect(mk, this.model, { where, select, ...(many ? {} : { take: 1 }) }, many ? 'many' : 'one', schema as any),
+        this.model, opts,
+      );
+      if (targets.length === 0) return { count: 0 };
+      await applyCascades(this.adapter, opts.session, models, mk, this.model, targets);
+      // A single delete removes exactly the row whose children were walked.
+      const pk = fields[0];
+      const delWhere = many ? where : { AND: [where ?? {}, { [pk]: targets[0][pk] }] };
+      return this.adapter.executeDelete(buildDelete(mk, this.model, { where: delWhere, many }, schema as any), this.model, opts);
+    });
   }
 
   /**
@@ -1104,7 +1296,9 @@ export class CollectionWrapper<
     if (hardLimit != null && (node.limit == null || node.limit > hardLimit)) {
       node.limit = hardLimit;
     }
-    const rows = await this.adapter.executeSelect(node, this.model, { session: this.session });
+    const keyed = withJoinKeys(node);
+    const rows = await this.adapter.executeSelect(keyed.node, this.model, { session: this.session });
+    stripKeys(rows, keyed.added);
     return rows;
   }
 
@@ -1238,12 +1432,7 @@ export class CollectionWrapper<
       // to the default Mongo singleton, which would write to Mongo (or
       // fail to connect) when the outer wrapper is Postgres / MySQL /
       // SQLite.
-      const targetWrapper = new CollectionWrapper(
-        target,
-        this._session,
-        this._adapter,
-        this._strict,
-      );
+      const targetWrapper = this._wrapperFor(target);
 
       // Parent ref value — used as the child's FK target.
       const parentRef =
@@ -1257,11 +1446,20 @@ export class CollectionWrapper<
 
       const childFkField = rel.on;
 
+      if (op === 'create' && !rel.inverse && rel.kind === 'one') {
+        // Owning side on an update: the target is made first, then this row
+        // points at it.
+        const d = Array.isArray(spec.data) ? spec.data[0] : spec.data;
+        const made = await targetWrapper.create({ data: d });
+        const tId = (made as any)?.[rel.refs] ?? (made as any)?.id;
+        await this.update({ where: { id: parentDoc._id ?? parentDoc.id } as any, data: { [rel.on]: tId } as any });
+        parentDoc[rel.on] = tId;
+        continue;
+      }
       if (op === 'create') {
-        const item = Array.isArray(spec.data) ? spec.data : [spec.data];
-        for (const d of item) {
-          await targetWrapper.create({ data: { ...d, [childFkField]: fkValue } });
-        }
+        const items = (Array.isArray(spec.data) ? spec.data : [spec.data])
+          .map((d: any) => targetWrapper._splitNestedWrites({ ...d, [childFkField]: fkValue }, true));
+        await targetWrapper._insertRows(items, targetWrapper.session, false);
         continue;
       }
       if (op === 'createMany') {
@@ -1349,6 +1547,67 @@ export class CollectionWrapper<
       // skip it for now (no current call sites). Easy to add later.
     }
   }
+}
+
+// A connectOrCreate `where` the wrapper can match in memory: scalar fields of
+// the target compared by plain equality. Anything else (an operator object, a
+// composite-unique key, a relation) is looked up row by row instead.
+function isPlainEqWhere(target: ModelDef<any>, where: any): boolean {
+  if (!where || typeof where !== 'object') return false;
+  const keys = Object.keys(where);
+  if (keys.length === 0) return false;
+  for (const k of keys) {
+    if (!(k in target.fields)) return false;
+    const v = where[k];
+    const t = typeof v;
+    if (t !== 'string' && t !== 'number' && t !== 'boolean' && t !== 'bigint') return false;
+  }
+  return true;
+}
+
+function matchesPlainWhere(row: any, where: any): boolean {
+  if (!row) return false;
+  for (const k of Object.keys(where)) {
+    const rv = row[k] ?? (k === 'id' ? row._id : undefined);
+    if (rv == null || String(rv) !== String(where[k])) return false;
+  }
+  return true;
+}
+
+function whereKey(where: any): string {
+  return JSON.stringify(Object.keys(where).sort().map((k) => [k, String(where[k])]));
+}
+
+// One key shared by every where (the usual unique `name` / `slug`) is an IN.
+function lookupWhere(wheres: any[]): any {
+  const keys = Object.keys(wheres[0]);
+  if (keys.length === 1 && wheres.every((w) => Object.keys(w).length === 1 && keys[0] in w)) {
+    return { [keys[0]]: { in: wheres.map((w) => w[keys[0]]) } };
+  }
+  return { OR: wheres };
+}
+
+function dedupeWheres(wheres: any[]): any[] {
+  const seen = new Set<string>();
+  return wheres.filter((w) => {
+    const k = whereKey(w);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+// Rows strictly after `last` in the order `keys`:
+//   (k1 > v1) OR (k1 = v1 AND k2 > v2) OR ...
+function keysetAfter(keys: Array<{ field: string; dir: 'asc' | 'desc' }>, last: any): any {
+  const ors: any[] = [];
+  for (let i = 0; i < keys.length; i++) {
+    const and: any[] = [];
+    for (let j = 0; j < i; j++) and.push({ [keys[j].field]: last[keys[j].field] });
+    and.push({ [keys[i].field]: { [keys[i].dir === 'asc' ? 'gt' : 'lt']: last[keys[i].field] } });
+    ors.push(and.length === 1 ? and[0] : { AND: and });
+  }
+  return ors.length === 1 ? ors[0] : { OR: ors };
 }
 
 // Parse a simple duration string ('30s', '5m', '1h', '2d') to ms. Returns

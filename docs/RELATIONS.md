@@ -25,6 +25,7 @@ point at related models (so cycles don't collapse the inference graph to
 * [Polymorphic relations (two patterns)](#polymorphic-relations-two-patterns)
 * [Deep includes](#deep-includes)
 * [Nested `take` and `skip` are per parent](#nested-take-and-skip-are-per-parent)
+* [A `select` that leaves out the join key](#a-select-that-leaves-out-the-join-key)
 * [The to-one side, and the filter it used to lose](#the-to-one-side-and-the-filter-it-used-to-lose)
 * [`select` inside `include`](#select-inside-include)
 * [Filtering by a relation](#filtering-by-a-relation)
@@ -254,7 +255,7 @@ can tell the two sides apart at runtime.
 What this means practically:
 
 * **Cascade walks only follow owning sides.** The walker in
-  `src/adapters/mongo/cascade.ts` skips any relation with `inverse: true`
+  `src/builder/cascade.ts` skips any relation with `inverse: true`
   to avoid double-walking a one-to-many in both directions.
 * **DDL is only emitted from the owning side.** If both ends declared an
   `rel.one`, forge would try to emit two FK constraints and the second
@@ -580,10 +581,16 @@ Six queries, regardless of how many users matched the first one. Mongo
 runs the same plan — a batched `find` per relation level, joined
 client-side. It does **not** emit `$lookup` for hydration; see
 [MONGO](./MONGO.md#relations-via-lookup-vs-application-side-hydration)
-for why.
+for why. Since 2.25.0 a Mongo level that has its own `orderBy` is sorted by
+the join key first (`{ post_id: 1, _id: 1 }` rather than `{ _id: 1 }`): with
+`post_id: { $in: … }` sorted by `_id` alone, the planner picks the `_id`
+index to avoid a blocking sort and walks the whole collection. Each
+parent's list keeps exactly the order you asked for. A level is also read
+in a single batch, so a level with more than 101 children no longer pays a
+`getMore` round trip.
 
-That constant count holds as long as no level pages its own list. Add a
-nested `take` or `skip` and that level becomes one query per parent — see
+The count stays constant when a level pages its own list too: a nested
+`take` or `skip` is still one query for that level — see
 [Nested `take` and `skip` are per parent](#nested-take-and-skip-are-per-parent).
 
 ### N+1 risk
@@ -627,39 +634,65 @@ The cap is applied **per parent** — five posts for each user, not five
 posts across the whole result. That is what you would expect, and it is
 what 2.18.0 does. Earlier versions did not.
 
-### What it does not compile to
-
-Older revisions of this page claimed the per-parent cap compiles to a
-windowed subquery — `ROW_NUMBER() OVER (PARTITION BY author_id …)` — on
-SQL and to a `$slice` inside a `$lookup` pipeline on Mongo. **Neither
-exists.** There is no window function and no `$slice` anywhere in the
-adapters. If you sized a query or an index around that claim, re-read
-what follows.
-
-### What it actually does
+### What it compiles to
 
 Relation hydration is one shared step, `hydrateManyRelation` in
-`src/ir/hydrate-many.ts`, used by all six adapters. It picks one of two
-plans by looking at whether the nested `include` pages its own list:
+`src/ir/hydrate-many.ts`, used by all six adapters. Since 2.25.0 a paged
+level is **one query for every parent**, numbered per parent:
 
 | Nested `take` / `skip` | Plan | Queries for N parents |
 |---|---|---|
 | absent | one batched `IN` query for every parent's children | 1 |
-| present | one query per parent, each carrying that parent's own `LIMIT` / `OFFSET` | N |
+| present | one batched query, paged per parent with a window function | 1 |
 
-With no inner paging, nothing changes from earlier versions — it is
-still the single batched fetch, and still not N+1:
+On Postgres, MySQL 8 / MariaDB 10.2+, SQLite 3.25+, DuckDB and MSSQL:
 
 ```sql
-SELECT * FROM posts WHERE author_id IN (…10 authors…)
+SELECT * FROM (
+  SELECT "posts".…, ROW_NUMBER() OVER (
+           PARTITION BY "posts"."author_id"
+           ORDER BY "posts"."created_at" DESC) AS "__forge_rn"
+    FROM "posts"
+   WHERE "posts"."author_id" IN ($1, $2, …)          -- plus your nested where
+) "__forge_page"
+WHERE "__forge_rn" <= 5                              -- skip 2, take 5: > 2 AND <= 7
+ORDER BY "__forge_rn"
 ```
 
-With inner paging, forge issues one query per parent so each parent gets
-its own page. N queries for N parents, bounded above by the outer `take`.
+The row number is stripped before the rows reach you. T-SQL requires an
+`ORDER BY` inside `OVER`, so an include with no `orderBy` gets
+`ORDER BY (SELECT NULL)` there — the same arbitrary order a `LIMIT` with
+no `ORDER BY` gives.
 
-### The bug this fixes
+On Mongo (5.0+) the same page is one aggregation:
 
-Before 2.18.0 the batched query carried the inner `LIMIT` too:
+```js
+[{ $match: { author_id: { $in: [...] }, ... } },
+ { $setWindowFields: { partitionBy: '$author_id', sortBy: { created_at: -1 },
+     output: { __forge_rn: { $sum: 1, window: { documents: ['unbounded', 'current'] } } } } },
+ { $match: { __forge_rn: { $lte: 5 } } },
+ { $sort: { author_id: 1, __forge_rn: 1 } }]
+```
+
+(A running count rather than `$documentNumber`, which only accepts a
+single sort key.)
+
+A server without window functions — MySQL 5.7, MongoDB before 5.0 —
+rejects the first such query with a syntax / unknown-stage error. Forge
+recognises that error, switches that pool (or Mongo database) to one
+query per parent, and serves the page that way; every later load on it
+goes straight to the fallback. Any other error is thrown as before.
+
+Three shapes keep the query per parent even where windows exist, because
+one statement would not return the same rows: a nested `distinct` (it
+would deduplicate across parents), an `orderBy` on a geo or vector
+distance (its alias is not visible inside the window), and a `near` /
+`withinPolygon` filter (on a fallback geo column forge refines it after
+the fetch, and the window would cut the page first).
+
+### What came before
+
+Before 2.18.0 the batched query carried the inner `LIMIT` itself, so
 
 ```ts
 await db.user.findMany({ take: 10, include: { posts: { take: 3 } } });
@@ -669,29 +702,33 @@ await db.user.findMany({ take: 10, include: { posts: { take: 3 } } });
 SELECT * FROM posts WHERE author_id IN (…10 authors…) LIMIT 3
 ```
 
-Three posts **total**. Whichever author those three rows happened to
-belong to got them; the other nine users came back with `posts: []`. Not
-an error, not a warning — nine empty arrays that look exactly like nine
-users with no posts. `skip` was wrong the same way: it skipped rows of
-the combined result rather than rows of each parent's list.
-
-### What it costs
-
-One query per parent is a real cost, and it is a deliberate trade. The
-obvious alternative is to fetch every child row in one batched query and
-slice each parent's list in memory. That is one round trip, but it is
-**unbounded**: `take: 3` over ten authors with a hundred thousand posts
-each would pull a million rows across the wire to return thirty. One
-query per parent is bounded by the outer `take`, so the cost is something
-you can reason about from the call site.
-
-If N queries is too many for your fan-out, page the parents harder (a
-smaller outer `take`), or drop the nested paging and slice in your own
-code once you know the child lists are small.
+returned three posts **total**, and nine users came back with
+`posts: []`. 2.18.0 fixed it with one query per parent — correct, but a
+three-level include with a page at each level cost 75 round trips for ten
+users, and grew with every parent. The window is still bounded (it never
+returns more than `take` rows per parent) and is back to one round trip a
+level.
 
 In both plans the nested `where` you passed is ANDed with the foreign-key
 filter, so a nested `where` and a nested `take` compose the way you would
-expect. The to-one side did not do that until 2.19.0 — next section.
+expect. The to-one side did not do that until 2.19.0 — see
+[below](#the-to-one-side-and-the-filter-it-used-to-lose).
+
+---
+
+## A `select` that leaves out the join key
+
+```ts
+await db.user.findMany({ include: { posts: { select: { id: true } } } });
+await db.post.findMany({ select: { title: true, author: true } });
+```
+
+Until 2.25.0 both came back wrong without an error: every user had
+`posts: []` (the posts were fetched, then grouped under an `author_id`
+the select had not asked for), and every post had `author: null` (the
+parent row had no `author_id` to look the author up by). Forge now fetches
+the keys a relation needs and removes them again before the rows reach
+you, so the result has exactly the fields you selected.
 
 ---
 
@@ -843,17 +880,50 @@ WHERE NOT EXISTS (SELECT 1 FROM posts p WHERE p.author_id = u.id AND p.status <>
 WHERE NOT EXISTS (SELECT 1 FROM posts p WHERE p.author_id = u.id AND p.status = 'DRAFT')
 ```
 
-On Mongo, the same operators compile to a `$lookup` followed by a
-`$match` on the lookup result's length or contents:
+On Mongo a `find` has no join, so until 2.25.0 every relation filter was
+refused with *"a relation filter … cannot be compiled for Mongo"*. Reads
+and `count` now answer them, with the same results as the SQL dialects.
+Each relation filter is first resolved against the child collection — the
+semi-join a SQL planner makes of the `EXISTS`:
 
 ```js
-// some
-{ $lookup: { from: 'posts', localField: '_id', foreignField: 'author_id', as: '_posts' } }
-{ $match: { _posts: { $elemMatch: { status: 'PUBLISHED' } } } }
+// { posts: { some: { status: 'PUBLISHED' } } }
+db.posts.aggregate([
+  { $match: { author_id: { $ne: null }, status: 'PUBLISHED' } },   // + soft-delete scope
+  { $group: { _id: '$author_id' } },
+])
+// then the parent query is a plain find:
+db.users.find({ _id: { $in: [ …those keys… ] } })
 ```
 
-The `every` and `none` variants similarly use `$not` plus `$elemMatch`.
-Mongo executes the `$lookup` once per query, not per parent row.
+| mode | parent filter |
+|---|---|
+| `some` / `is` | key `$in` the child keys that match |
+| `none` / `isNot` | key `$nin` the child keys that match |
+| `every` | key `$nin` the child keys that **fail** the filter |
+
+`$nin` keeps a parent whose key is null, as `NOT EXISTS` does; `every`
+with no inner condition behaves like `some`, as it does on SQL. Nested
+relation filters resolve inside out. That is one extra round trip per
+relation filter, and it is fast when matches are sparse (`none` over a
+large table is the case a per-row join handles worst).
+
+When a filter matches more than 10 000 distinct parents the key list is
+not inlined; the query runs as one aggregation instead, with a `$lookup`
+per relation filter that fetches at most one child:
+
+```js
+{ $sort: { _id: 1 } },                     // before the join, so a page stops it early
+{ $lookup: { from: 'posts', localField: '_id', foreignField: 'author_id',
+    pipeline: [{ $match: { author_id: { $ne: null }, status: 'PUBLISHED' } },
+               { $limit: 1 }, { $project: { _id: 1 } }],
+    as: '__forge_rel_1' } },
+{ $match: { '__forge_rel_1.0': { $exists: true } } },   // false for none / every
+{ $limit: 50 },
+```
+
+Writes (`updateMany` / `deleteMany` with a relation filter) are still
+refused on Mongo: resolve the ids first, then write by id.
 
 ### `isNot` is not "is missing"
 
@@ -885,15 +955,24 @@ const users = await db.user.findMany({
 // users[0]._count: { posts: 5, comments: 12 }
 ```
 
-Each entry in `_count.select` becomes **one extra query**, batched across
-every parent — `SELECT "author_id" AS fk, COUNT(*) AS c FROM "posts" WHERE
-"author_id" = ANY($1) GROUP BY "author_id"` on Postgres, the same with
-`IN (?, ?, …)` on the dialects without `ANY`, a `$match` + `$group` on
-Mongo —
-materialised onto `row._count` afterwards. It is not a correlated
-subquery in the parent's SELECT list, and it is not a `$lookup`, whatever
-earlier revisions of this page said. Index the child's FK column or each
-count is a sequential scan of the child table.
+On the SQL dialects each entry in `_count.select` is a correlated subquery
+in the parent's own SELECT (since 2.25.0), so the counts cost no extra
+round trip:
+
+```sql
+SELECT "users".…,
+       (SELECT COUNT(*) FROM "posts" "c1"
+         WHERE "c1"."author_id" = "users"."id" AND "c1"."deleted_at" IS NULL) AS "__forge_count_posts"
+  FROM "users" …
+```
+
+The alias columns are folded into `row._count` and removed. Before 2.25.0
+it was one grouped query per relation (`… WHERE "author_id" = ANY($1)
+GROUP BY "author_id"`), which also crashed DuckDB — the untyped array
+parameter raised *"Cannot create values of type ANY"*. Mongo still runs a
+`$match` + `$group` per counted relation, batched across every parent.
+Either way, index the child's FK column or each count scans the child
+table.
 
 Since 2.19.0 the count **excludes soft-deleted children**, so
 `_count.posts` and `include: { posts: true }.length` agree; before, they
@@ -1352,7 +1431,7 @@ tenant deletion to be a hard error rather than a mass cascade.
 
 Every other section in this document treats `onDelete` as if it's
 enforced by the database. On Mongo, it isn't. The cascade walker in
-`src/adapters/mongo/cascade.ts` runs application-side every time you
+`src/builder/cascade.ts` runs application-side every time you
 call `db.x.delete` or `db.x.deleteMany`. The walk:
 
 1. Inspects the schema for every relation pointing at the model you're

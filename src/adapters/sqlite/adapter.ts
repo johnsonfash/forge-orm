@@ -1,4 +1,5 @@
 import type { Adapter, AdapterCapabilities, DoctorReport, ExecOpts } from '../types';
+import { TxQueue } from '../shared/tx-queue';
 import { ForgeEmitter } from '../../events';
 import { isDriverInstalled, loadDriver } from '../missing-driver';
 import {
@@ -171,6 +172,45 @@ export class SqliteAdapter implements Adapter {
     }
   }
 
+  async *streamSelectBatches(node: any, model: any, opts?: ExecOpts & { batchSize?: number }): AsyncIterable<any[]> {
+    const { compileSelect } = await import('./compile-from-ir');
+    const { decodeRow } = await import('./execute');
+    const a = compileSelect(node, model);
+    const size = opts?.batchSize ?? 500;
+    if (!this.db.iterate) {
+      const rows = await this.db.all(a.sql, a.params);
+      for (let i = 0; i < rows.length; i += size) yield rows.slice(i, i + size).map((r) => decodeRow(model, r));
+      return;
+    }
+    const it: any = this.db.iterate(a.sql, a.params);
+    // better-sqlite3's iterator is synchronous: drain a batch without an
+    // await per row.
+    if (typeof it[Symbol.iterator] === 'function') {
+      const sync = it[Symbol.iterator]();
+      try {
+        for (;;) {
+          const batch: any[] = [];
+          let done = false;
+          while (batch.length < size) {
+            const n = sync.next();
+            if (n.done) { done = true; break; }
+            batch.push(decodeRow(model, n.value));
+          }
+          if (batch.length) yield batch;
+          if (done) return;
+        }
+      } finally {
+        sync.return?.();
+      }
+    }
+    let buf: any[] = [];
+    for await (const r of it as AsyncIterable<any>) {
+      buf.push(decodeRow(model, r));
+      if (buf.length >= size) { yield buf; buf = []; }
+    }
+    if (buf.length) yield buf;
+  }
+
   async applyProjectionAndHydration(): Promise<void> { /* no-op; executor does it */ }
 
   async $queryRaw(fragment: import('../../raw-sql').SqlFragment, opts?: ExecOpts): Promise<any[]> {
@@ -190,16 +230,24 @@ export class SqliteAdapter implements Adapter {
 
   // Drive BEGIN/COMMIT/ROLLBACK explicitly (portable across drivers). The driver
   // handle is passed back via ExecOpts.session so nested calls share the txn.
+  private readonly _tx = new TxQueue();
+
+  get inTransaction(): boolean {
+    return this._tx.active;
+  }
+
   async $transaction<T>(fn: (session: unknown) => Promise<T>): Promise<T> {
-    await this.db.exec('BEGIN');
-    try {
-      const result = await fn(this.db);
-      await this.db.exec('COMMIT');
-      return result;
-    } catch (err) {
-      try { await this.db.exec('ROLLBACK'); } catch { /* swallow */ }
-      throw err;
-    }
+    return this._tx.run(async () => {
+      await this.db.exec('BEGIN');
+      try {
+        const result = await fn(this.db);
+        await this.db.exec('COMMIT');
+        return result;
+      } catch (err) {
+        try { await this.db.exec('ROLLBACK'); } catch { /* swallow */ }
+        throw err;
+      }
+    });
   }
 
   coerceInbound(model: any, data: any, _opts?: { forCreate?: boolean }) {

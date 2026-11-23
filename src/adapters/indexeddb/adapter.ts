@@ -171,6 +171,10 @@ export class IndexeddbAdapter implements Adapter {
     return fn(undefined);
   }
 
+  async supportsTransactions(): Promise<boolean> {
+    return false;
+  }
+
   coerceInbound(model: ModelDef<any>, data: any, opts?: { forCreate?: boolean }): any {
     return coerceInbound(model, data, opts);
   }

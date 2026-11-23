@@ -28,6 +28,14 @@ const CAPS: AdapterCapabilities = {
   transactionsRequireReplicaSet: false,
 };
 
+/** MariaDB 10.5 added INSERT … RETURNING (DELETE has had it since 10.0). */
+export function mariadbReturning(version: string): boolean {
+  const m = /^(\d+)\.(\d+)/.exec(version);
+  if (!m || !/mariadb/i.test(version)) return false;
+  const [maj, min] = [Number(m[1]), Number(m[2])];
+  return maj > 10 || (maj === 10 && min >= 5);
+}
+
 export class MysqlAdapter implements Adapter {
   readonly kind = 'mysql' as const;
   readonly capabilities = CAPS;
@@ -53,9 +61,14 @@ export class MysqlAdapter implements Adapter {
       this._rawPool = (rawPool.promise ? rawPool.promise() : rawPool) as MysqlPool;
       this._driver = mysql2Driver(this._rawPool);
     }
-    // Probe so auth/host errors surface at connect() time.
-    await this._driver.query('SELECT 1', []);
+    // Probe so auth/host errors surface at connect() time. The version says
+    // whether this is a MariaDB that takes INSERT / DELETE … RETURNING.
+    const res: any = await this._driver.query('SELECT VERSION() AS v', []);
+    const rows = Array.isArray(res) ? res[0] : undefined;
+    this._returning = mariadbReturning(String(Array.isArray(rows) ? rows[0]?.v ?? '' : ''));
   }
+
+  private _returning = false;
 
   async close(): Promise<void> {
     if (this._driver) await this._driver.close();
@@ -93,7 +106,9 @@ export class MysqlAdapter implements Adapter {
   }
 
   private mysqlOpts(opts?: ExecOpts): MysqlExecOpts {
-    return opts?.session ? { conn: opts.session as MysqlConn } : {};
+    const o: MysqlExecOpts = opts?.session ? { conn: opts.session as MysqlConn } : {};
+    if (this._returning) o.returning = true;
+    return o;
   }
 
   // Handle the executor should use: the txn session if present, else the driver.
@@ -163,6 +178,31 @@ export class MysqlAdapter implements Adapter {
       const [rows] = await this.driver.query(a.sql, a.params);
       for (const row of rows as any[]) yield decodeRow(model, row);
     }
+  }
+
+  async *streamSelectBatches(node: any, model: any, opts?: ExecOpts & { batchSize?: number }): AsyncIterable<any[]> {
+    const { compileSelect } = await import('./compile-from-ir');
+    const { decodeRow } = await import('./execute');
+    const a = compileSelect(node, model);
+    const size = opts?.batchSize ?? 1000;
+    const dec = (rows: any[]) => { for (let i = 0; i < rows.length; i++) rows[i] = decodeRow(model, rows[i]); return rows; };
+    // Inside a transaction the rows must come from its connection, or the
+    // stream would not see what the transaction has written.
+    if (!opts?.session && this.driver.streamBatches) {
+      for await (const rows of this.driver.streamBatches(a.sql, a.params, size)) yield dec(rows);
+      return;
+    }
+    if (!opts?.session && this.driver.stream) {
+      let buf: any[] = [];
+      for await (const r of this.driver.stream(a.sql, a.params)) {
+        buf.push(r);
+        if (buf.length >= size) { yield dec(buf); buf = []; }
+      }
+      if (buf.length) yield dec(buf);
+      return;
+    }
+    const [rows] = await this.handle(opts).query(a.sql, a.params);
+    for (let i = 0; i < (rows as any[]).length; i += size) yield dec((rows as any[]).slice(i, i + size));
   }
 
   async applyProjectionAndHydration(): Promise<void> { /* executor does it */ }

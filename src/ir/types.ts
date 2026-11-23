@@ -21,6 +21,12 @@ export interface RowLockSpec {
   wait?: 'nowait' | 'skipLocked';
 }
 
+/** Column a `partitionBy` select adds for the per-parent row number; the loader strips it. */
+export const PARTITION_ROW_ALIAS = '__forge_rn';
+
+/** SQL alias prefix of a `_count` relation subquery column; the executor folds it into `_count`. */
+export const COUNT_ALIAS_PREFIX = '__forge_count_';
+
 export interface SelectNode {
   kind: 'select';
   model: string;                  // schema key (e.g. 'user'), not collection name
@@ -32,6 +38,13 @@ export interface SelectNode {
   offset?: number;
   cursor?: CursorSpec;
   distinct?: string[];
+  /**
+   * When set, `limit` / `offset` apply per distinct value of this field rather
+   * than to the whole result: one query pages every parent of a nested include
+   * at once. SQL compiles it to ROW_NUMBER() OVER (PARTITION BY …), Mongo to
+   * $setWindowFields. Only the include loader sets it.
+   */
+  partitionBy?: string;
   // Row lock taken by the SELECT (postgres): FOR UPDATE / FOR SHARE etc.
   lock?: RowLockSpec;
   // Cardinality intent: 'one' for findFirst/findUnique, 'many' for findMany.
@@ -48,6 +61,9 @@ export interface InsertNode {
   skipDuplicates?: boolean;
   returning?: ProjectionPlan;
   hydration?: RelationPlan[];
+  /** The caller needs only the count (createMany): an executor may skip
+   *  RETURNING or the read-back that would hand the rows over. */
+  countOnly?: boolean;
 }
 
 export interface UpdateNode {

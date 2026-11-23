@@ -29,6 +29,9 @@ export interface PostgresDriver extends PgQueryable {
   transaction<T>(fn: (session: PgQueryable) => Promise<T>): Promise<T>;
   // Optional server-side cursor stream. Absent → adapter materialises via query.
   stream?(sql: string, params: unknown[]): AsyncIterable<any>;
+  // The same cursor, FETCHing `size` rows per round trip and yielding each
+  // batch whole.
+  streamBatches?(sql: string, params: unknown[], size: number): AsyncIterable<any[]>;
   /**
    * Hold one connection outside any transaction. Optional: needed only by
    * work that must span several autocommit statements on ONE connection —
@@ -50,6 +53,30 @@ export interface PostgresDriver extends PgQueryable {
 // Monotonic id for cursor names — avoids Date.now() collisions on concurrent
 // streams sharing a connection.
 let _cursorSeq = 0;
+
+/**
+ * DECLARE / FETCH / CLOSE on a connection that is already in a transaction
+ * (a cursor only lives inside one). Used for a stream inside the caller's
+ * `$transaction`, so it reads what the transaction has written.
+ */
+export async function* cursorBatches(
+  q: { query(sql: string, params?: unknown[]): Promise<{ rows: any[] }> },
+  sql: string,
+  params: unknown[],
+  size: number,
+): AsyncIterable<any[]> {
+  const name = `forge_stream_${(_cursorSeq++).toString(36)}`;
+  await q.query(`DECLARE ${name} NO SCROLL CURSOR FOR ${sql}`, params);
+  try {
+    for (;;) {
+      const { rows } = await q.query(`FETCH ${size} FROM ${name}`);
+      if (rows.length) yield rows;
+      if (rows.length < size) break;
+    }
+  } finally {
+    await q.query(`CLOSE ${name}`).catch(() => {});
+  }
+}
 
 // ─── node-postgres (pg) — the default driver ────────────────────────────────
 export function pgDriver(pool: any): PostgresDriver {
@@ -84,12 +111,25 @@ export function pgDriver(pool: any): PostgresDriver {
         const name = `forge_stream_${(_cursorSeq++).toString(36)}`;
         await client.query(`DECLARE ${name} CURSOR FOR ${sql}`, params);
         for (;;) {
-          const { rows } = await client.query(`FETCH 200 FROM ${name}`);
+          const { rows } = await client.query(`FETCH 1000 FROM ${name}`);
           if (rows.length === 0) break;
           for (const r of rows) yield r;
-          if (rows.length < 200) break;
+          if (rows.length < 1000) break;
         }
         await client.query(`CLOSE ${name}`);
+        await client.query('COMMIT');
+      } catch (err) {
+        try { await client.query('ROLLBACK'); } catch { /* swallow */ }
+        throw err;
+      } finally {
+        client.release();
+      }
+    },
+    streamBatches: async function* (sql, params, size) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        yield* cursorBatches({ query: (s: string, p?: unknown[]) => client.query(s, p) }, sql, params, size);
         await client.query('COMMIT');
       } catch (err) {
         try { await client.query('ROLLBACK'); } catch { /* swallow */ }

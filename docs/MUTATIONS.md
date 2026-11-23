@@ -67,18 +67,32 @@ SQLite 3.35+ can do it in one trip, MySQL and MSSQL cannot.
 
 | Adapter   | `create`                                | `createMany`                                          |
 |-----------|------------------------------------------|-------------------------------------------------------|
-| postgres  | `INSERT INTO … VALUES (…) RETURNING *`   | `INSERT INTO … VALUES (…),(…),…` (one statement)      |
-| mysql     | `INSERT INTO … VALUES (…)` + `SELECT`    | `INSERT INTO … VALUES (…),(…),…`                      |
-| sqlite    | `INSERT INTO … VALUES (…) RETURNING *`   | `INSERT INTO … VALUES (…),(…),…` (one statement)      |
+| postgres  | `INSERT INTO … VALUES (…) RETURNING *`   | `INSERT INTO … VALUES (…),(…),…` (one statement, no `RETURNING`) |
+| mysql     | `INSERT INTO … VALUES (…)`, + `SELECT` only when a value is not known (see below); MariaDB 10.5+: `… RETURNING *` | `INSERT INTO … VALUES (…),(…),…` (count only, no read-back) |
+| sqlite    | `INSERT INTO … VALUES (…) RETURNING *`   | `INSERT INTO … VALUES (…),(…),…` (one statement, no `RETURNING`) |
 | duckdb    | `INSERT INTO … VALUES (…) RETURNING *`   | `INSERT INTO … VALUES (…),(…),…`                      |
 | mssql     | `INSERT INTO … OUTPUT INSERTED.* VALUES` | `INSERT INTO … VALUES (…),(…),…` (rowcount only)      |
 | mongo     | `insertOne`                              | `insertMany`                                          |
 
 Postgres, SQLite 3.35+, DuckDB and MSSQL all support `RETURNING` / `OUTPUT`
 clauses on a single-row insert, so `create` is one round-trip on every SQL
-dialect. MySQL has no `RETURNING`, so `create` does an `INSERT` followed by
-a `SELECT` keyed on the new row's auto-id / primary key — still one logical
-call but two statements on the wire.
+dialect. MySQL 8 has no `RETURNING`. Since 2.25.0 `create` on MySQL is
+still one statement when forge already knows every column of the new row:
+each value was written by forge, or is a literal `.default(…)`, or is
+NULL for an optional column, or is the `insertId` of a single
+auto-increment row. Otherwise (a `default('now')`, a `.dbGenerated(…)`
+column, a `DECIMAL` or geometry the driver hands back in its own form, a
+multi-row auto-increment insert) it reads the row back with a `SELECT` on
+its key, as before. The returned row is then what forge sent, so a
+trigger that rewrites the row on insert, or a non-strict `sql_mode` that
+silently truncates a value, is not reflected in it. MariaDB 10.5+ is
+detected from `SELECT VERSION()` at connect and uses `INSERT … RETURNING *`.
+
+`upsert`, `update` and `delete` on MySQL stay two statements: the row they
+return is not known without reading it (MySQL 8 has no `RETURNING`, and
+with the `FOUND_ROWS` flag both drivers set, an upsert's affected-row
+count cannot tell an insert from an unchanged update). On MariaDB 10.5+
+`delete` is one statement (`DELETE … RETURNING *`).
 
 ### ID generation timing
 
@@ -366,13 +380,16 @@ row. On Mongo, `delete` is `findOneAndDelete` and `deleteMany` is
 Relations declared with `onDelete: 'Cascade'` (see
 [Relations](../README.md#relations)) cascade to children when a parent is
 deleted. On SQL this is a database-enforced `FOREIGN KEY … ON DELETE
-CASCADE`, so the cascade happens inside the statement. On Mongo there are
-no foreign keys; forge walks the schema graph at delete time and issues
-the child `deleteMany` calls. The Mongo path is best-effort — it cannot
-be made transactional outside a replica-set session.
+CASCADE`, so the cascade happens inside the statement. Mongo has no
+foreign keys and DuckDB refuses cascading ones, so on both forge walks the
+schema graph at delete time — `delete`, `deleteMany` and nested deletes —
+and issues the child `deleteMany` / `updateMany` calls itself, in one
+transaction where the database has one (DuckDB; Mongo on a replica set).
+On a standalone Mongo it is best-effort.
 
 Other `onDelete` modes (`SetNull`, `Restrict`, `NoAction`) behave the
-same way: enforced by the database on SQL, simulated by forge on Mongo.
+same way: enforced by the database on SQL, simulated by forge on Mongo and
+DuckDB. See [FOREIGN-KEYS.md](./FOREIGN-KEYS.md#mongo--no-native-fks-the-cascade-walker).
 
 See [docs/RELATIONS.md](./RELATIONS.md) for the full cascade matrix when
 the doc lands; until then the README section is the authoritative source.
@@ -844,19 +861,35 @@ shape.
 
 ### Write order and transactionality
 
-On SQL adapters the parent and children are issued inside a single
-`$transaction`. The order is fixed: parent first when the parent ID is
-needed by the children's foreign key (`one-to-many`, `one-to-one` with
-the FK on the child), children first when the relationship is owned by
-the parent (`one-to-one` with the FK on the parent). All-or-nothing: if
-any nested write fails, the whole call rolls back.
+A `create` or `update` carrying nested writes runs inside one transaction
+on every dialect that has one — Postgres, MySQL, SQLite, DuckDB, MSSQL,
+and Mongo on a replica set or mongos — or joins the caller's
+`$transaction`. All-or-nothing: if any nested write fails, the whole call
+rolls back. (Before 2.25.0 nothing opened that transaction: on SQLite a
+nested create ran with no `BEGIN` at all, and a failure part-way left the
+parent and the children written so far.) The order is fixed: a target the
+row points at (FK on the row: `connectOrCreate`, `create` on an owning
+`rel.one`) first, then the row, then children that point at it.
 
-On Mongo there is no cross-collection transaction unless the cluster is
-a replica set with sessions. Forge issues the writes in the same logical
-order, but the guarantee is best-effort — a failed child write after a
-successful parent insert leaves the parent in place. For strict cross-
-document atomicity on Mongo, open a session yourself and use
-`$transaction` (it forwards the session to the driver).
+On a standalone Mongo there is no transaction to open; the writes run in
+the same order, best-effort.
+
+SQLite and DuckDB run on one connection, so two transactions cannot be
+open at once there. Since 2.25.0 a second concurrent transaction waits for
+the first instead of failing with "cannot start a transaction within a
+transaction".
+
+### Batching
+
+Nested writes are batched per relation (2.25.0): `posts: { create: [a, b,
+c] }` is one multi-row INSERT, and every `connectOrCreate` of one relation
+across those rows is one lookup (`WHERE name IN (…)`) plus one INSERT for
+the ones that were missing, a missing key shared by two rows created once.
+A user with a profile, three posts and three tagged links is eight
+statements on Postgres, SQLite and MySQL, `BEGIN` and `COMMIT` included,
+where it was twelve (twenty-one on MySQL). A `connectOrCreate` whose
+`where` is not plain equality on the target's columns is looked up row by
+row, as before.
 
 ### Worked example: `connectOrCreate`
 
@@ -874,11 +907,10 @@ await db.post.create({
 });
 ```
 
-Each item runs as a lookup on the unique `name`, then either attaches
-the existing row or inserts a new one and attaches that. On SQL this is
-two statements per tag inside the parent's transaction; on Mongo it is
-one `findOneAndUpdate` with `upsert: true` per tag plus a join-table
-write where applicable.
+Each item is matched on the unique `name`: the tags that exist are
+attached, the ones that do not are inserted and attached. For a
+many-relation the lookups for every item go out as one query (see
+[Batching](#batching)).
 
 ---
 

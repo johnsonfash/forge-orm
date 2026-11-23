@@ -4,6 +4,132 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.25.0 — Related records in one query per level, cascades on Mongo and DuckDB, fewer round trips on writes
+
+- **A nested `take` / `skip` is one query per include level, not one per
+  parent.** Since 2.18.0 a paged include ran a query for every parent, so
+  `users → posts(take 5) → comments(take 3) → author` was 75 round trips for
+  ten users and grew with every row. A paged level is now one statement,
+  numbered per parent: `ROW_NUMBER() OVER (PARTITION BY <fk> ORDER BY …)` on
+  Postgres, MySQL 8 / MariaDB 10.2+, SQLite 3.25+, DuckDB and SQL Server, and
+  `$setWindowFields` on MongoDB 5.0+. Same rows, same order, same per-parent
+  limits; that include is 4 round trips (8 on DuckDB, which prepares and
+  executes separately), down from 75 (150). A server without window
+  functions (MySQL 5.7, MongoDB before 5.0) is detected on its first refusal
+  and that pool falls back to the query per parent. `distinct`, a distance
+  `orderBy` and a geo `where` inside a paged include keep the per-parent
+  plan, because one statement would not return the same rows.
+- **`_count` is answered by the parent query on the SQL dialects.** Each
+  counted relation is a correlated `(SELECT COUNT(*) …)` in the parent's
+  SELECT, soft-delete scoped as before, instead of a grouped query per
+  relation: `_count: { select: { posts, comments } }` is 1 round trip, was 3.
+  This also fixes `_count` on **DuckDB, which crashed** with *"Cannot create
+  values of type ANY"* (the grouped query bound a JS array as `ANY($1)`).
+- **Mongo relation filters work on reads and `count`.** `some`, `none`,
+  `every`, `is`, `isNot`, nested to any depth, used to throw *"a relation
+  filter … cannot be compiled for Mongo"*. Each is resolved against the
+  child collection with one grouped aggregation and becomes `$in` / `$nin`
+  on the parent key (`every` collects the children that fail the filter);
+  above 10 000 qualifying keys the query runs as one aggregation with a
+  bounded `$lookup` per filter instead. Results match the SQL dialects,
+  soft-delete scoping included. `updateMany` / `deleteMany` with a relation
+  filter still refuse on Mongo.
+- **Mongo includes no longer scan the whole child collection.** A batched
+  level with its own `orderBy` (`include: { comments: { orderBy: { id:
+  'asc' } } }`) sent `post_id: { $in }` sorted by `_id`; the planner chose the
+  `_id` index to avoid a sort and examined every document (26 ms for 500
+  comments out of 50 000). The level is now sorted by the join key first,
+  which reads only the matches through the FK index and leaves each
+  parent's order untouched; and include loads are read in one batch, so a
+  level with more than 101 children no longer pays a `getMore`.
+- **A `select` that leaves out a join key no longer empties the relation.**
+  `include: { posts: { select: { id: true } } }` returned `posts: []` for
+  every parent, and `select: { title: true, author: true }` returned
+  `author: null`, because the key the rows are matched on had not been
+  fetched. Forge now fetches it and removes it again, so the result still
+  has exactly the fields selected.
+- **`onDelete` now cascades on MongoDB and DuckDB.** Deleting a user left
+  its posts, their comments and their `post_tags` behind. The Mongo walker
+  built its relation map once, at module load, from the bundled sample
+  schema, so a consumer's own models never cascaded; DuckDB, which refuses
+  `ON DELETE CASCADE`, had no walker at all although the docs said it did.
+  One walker (`src/builder/cascade.ts`) now runs for every adapter without
+  native cascades (Mongo, DuckDB, IndexedDB) on `delete`, `deleteMany` and
+  nested deletes: `Restrict` is checked before any write and throws `P2003`,
+  `SetNull` is one `updateMany` per relation, `Cascade` recurses leaves
+  first, join tables included. It runs in one transaction (DuckDB; Mongo on
+  a replica set) or joins the caller's. A Mongo single delete is now one
+  `findOneAndDelete` and `deleteMany` one `deleteMany`, where each read the
+  rows first.
+- **Mongo `updateMany` counts matched documents**, as every SQL dialect
+  does. It returned `modifiedCount`, so re-running an update that left the
+  rows unchanged reported 0. An update whose data is only nested writes no
+  longer fails with *"Update document requires atomic operators"*.
+- **A nested create is atomic and batched.** It now runs in one
+  transaction on every dialect that has one, or in the caller's; before,
+  nothing opened one (on SQLite there was no `BEGIN` at all), so a failure
+  part-way kept the parent and the children written so far. Child rows of
+  one relation are one multi-row INSERT, and every `connectOrCreate` of a
+  relation is one `IN` lookup plus one INSERT for the missing targets. The
+  benchmark's user + profile + 3 posts + 3 tagged links is 8 statements on
+  Postgres, SQLite and MySQL (was 12, 12 and 21). An owning-side nested
+  `create` (`postTag.create({ data: { tag: { create: … } } })`) makes the
+  target first and points the row at it; it used to create the target
+  pointing back at the row. SQLite and DuckDB queue a second concurrent
+  transaction instead of failing with *"cannot start a transaction within a
+  transaction"*.
+- **MySQL `create` is one statement when the row is already known.** With
+  no RETURNING, every insert was INSERT + SELECT. When every column is
+  forge's own value, a literal default, NULL, or the `insertId` of one
+  auto-increment row, the row is built without the SELECT; a
+  `default('now')`, a `dbGenerated` column or a DECIMAL still reads back.
+  `createMany` never reads back (it returns a count), and on Postgres and
+  SQLite it no longer asks for `RETURNING *` either. MariaDB 10.5+, detected
+  from `SELECT VERSION()` at connect, uses `INSERT … RETURNING *` and
+  `DELETE … RETURNING *`. `upsert`, `update` and `delete` stay two
+  statements on MySQL 8.
+- **A single-row `update` / `delete` by a unique key is one plain statement**
+  on Postgres, SQLite and DuckDB: `UPDATE … WHERE "id" = $2 RETURNING *`.
+  The single-row subselect (`WHERE "id" = (SELECT "id" … LIMIT 1 FOR
+  UPDATE)`, `rowid = (SELECT rowid …)`) is kept for a where that could match
+  several rows; for one that names the primary key, a unique column or a
+  whole composite unique by value it only cost time, half of a DuckDB
+  single-row update.
+- **DuckDB JSON path filters work.** `{ prefs: { path: 'theme', eq: 'dark' } }`
+  failed with *"Malformed JSON … Input: "dark""*: `json_extract` returns
+  JSON and DuckDB parsed the VARCHAR parameter as JSON to compare. The path
+  is now read as the operand's type (`json_extract_string`, a DOUBLE or
+  BOOLEAN cast). `f.json()`, `f.embed()` and `f.embedMany()` come back as
+  objects on DuckDB and SQL Server (and `f.stringArray()` / `f.intArray()`
+  on SQL Server), not as the stored text.
+- **Geo `nearTo` fixed on Postgres and SQLite fallback mode.** Postgres
+  folded the unquoted `_distanceMeters` alias, so its own
+  `ORDER BY "_distanceMeters"` failed with *"column does not exist"*. The
+  fallback bbox was Postgres syntax on every dialect, which SQLite rejected
+  (*"unrecognized token ':'"*); each dialect now reads the JSON with its own
+  functions. And a fallback query put `LIMIT` in the SQL, which has no
+  distance order, so `take: 20` kept 20 arbitrary rows of the box: the page
+  is now taken after the exact distance filter and sort.
+- **Full-text search uses the index on DuckDB and SQL Server.** Both always
+  compiled `.searchable()` to `ILIKE` / `LIKE '%term%'`. The adapter now
+  looks the index up once per table (`fts_main_<table>.fields`,
+  `sys.fulltext_index_columns`) and uses `match_bm25` / `CONTAINS` for a
+  covered column, keeping LIKE otherwise; the query event's SQL shows which
+  ran. DuckDB's index is a snapshot you build after loading, and forge does
+  not build it.
+- **Faster streams and large reads.** `findManyStream` takes a batch at a
+  time from Postgres (cursor FETCH 1000, was 200: 15 round trips for 10 000
+  rows, was 55), MySQL, SQLite and Mongo, so a row costs one generator step
+  instead of one per layer; MySQL streams at the raw driver's speed. On
+  Postgres and MySQL a stream inside `$transaction` reads on the
+  transaction's connection, so it sees the transaction's writes. DuckDB and
+  SQL Server page by key instead of OFFSET (DuckDB's own streaming result
+  ends silently when any other statement runs on the connection, so it is
+  not used). `take`, `skip` and `chunkSize` are honoured on every path. Row
+  decoding on SQLite and MySQL is planned once per model and converts in
+  place: a 1 000-row read on SQLite went from 1.6 ms to 1.15 ms (the
+  remainder is the JSON and date parsing the raw driver does not do).
+
 ## 2.24.0 — Migration files, row locks and the splitter on every SQL dialect; 64-bit integers as typed
 
 2.23.0 to 2.23.2 added things that only worked on Postgres. They now work on

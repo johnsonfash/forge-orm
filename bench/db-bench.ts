@@ -17,7 +17,7 @@
 import * as dotenv from 'dotenv';
 dotenv.config();
 
-import { createDb } from '../src';
+import { createDb, betterSqlite3Driver } from '../src';
 import { schema } from '../src/schema';
 import { buildSchemaDDL as buildPgDDL } from '../src/adapters/postgres/ddl';
 import { applyMigration as applyPgMigration } from '../src/adapters/postgres/migrate';
@@ -71,7 +71,7 @@ async function benchPg(): Promise<Result[] | null> {
     await applyPgMigration(pool, buildPgDDL(schema as any));
     const seed = Array.from({ length: BENCH_SEED }, (_, i) => ({
       id: `u_${i}`, email: `bench${i}@x.co`, name: `User ${i}`,
-      role: i % 3 === 0 ? 'EDITOR' : 'USER',
+      role: (i % 3 === 0 ? 'EDITOR' : 'USER') as 'EDITOR' | 'USER',
     }));
     await db.user.createMany({ data: seed });
 
@@ -130,7 +130,7 @@ async function benchMysql(): Promise<Result[] | null> {
     await applyMysqlMigration(pool, buildMysqlDDL(schema as any));
     const seed = Array.from({ length: BENCH_SEED }, (_, i) => ({
       id: `u_${i}`, email: `bench${i}@x.co`, name: `User ${i}`,
-      role: i % 3 === 0 ? 'EDITOR' : 'USER',
+      role: (i % 3 === 0 ? 'EDITOR' : 'USER') as 'EDITOR' | 'USER',
     }));
     await db.user.createMany({ data: seed });
 
@@ -171,14 +171,17 @@ async function benchSqlite(): Promise<Result[] | null> {
   try { require('better-sqlite3'); } catch { return null; }
 
   console.log(`[bench:sqlite] in-memory database`);
-  const db = await createDb({ url: 'sqlite::memory:' });
-  const handle = (db.adapter as any).db;
+  // forge's adapter exposes only its driver port, so open the handle here and
+  // hand it to forge: the raw baseline needs better-sqlite3's own prepare().
+  const Database = require('better-sqlite3');
+  const handle = new Database(':memory:');
+  const db = await createDb({ driver: betterSqlite3Driver(handle) } as any) as any;
 
   try {
-    await applySqliteMigration(handle, buildSqliteDDL(schema as any));
+    await applySqliteMigration(betterSqlite3Driver(handle), buildSqliteDDL(schema as any));
     const seed = Array.from({ length: BENCH_SEED }, (_, i) => ({
       id: `u_${i}`, email: `bench${i}@x.co`, name: `User ${i}`,
-      role: i % 3 === 0 ? 'EDITOR' : 'USER',
+      role: (i % 3 === 0 ? 'EDITOR' : 'USER') as 'EDITOR' | 'USER',
     }));
     await db.user.createMany({ data: seed });
 
@@ -232,7 +235,7 @@ async function benchMongo(): Promise<Result[] | null> {
     await pushMongoIndexes();
     const seed = Array.from({ length: BENCH_SEED }, (_, i) => ({
       email: `bench${i}@x.co`, name: `User ${i}`,
-      role: i % 3 === 0 ? 'EDITOR' : 'USER',
+      role: (i % 3 === 0 ? 'EDITOR' : 'USER') as 'EDITOR' | 'USER',
     }));
     await db.user.createMany({ data: seed });
     const sample: any = await db.user.findFirst({ where: { email: 'bench0@x.co' } });

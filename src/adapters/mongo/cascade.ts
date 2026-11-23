@@ -5,14 +5,6 @@ import { RelationInfo } from '../../schema/core';
 import { ModelDef, OnDeleteAction } from '../../schema/types';
 import { schema } from '../../schema';
 
-// Inverts the schema map (ModelDef → its key) so we can answer "which schema
-// key corresponds to this parent model?" when finding child relations that
-// point at a given parent.
-const schemaKeyByModel = new Map<ModelDef<any>, string>();
-for (const [key, model] of Object.entries(schema)) {
-  schemaKeyByModel.set(model as ModelDef<any>, key);
-}
-
 // Cascade walker — replicates Prisma's onDelete semantics application-side.
 // Mongo has no FK enforcement; Prisma did this in its query engine. For each
 // row about to be deleted, we walk the schema's *inverse* (one-to-many)
@@ -24,8 +16,6 @@ interface CascadeContext {
   visited: Set<string>;
 }
 
-const allModels: ModelDef<any>[] = Object.values(schema) as any[];
-
 // Find every owning relation in the registry whose target is `parentModel`.
 // These are the ones the cascade walker needs to follow.
 function findChildRelations(
@@ -35,8 +25,12 @@ function findChildRelations(
   rel: RelationInfo;
   childRelName: string;
 }> {
-  const parentKey = schemaKeyByModel.get(parentModel);
+  // Read from the live schema on every call. A map built at module load froze
+  // it to the bundled sample, so a consumer's models never cascaded.
+  const entries = Object.entries(schema as Record<string, ModelDef<any>>);
+  const parentKey = entries.find(([, m]) => m === parentModel)?.[0];
   if (!parentKey) return [];
+  const allModels = entries.map(([, m]) => m);
   const out: Array<{
     childModel: ModelDef<any>;
     rel: RelationInfo;

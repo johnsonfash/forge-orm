@@ -31,6 +31,7 @@ import type { SQLArtifact } from '../../compile';
 import type { ModelDef } from '../../schema/types';
 import { schema } from '../../schema';
 import { MssqlDialect } from './dialect';
+import type { Dialect } from '../postgres/dialect';
 import {
   compileCount as pgCompileCount,
   compileDelete as pgCompileDelete,
@@ -167,8 +168,8 @@ function rewriteReturningForDelete(sql: string): string {
   return `${head} OUTPUT DELETED.*`;
 }
 
-export function compileSelect(node: SelectNode, modelOverride?: ModelDef<any>): SQLArtifact {
-  const a = pgCompileSelect(node, modelOverride, MssqlDialect);
+export function compileSelect(node: SelectNode, modelOverride?: ModelDef<any>, dialect: Dialect = MssqlDialect): SQLArtifact {
+  const a = pgCompileSelect(node, modelOverride, dialect);
   let sql = a.sql;
   // T-SQL has no DISTINCT ON.
   sql = sql.replace(/^SELECT DISTINCT ON \([^)]+\) /, 'SELECT DISTINCT ');
@@ -176,8 +177,8 @@ export function compileSelect(node: SelectNode, modelOverride?: ModelDef<any>): 
   return post({ ...a, sql });
 }
 
-export function compileCount(node: CountNode, modelOverride?: ModelDef<any>): SQLArtifact {
-  const a = pgCompileCount(node, modelOverride, MssqlDialect);
+export function compileCount(node: CountNode, modelOverride?: ModelDef<any>, dialect: Dialect = MssqlDialect): SQLArtifact {
+  const a = pgCompileCount(node, modelOverride, dialect);
   return post({ ...a, sql: rewriteLimitOffset(a.sql) });
 }
 

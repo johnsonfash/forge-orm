@@ -12,7 +12,7 @@ isn't the right shape.
 
 * [What N+1 actually is](#what-n1-actually-is)
 * [How `include` solves it](#how-include-solves-it)
-* [Nested paging changes the query count](#nested-paging-changes-the-query-count)
+* [Nested paging no longer changes the query count](#nested-paging-no-longer-changes-the-query-count)
 * [`select` for projection — avoiding over-fetch](#select-for-projection--avoiding-over-fetch)
 * [Nested `include` — N depth, perf curve, denormalisation](#nested-include--n-depth-perf-curve-denormalisation)
 * [The DataLoader pattern](#the-dataloader-pattern)
@@ -109,9 +109,9 @@ SELECT "id", "name", "email"
 
 Forge then walks the second result set, attaches each user to its
 matching post by id, and returns the hydrated array. The number of
-queries equals the **depth** of the include tree, not the breadth — with
-one exception, which is the next section: a nested `take` or `skip` turns
-that relation level into one query per parent.
+queries equals the **depth** of the include tree, not the breadth — and
+since 2.25.0 that holds with a nested `take` or `skip` too (next
+section).
 
 ### The `IN` list is the whole trick, and 2.19.0 fixed a hole in it
 
@@ -196,26 +196,28 @@ drop to `$queryRaw` and write the JOIN yourself; see
 
 ---
 
-## Nested paging changes the query count
+## Nested paging no longer changes the query count
 
-`include` costs one query per relation level — *unless* that level pages
-its own list. A nested `take` or `skip` means "give each parent its own
-page", and a single batched query cannot do that, so forge issues one
-query per parent instead.
-
-The decision is made in one shared place, `hydrateManyRelation` in
-`src/ir/hydrate-many.ts`, which all six adapters call:
+A nested `take` or `skip` means "give each parent its own page". Since
+2.25.0 that page is still one query for the whole level: forge numbers
+each parent's children with `ROW_NUMBER() OVER (PARTITION BY <fk> ORDER BY
+…)` on the SQL dialects and `$setWindowFields` on Mongo, and keeps the
+rows each parent's page covers. The decision is made in one shared place,
+`hydrateManyRelation` in `src/ir/hydrate-many.ts`, which all six adapters
+call:
 
 | Nested `take` / `skip` | Plan | Queries for N parents |
 |---|---|---|
 | absent | one batched `IN` query | 1 |
-| present | one query per parent, each with its own `LIMIT` / `OFFSET` | N |
+| present | one batched query, paged per parent by a window function | 1 |
+| present, server without window functions (MySQL 5.7, MongoDB < 5.0) | one query per parent | N |
 
-So `include: { posts: true }` over a hundred users is two queries, and
-`include: { posts: { take: 3 } }` over the same hundred users is a
-hundred and one. That is bounded by the outer `take` — page the parents
-and you bound the children — but it is worth knowing before you put a
-nested `take` in a list endpoint.
+The fallback is automatic: the first windowed query such a server rejects
+switches that pool to a query per parent. From 2.18.0 until 2.25.0 the
+per-parent plan was the only one — `include: { posts: { take: 3 } }` over a
+hundred users was a hundred and one queries, and a three-level include
+paged at each level was 75 round trips for ten users. The SQL emitted is
+in [RELATIONS.md](./RELATIONS.md#what-it-compiles-to).
 
 ### The bug this fixes
 
@@ -238,24 +240,12 @@ skipped rows of the combined result, not of each parent's list.
 ### Why not slice in memory?
 
 Fetching every child row in one batched query and slicing each parent's
-list client-side is one round trip, which sounds like the better trade
-until you look at the volume. It is **unbounded**: `take: 3` over ten
-authors with a hundred thousand posts each pulls a million rows across
-the wire to return thirty. One query per parent is bounded by the outer
-`take`, so the cost is something you can predict from the call site.
+list client-side is one round trip too, but it is **unbounded**: `take: 3`
+over ten authors with a hundred thousand posts each pulls a million rows
+across the wire to return thirty. The window function filters on the
+server, so the level never returns more than `take` rows per parent.
 
-If N queries is too many for your fan-out, you have three options:
-
-* **Page the parents harder.** A smaller outer `take` bounds N directly.
-* **Drop the nested paging** and slice in your own code — correct when
-  you know each parent has tens of children, not thousands. The
-  [worked example](#worked-examples) below shows both shapes side by
-  side.
-* **Write the window function yourself** in `$queryRaw`
-  ([docs/RAW-SQL.md](./RAW-SQL.md)). Forge does not emit one, but nothing
-  stops you.
-
-In both plans the nested `where` you passed is ANDed with the
+In every plan the nested `where` you passed is ANDed with the
 foreign-key filter, so nested filtering and nested paging compose.
 
 ---
@@ -697,30 +687,25 @@ for (const post of posts) {
 }
 ```
 
-That is a fixed number of queries — one for the parents, plus **one per
-counted relation**, batched across every parent the way `include` is:
+That is one query on the SQL dialects (since 2.25.0): each counted
+relation is a correlated subquery in the parents' own SELECT.
 
 ```sql
--- parents
-SELECT … FROM "posts" WHERE "status" = $1;
--- the count, once for the whole batch (Postgres; IN (?, …) elsewhere)
-SELECT "post_id" AS fk, COUNT(*) AS c
-  FROM "comments"
- WHERE "post_id" = ANY($1) AND "deleted_at" IS NULL
- GROUP BY "post_id";
+SELECT "posts".…,
+       (SELECT COUNT(*) FROM "comments" "c1"
+         WHERE "c1"."post_id" = "posts"."id" AND "c1"."deleted_at" IS NULL) AS "__forge_count_comments"
+  FROM "posts" WHERE "posts"."status" = $1;
 ```
 
-(An earlier revision of this page showed a correlated subquery in the
-parent's SELECT list. That is not what any adapter emits — the counts are
-a separate batched query per relation, materialised onto the rows
-afterwards. Mongo runs the equivalent `$match` + `$group`. The
-`deleted_at IS NULL` is 2.19.0: the count now agrees with the rows
-`include` returns.)
+Before 2.25.0 it was one grouped query per counted relation
+(`… WHERE "post_id" = ANY($1) GROUP BY "post_id"`). Mongo still runs that
+shape — a `$match` + `$group` per counted relation, batched across every
+parent. The `deleted_at IS NULL` is 2.19.0: the count agrees with the rows
+`include` returns.
 
-Two consequences of that shape. The child's FK column wants an index —
-without one this is a sequential scan of the child table per counted
-relation. And because the count is its own query, it does not multiply
-the parent rows the way a JOIN would.
+The child's FK column wants an index either way — without one each count
+is a scan of the child table. And neither shape multiplies the parent rows
+the way a JOIN would.
 
 For more flexible aggregates (sum, average, min, max — not just count)
 there is no `_count` equivalent and you reach for `groupBy` instead:
@@ -1248,13 +1233,13 @@ async function recentPostsForUsers(userIds: string[]) {
 }
 ```
 
-`take: 5` inside `include` does **not** compile to a window function.
-There is no `ROW_NUMBER() OVER (PARTITION BY …)` anywhere in the
-adapters. It compiles to one query per user, each with its own
-`ORDER BY created_at DESC LIMIT 5`, so at most five rows per user come
-back — at the cost of one round trip per user. Pick between the two by
-which you would rather spend: rows on the wire, or queries. See
-[Nested paging changes the query count](#nested-paging-changes-the-query-count)
+Since 2.25.0 `take: 5` inside `include` compiles to one windowed query
+for every user — `ROW_NUMBER() OVER (PARTITION BY author_id ORDER BY
+created_at DESC)`, keeping rows 1 to 5 — so at most five rows per user come
+back in a single round trip. (Before 2.25.0 it was one query per user.)
+That makes the `include` form the better of the two whenever users have
+more than a handful of posts. See
+[Nested paging no longer changes the query count](#nested-paging-no-longer-changes-the-query-count)
 and
 [docs/RELATIONS.md — Nested `take` and `skip` are per parent](./RELATIONS.md#nested-take-and-skip-are-per-parent).
 

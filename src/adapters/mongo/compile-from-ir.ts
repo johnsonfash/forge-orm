@@ -10,11 +10,13 @@ import type {
   UpdateNode,
   WhereTree,
 } from '../../ir/types';
+import { PARTITION_ROW_ALIAS } from '../../ir/types';
 import type { MongoArtifact } from '../../compile';
 import { schema } from '../../schema';
 import type { ModelDef } from '../../schema/types';
 import { appKeyToDbKey, coerceFieldValue, getFieldDef } from './coerce';
 import { toGeoJson } from '../shared/wkt';
+import { softDeleteField } from '../../ir/build/soft-delete';
 
 // Mongo IR consumer — takes adapter-agnostic IR nodes and emits the exact
 // args object you'd pass to the mongodb driver. The IR builders carry values
@@ -36,19 +38,33 @@ function compileWhere(model: ModelDef<any>, tree: WhereTree | undefined): Record
   return compileWhereNode(model, tree);
 }
 
-function compileWhereNode(model: ModelDef<any>, tree: WhereTree): Record<string, any> {
+/**
+ * Collects the $lookup stages a relation filter needs. Present only when the
+ * caller runs an aggregation (`compileMatchStages`); a plain find has nowhere
+ * to put them, so without it a relation filter still throws.
+ */
+interface LookupCtx {
+  stages: Record<string, any>[];
+  fields: string[];
+  n: { n: number };
+}
+
+const LOOKUP_PREFIX = '__forge_rel_';
+
+function compileWhereNode(model: ModelDef<any>, tree: WhereTree, lk?: LookupCtx): Record<string, any> {
   switch (tree.kind) {
     case 'and': {
-      const parts = tree.children.map((c) => compileWhereNode(model, c)).filter(nonEmpty);
+      const parts = tree.children.map((c) => compileWhereNode(model, c, lk)).filter(nonEmpty);
       if (parts.length === 0) return {};
       if (parts.length === 1) return parts[0];
       return { $and: parts };
     }
     case 'or':
-      return { $or: tree.children.map((c) => compileWhereNode(model, c)) };
+      return { $or: tree.children.map((c) => compileWhereNode(model, c, lk)) };
     case 'not':
-      return { $nor: [compileWhereNode(model, tree.child)] };
+      return { $nor: [compileWhereNode(model, tree.child, lk)] };
     case 'relation':
+      if (lk) return compileRelationLookup(model, tree, lk);
       // Mongo has no join in a plain find, so a relation filter cannot be
       // compiled here. Until 2.18.0 this returned {} — match-all — which is
       // the most dangerous answer available: the same compiler builds the
@@ -70,6 +86,104 @@ function compileWhereNode(model: ModelDef<any>, tree: WhereTree): Record<string,
       return compileLeaf(model, tree);
   }
 }
+
+// A relation filter as a $lookup of at most one matching child, then a test
+// on whether one came back — the EXISTS / NOT EXISTS the SQL compiler emits:
+//
+//   some / is      → a child matching the filter exists
+//   none / isNot   → no child matching the filter exists
+//   every          → no child FAILING the filter exists
+//
+// The child's soft-delete scope sits inside the lookup, never inside the
+// negated filter, for the same reason as on SQL: `every` must not come to mean
+// "every child is live and matches". A null join key matches nothing, as a
+// NULL does in SQL, rather than every child whose key is also missing.
+function compileRelationLookup(
+  model: ModelDef<any>,
+  tree: Extract<WhereTree, { kind: 'relation' }>,
+  lk: LookupCtx,
+): Record<string, any> {
+  const rel = model.relations()[tree.relation];
+  if (!rel) return {};
+  const target = (schema as any)[rel.target] as ModelDef<any> | undefined;
+  if (!target) return {};
+  const owning = model.fields[rel.on] != null;
+  const localField = appKeyToDbKey(owning ? rel.on : rel.refs);
+  const foreignField = appKeyToDbKey(owning ? rel.refs : rel.on);
+
+  const inner: Record<string, any>[] = [{ [foreignField]: { $ne: null } }];
+  const sd = tree.withDeleted ? undefined : softDeleteField(target);
+  if (sd) inner.push({ [appKeyToDbKey(sd)]: null });
+
+  const sub: LookupCtx = { stages: [], fields: [], n: lk.n };
+  const nested = tree.nested ? compileWhereNode(target, tree.nested, sub) : {};
+  const negate = tree.mode === 'every' && nonEmpty(nested);
+  if (nonEmpty(nested)) inner.push(negate ? { $nor: [nested] } : nested);
+
+  lk.n.n += 1;
+  const as = `${LOOKUP_PREFIX}${lk.n.n}`;
+  lk.stages.push({
+    $lookup: {
+      from: target.collection,
+      localField,
+      foreignField,
+      pipeline: [
+        ...sub.stages,
+        { $match: inner.length === 1 ? inner[0] : { $and: inner } },
+        { $limit: 1 },
+        { $project: { _id: 1 } },
+      ],
+      as,
+    },
+  });
+  lk.fields.push(as);
+  const found = tree.mode === 'some' || tree.mode === 'is' || (tree.mode === 'every' && !negate);
+  return { [`${as}.0`]: { $exists: found } };
+}
+
+function hasRelationFilter(tree: WhereTree | undefined): boolean {
+  if (!tree) return false;
+  switch (tree.kind) {
+    case 'relation': return true;
+    case 'and':
+    case 'or': return tree.children.some(hasRelationFilter);
+    case 'not': return hasRelationFilter(tree.child);
+    default: return false;
+  }
+}
+
+/**
+ * The leading stages of an aggregation that filters by `where`, relation
+ * filters included. Top-level conditions that need no join go in a first
+ * $match, so the lookups only run for rows that survive it. `sort`, when
+ * given, goes between that $match and the lookups: the rows then stream in
+ * order (off an index where there is one) and a later $limit stops the
+ * lookups as soon as the page is full, instead of joining every row first.
+ * `internal` lists the fields the lookups add, for the caller to $unset.
+ */
+export function compileMatchStages(
+  model: ModelDef<any>,
+  where: WhereTree | undefined,
+  extra?: Record<string, any>,
+  sort?: Record<string, 1 | -1>,
+): { stages: Record<string, any>[]; internal: string[] } {
+  const children = !where ? [] : where.kind === 'and' ? where.children : [where];
+  const plain = children.filter((c) => !hasRelationFilter(c));
+  const joined = children.filter(hasRelationFilter);
+  const stages: Record<string, any>[] = [];
+  const pre = [compileWhere(model, { kind: 'and', children: plain }), extra ?? {}].filter(nonEmpty);
+  if (pre.length) stages.push({ $match: pre.length === 1 ? pre[0] : { $and: pre } });
+  if (sort) stages.push({ $sort: sort });
+  const lk: LookupCtx = { stages: [], fields: [], n: { n: 0 } };
+  if (joined.length) {
+    const post = compileWhereNode(model, { kind: 'and', children: joined }, lk);
+    stages.push(...lk.stages);
+    if (nonEmpty(post)) stages.push({ $match: post });
+  }
+  return { stages, internal: lk.fields };
+}
+
+export { hasRelationFilter };
 
 // Mongo aggregation-expression operator for each field-to-field comparison op.
 const EXPR_OPS: Partial<Record<string, string>> = {
@@ -275,6 +389,48 @@ export function compileSelect(node: SelectNode, modelOverride?: ModelDef<any>): 
       relation: r.name, via: r.kind, target: r.target, on: r.on, refs: r.refs,
     })),
   };
+}
+
+/**
+ * A select as one aggregation, for the two shapes a find cannot express: a
+ * relation filter (it needs $lookup) and a per-parent page (`partitionBy`,
+ * numbered with $setWindowFields). Rows come back in the same shape a find
+ * returns.
+ */
+export function compileSelectPipeline(node: SelectNode, modelOverride?: ModelDef<any>): Record<string, any>[] {
+  const m = modelDef(node.model, modelOverride);
+  const sort = compileOrderBy(node.orderBy);
+  const sortObj = sort?.length ? Object.fromEntries(sort) : undefined;
+  const partitioned = !!node.partitionBy && (node.limit != null || node.offset != null);
+  const { stages, internal } = compileMatchStages(
+    m, node.where, compileCursor(m, node.cursor, node.orderBy), partitioned ? undefined : sortObj,
+  );
+  if (partitioned) {
+    const fk = appKeyToDbKey(node.partitionBy!);
+    stages.push({
+      $setWindowFields: {
+        partitionBy: `$${fk}`,
+        sortBy: sortObj ?? { _id: 1 },
+        // A running count, not $documentNumber: that one takes a single sort key.
+        output: { [PARTITION_ROW_ALIAS]: { $sum: 1, window: { documents: ['unbounded', 'current'] } } },
+      },
+    });
+    const skip = Math.max(0, Math.trunc(Number(node.offset ?? 0)));
+    const bounds: Record<string, number> = {};
+    if (skip > 0) bounds.$gt = skip;
+    if (node.limit != null) bounds.$lte = skip + Math.max(0, Math.trunc(Number(node.limit)));
+    if (Object.keys(bounds).length) stages.push({ $match: { [PARTITION_ROW_ALIAS]: bounds } });
+    stages.push({ $sort: { [fk]: 1, [PARTITION_ROW_ALIAS]: 1 } });
+    internal.push(PARTITION_ROW_ALIAS);
+  } else {
+    if (node.offset) stages.push({ $skip: node.offset });
+    const limit = node.cardinality === 'one' ? 1 : node.limit;
+    if (limit != null) stages.push({ $limit: limit });
+  }
+  if (internal.length) stages.push({ $unset: internal });
+  const projection = compileProjection(node.projection);
+  if (projection) stages.push({ $project: projection });
+  return stages;
 }
 
 export function compileCount(node: CountNode, modelOverride?: ModelDef<any>): MongoArtifact {
