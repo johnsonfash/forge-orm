@@ -4,6 +4,72 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.26.0 — Nested-write and MySQL upsert data fixes; Postgres includes in one query; faster hot paths on every dialect
+
+- **SQLite statements are prepared once.** `betterSqlite3Driver` prepared every
+  statement on every call, which cost more than running a primary-key lookup.
+  Statements are cached by SQL text (256, least recently added out first); a
+  statement still being iterated is never reused, and `exec` (DDL) empties the
+  cache. A `findUnique` by id went from 16 µs to under 4 µs of forge time.
+- **No module resolution on the query path.** Every SQL select ran
+  `await import('../shared/haversine')`, which under CommonJS resolves the
+  module and walks for its `package.json` each time, plus the event-tracking
+  and streaming paths did the same; all static now, on every adapter. The
+  fallback-geo pass also skips models with no fallback geo column outright.
+- **`updateMany` / `deleteMany` / `createMany` hand back a count without
+  `RETURNING *`.** Postgres and SQLite read the count from the driver; DuckDB
+  through its changed-row count (`reportsChangedRows` on the built-in driver,
+  so a custom driver keeps the old form). The rows were sent and decoded only
+  to be counted: DuckDB `updateMany` 0.64 → 0.24 ms.
+- **Postgres loads an include inside the parent's SELECT.** Each relation level
+  is a correlated `json_agg` / `row_to_json` subquery, paged inside the
+  subquery and aggregated in the include's order (by its own columns, or a
+  `ROW_NUMBER` when they are not selected), so a three-level include is one round
+  trip instead of four and posts → post_tags → tag one instead of three.
+  64-bit integers and numerics travel as text and timestamps are decoded, so the
+  values are the ones a query per level returns. A relation with bytes,
+  geography or vector columns, or using `distinct`, a cursor or a distance sort,
+  keeps the query per level.
+- **MongoDB:** `distinct` is one round trip: the server's `distinct` command for
+  a single required scalar selected alone, otherwise one `$group` pipeline that
+  also fixes `take` applying before the dedupe (it returned fewer rows than
+  asked). `findManyStream` uses the server's batching (2 round trips for 10 000
+  rows, was 10). Disjoint conjunctions compile to one filter document instead of
+  `$and`. `updateMany` / `deleteMany` accept relation filters (resolved to `$in`
+  as on reads) instead of throwing.
+- **A cascading delete with nothing to cascade is one statement (MongoDB,
+  DuckDB).** The rows to delete are read together with, per child relation,
+  whether any child points at them (`$limit: 1` lookups on Mongo, `EXISTS`
+  columns on DuckDB). Empty relations are skipped, and with none the delete runs
+  without a transaction: Mongo `deleteMany` 6 → 2 round trips, DuckDB 12 → 4.
+  A many-delete whose filter reads a relation now deletes the walked rows by
+  key: the walk had already removed the children the filter tested, so the rows
+  it matched no longer matched.
+- **MySQL / MariaDB `upsert` applies the `update` values on a conflict.** Each
+  assignment was rewritten to `col = VALUES(col)` with the update's parameters
+  dropped, so a conflict wrote the value the INSERT proposed:
+  `create: { n: 0 }, update: { n: 11 }` left `n` at 0.
+- **MongoDB `groupBy` accepts relation filters** (resolved to `$in`, as on reads)
+  instead of throwing.
+- **Nested `update`, `updateMany` and `upsert` inside `update()` work.** They
+  were in the types and silently ignored. To-many and inverse to-one, plus
+  `update` on an owning to-one; they run before nested deletes, as Prisma does.
+- **Nested `delete` / `deleteMany` are scoped to the parent.** They matched by
+  the filter alone, so `posts: { deleteMany: {} }` emptied the whole table and
+  `posts: { delete: { id } }` removed another user's post.
+- **Writes with `include` return their relations.** `create`, `update`,
+  `upsert` and `delete` with `include`, a relation in `select`, or `_count`
+  came back without them on every SQL dialect (and Mongo ignored a nested
+  `select`). The written row is read back through the select executor; a
+  delete reads its relations before the row goes.
+- **Deep bench:** a difficulty ladder per operation kind
+  (`bench/compare/deep/ladder.ts`) for all six engines: two-level relation
+  filters under AND/OR/NOT, a three-level include with `_count` at two levels,
+  groupBy with a relation filter, full-text + JSON + a related JSON path,
+  delete by id, updateMany / deleteMany through relations, a nested update with
+  upserts and deletes, an upsert loop, and a transaction mixing every write that
+  rolls back.
+
 ## 2.25.0 — Related records in one query per level, cascades on Mongo and DuckDB, fewer round trips on writes
 
 - **A nested `take` / `skip` is one query per include level, not one per

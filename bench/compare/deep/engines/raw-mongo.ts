@@ -7,6 +7,7 @@ import type { EngineImpl } from "../core";
 import type { DialectCtx } from "../dialects";
 import { params, postData, userData, wid } from "../scenarios";
 import * as S from "../schema";
+import { rawMongoLadder } from "../ladder";
 
 const asId = (d: any) => (d ? { ...d, id: d._id } : d);
 
@@ -174,6 +175,7 @@ export async function rawMongoEngine(ctx: DialectCtx): Promise<EngineImpl> {
   const fix = (v: any) => Array.isArray(v) ? v.map((x) => x && typeof x === "object" && "_id" in x && !("id" in x) ? asId(x) : x) : v;
   for (const k of Object.keys(ops)) { const f = ops[k]!; ops[k] = async (i, n) => fix(await f(i, n)); }
   const na: Record<string, string> = {};
-  if (!ctx.features.tx) { na.tx_interactive = na.tx_rollback = "transactions need a replica set"; delete ops.tx_interactive; delete ops.tx_rollback; }
+  Object.assign(ops, rawMongoLadder({ db, client, T, doc, tx: ctx.features.tx }));
+  if (!ctx.features.tx) { na.tx_interactive = na.tx_rollback = na.tx_mixed = "transactions need a replica set"; delete ops.tx_interactive; delete ops.tx_rollback; delete ops.tx_mixed; }
   return { ops, na, close: async () => {} };
 }

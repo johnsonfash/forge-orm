@@ -59,7 +59,7 @@ import type { Adapter } from '../adapters/types';
 import { getDefaultMongoAdapter } from '../adapters/mongo/adapter';
 import { currentSession } from '../session-context';
 import { getActiveSchema } from '../schema/active';
-import { applyCascades, cascadeKeyFields, hasCascadeWork } from './cascade';
+import { applyCascades, cascadeKeyFields, cascadeProbes, hasCascadeWork } from './cascade';
 import { runAtomic } from './atomic';
 
 type ResolvedRow<F extends Record<string, Field<any, any>>> = {
@@ -71,7 +71,8 @@ interface NestedSpec {
   rel: RelationDef;
   op:
     | 'create' | 'createMany' | 'connect' | 'connectOrCreate'
-    | 'disconnect' | 'set' | 'delete' | 'deleteMany';
+    | 'disconnect' | 'set' | 'delete' | 'deleteMany'
+    | 'update' | 'updateMany' | 'upsert';
   data: any;
 }
 
@@ -1013,6 +1014,11 @@ export class CollectionWrapper<
     this._assertWritable('delete');
     this._assertStrictWhere(args.where);
     const mk = this._modelKey();
+    // Relations of a deleted row are read before it goes (Prisma does the
+    // same): afterwards the row, and with a cascade its children, are gone.
+    const before = this._readsRelationsBack(args)
+      ? await this.findFirst({ where: args.where, select: args.select, include: args.include, omit: args.omit } as any)
+      : undefined;
     // v2: delete() is ALWAYS a hard delete (Prisma parity) — no schema magic.
     // For the recoverable path on models that declare a `.softDeleteAt()`
     // field, use softDelete() / softDeleteMany() and restore() / restoreMany().
@@ -1026,6 +1032,7 @@ export class CollectionWrapper<
       if (_internal?.tolerateMissing) return null as never;
       throw notFoundError(this.model.collection, args.where);
     }
+    if (before !== undefined) return (before ? this._pruneToSelect(before, args) : this.adapter.decodeOutbound(this.model, doc)) as any;
     return this._returnOne(doc, args);
   }
 
@@ -1053,6 +1060,8 @@ export class CollectionWrapper<
 
   private async _deleteWithCascades(mk: string, where: any, many: boolean): Promise<{ doc?: any; count: number }> {
     const models = getActiveSchema() as any;
+    const probed = await this._probeCascade(mk, models, where, many);
+    if (probed) return probed;
     return runAtomic(this.adapter, this.session, async (s) => {
       const opts = { session: s ?? this.session };
       const fields = cascadeKeyFields(models, mk, this.model);
@@ -1063,10 +1072,42 @@ export class CollectionWrapper<
       );
       if (targets.length === 0) return { count: 0 };
       await applyCascades(this.adapter, opts.session, models, mk, this.model, targets);
-      // A single delete removes exactly the row whose children were walked.
-      const pk = fields[0];
-      const delWhere = many ? where : { AND: [where ?? {}, { [pk]: targets[0][pk] }] };
+      const delWhere = this._cascadeDeleteWhere(where, many, fields[0], targets);
       return this.adapter.executeDelete(buildDelete(mk, this.model, { where: delWhere, many }, schema as any), this.model, opts);
+    });
+  }
+
+  // A single delete removes exactly the row whose children were walked. A
+  // many-delete keeps its own filter, unless that filter reads a relation:
+  // the walk has just deleted or re-pointed those children, so the filter no
+  // longer matches the rows it matched a moment ago. Those go by key.
+  private _cascadeDeleteWhere(where: any, many: boolean, pk: string, targets: any[]): any {
+    if (!many) return { AND: [where ?? {}, { [pk]: targets[0][pk] }] };
+    return whereReadsRelation(this.model, where) ? { [pk]: { in: targets.map((t) => t[pk]) } } : where;
+  }
+
+  // Outside a transaction, on an adapter that can say in the same round trip
+  // which child relations hold rows: when none does, the delete is a single
+  // statement and needs no transaction. Otherwise the walk runs in one as
+  // usual, skipping the relations that were empty. Returns undefined to fall
+  // through to the full walk.
+  private async _probeCascade(mk: string, models: any, where: any, many: boolean): Promise<{ doc?: any; count: number } | undefined> {
+    const adapter = this.adapter;
+    if (!adapter.selectWithChildPresence || this.session !== undefined) return undefined;
+    const fields = cascadeKeyFields(models, mk, this.model);
+    const select = Object.fromEntries(fields.map((f) => [f, true]));
+    const { rows: targets, present } = await adapter.selectWithChildPresence(
+      buildSelect(mk, this.model, { where, select, ...(many ? {} : { take: 1 }) }, many ? 'many' : 'one', schema as any),
+      this.model, cascadeProbes(models, mk), {},
+    );
+    if (targets.length === 0) return { count: 0 };
+    const delWhere = this._cascadeDeleteWhere(where, many, fields[0], targets);
+    const del = (opts: { session?: unknown }) =>
+      adapter.executeDelete(buildDelete(mk, this.model, { where: delWhere, many }, schema as any), this.model, opts);
+    if (!present.some(Boolean)) return del({});
+    return runAtomic(adapter, undefined, async (s) => {
+      await applyCascades(adapter, s, models, mk, this.model, targets, present);
+      return del({ session: s });
     });
   }
 
@@ -1323,6 +1364,17 @@ export class CollectionWrapper<
   ): Promise<any> {
     if (!rawDoc) return rawDoc;
     const decoded = this.adapter.decodeOutbound(this.model, rawDoc);
+    if (this._readsRelationsBack(args)) {
+      // The SQL adapters hydrate inside their select executor and nowhere
+      // else, so a write with `include` came back without its relations
+      // (and Mongo's ignored a nested `select`). Read the written row once
+      // more through that executor.
+      const pk = this._pkField();
+      const [row] = await this._find(
+        { where: { [pk]: decoded[pk], ...(this._softDeleteField() ? { _withDeleted: true } : {}) },
+          select: args.select, include: args.include, omit: args.omit }, 1);
+      return row ? this._pruneToSelect(row, args) : decoded;
+    }
     const rows = [decoded];
     // Reuse the IR's projection plan + the executor's hydration helper so writes
     // get the exact same select/include/omit semantics as reads.
@@ -1349,6 +1401,32 @@ export class CollectionWrapper<
       return out;
     }
     return rows[0];
+  }
+
+  // A read may carry keys an exclusive `select` did not ask for (Mongo's
+  // `_id`); a write hands back exactly the selection.
+  private _pruneToSelect(row: any, args: { select?: any; include?: any; omit?: any }): any {
+    const { projection, hydration } = buildProjection(this.model, args, schema as any);
+    if (!projection?.exclusive || !projection.fields.length) return row;
+    const kept = new Set([...projection.fields, ...(hydration ?? []).map((h) => h.name), ...(projection.counts.length ? ['_count'] : [])]);
+    const pruned: any = {};
+    for (const k of Object.keys(row)) if (kept.has(k)) pruned[k] = row[k];
+    return pruned;
+  }
+
+  private _readsRelationsBack(args: { select?: any; include?: any }): boolean {
+    // IndexedDB hydrates the written row itself; every other adapter only
+    // does it right inside its select (Mongo applied no nested `select`).
+    if (this.adapter.kind === 'indexeddb') return false;
+    const wants = (o: any) => !!o && typeof o === 'object' && Object.keys(o).some((key) => {
+      if (!o[key]) return false;
+      return key === '_count' || this.model.relations()[key] != null;
+    });
+    return wants(args.include) || wants(args.select);
+  }
+
+  private _pkField(): string {
+    return Object.entries(this.model.fields).find(([, fd]) => (fd as any).kind === 'id')?.[0] ?? 'id';
   }
 
   // Prisma lets you write `parent.create({ data: { ..., rel: { create: {...} } } })`.
@@ -1394,6 +1472,8 @@ export class CollectionWrapper<
           // Nested create on owning side: create the parent target first,
           // then connect by id.
           nested.push({ rel, op: 'create', data: value.create });
+        } else if (!forCreate && 'update' in value && value.update) {
+          nested.push({ rel, op: 'update', data: value.update });
         }
         continue;
       }
@@ -1410,6 +1490,13 @@ export class CollectionWrapper<
       if (value.disconnect)
         nested.push({ rel, op: 'disconnect', data: value.disconnect });
       if (value.set) nested.push({ rel, op: 'set', data: value.set });
+      // Updates before deletes, as Prisma runs them: a `deleteMany` filter
+      // sees the rows as the `update` / `upsert` in the same call left them.
+      if (!forCreate) {
+        if (value.update) nested.push({ rel, op: 'update', data: value.update });
+        if (value.updateMany) nested.push({ rel, op: 'updateMany', data: value.updateMany });
+        if (value.upsert) nested.push({ rel, op: 'upsert', data: value.upsert });
+      }
       if (value.delete) nested.push({ rel, op: 'delete', data: value.delete });
       if (value.deleteMany)
         nested.push({ rel, op: 'deleteMany', data: value.deleteMany });
@@ -1494,15 +1581,56 @@ export class CollectionWrapper<
         }
         continue;
       }
+      // A nested write reaches this parent's children only. Without the FK
+      // in the filter, `posts: { deleteMany: {} }` emptied the whole table
+      // and `posts: { delete: { id } }` removed another user's post.
+      const own = (where: any) => {
+        const fk = { [childFkField]: fkValue };
+        return where && Object.keys(where).length ? { AND: [where, fk] } : fk;
+      };
+      if (op === 'update' && !rel.inverse && rel.kind === 'one') {
+        // Owning to-one: the row this parent points at.
+        const d = wrapsData(target, spec.data) ? spec.data.data : spec.data;
+        const ref = parentDoc[rel.on];
+        if (ref == null) throw notFoundError(target.collection, { [rel.refs]: ref });
+        await targetWrapper.update({ where: { [rel.refs]: ref } as any, data: d });
+        continue;
+      }
+      if (op === 'update') {
+        // To-many: `{ where, data }` (or a list of them). To-one: the data
+        // itself, or `{ data }`.
+        const items: any[] = rel.kind === 'many'
+          ? (Array.isArray(spec.data) ? spec.data : [spec.data])
+          : [wrapsData(target, spec.data) ? { where: spec.data.where, data: spec.data.data } : { data: spec.data }];
+        for (const it of items) await targetWrapper.update({ where: own(it.where), data: it.data });
+        continue;
+      }
+      if (op === 'updateMany') {
+        const items: any[] = Array.isArray(spec.data) ? spec.data : [spec.data];
+        for (const it of items) await targetWrapper.updateMany({ where: own(it.where), data: it.data });
+        continue;
+      }
+      if (op === 'upsert') {
+        const items: any[] = Array.isArray(spec.data) ? spec.data : [spec.data];
+        for (const it of items) {
+          await targetWrapper.upsert({
+            where: rel.kind === 'many' ? it.where : (it.where ?? { [childFkField]: fkValue }),
+            create: { ...(it.create ?? {}), [childFkField]: fkValue },
+            update: it.update ?? {},
+          } as any);
+        }
+        continue;
+      }
       if (op === 'delete') {
-        const targets = Array.isArray(spec.data) ? spec.data : [spec.data];
+        const targets = rel.kind === 'one' && spec.data === true ? [{}] : (Array.isArray(spec.data) ? spec.data : [spec.data]);
         for (const t of targets) {
-          await targetWrapper.delete({ where: t });
+          await targetWrapper.delete({ where: own(t) });
         }
         continue;
       }
       if (op === 'deleteMany') {
-        await targetWrapper.deleteMany({ where: spec.data });
+        const items: any[] = Array.isArray(spec.data) ? spec.data : [spec.data];
+        for (const w of items) await targetWrapper.deleteMany({ where: own(w) });
         continue;
       }
       if (op === 'connectOrCreate') {
@@ -1547,6 +1675,25 @@ export class CollectionWrapper<
       // skip it for now (no current call sites). Easy to add later.
     }
   }
+}
+
+function whereReadsRelation(model: ModelDef<any>, where: any): boolean {
+  if (!where || typeof where !== 'object') return false;
+  const rels = model.relations();
+  for (const k of Object.keys(where)) {
+    const v = where[k];
+    if (k === 'AND' || k === 'OR' || k === 'NOT') {
+      if ((Array.isArray(v) ? v : [v]).some((w) => whereReadsRelation(model, w))) return true;
+    } else if (rels[k]) return true;
+  }
+  return false;
+}
+
+// A to-one nested `update` is either the data itself or `{ where?, data }`
+// (Prisma accepts both). A model with a real `data` column is the first.
+function wrapsData(target: ModelDef<any>, v: any): boolean {
+  return !!v && typeof v === 'object' && 'data' in v && !('data' in target.fields)
+    && Object.keys(v).every((k) => k === 'data' || k === 'where');
 }
 
 // A connectOrCreate `where` the wrapper can match in memory: scalar fields of

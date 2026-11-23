@@ -78,7 +78,9 @@ export async function executeSelect(
     return executeSelectWithGeoNear(node, model, nearToEntry, opts);
   }
 
-  if (hasRelationFilter(node.where) || (node.partitionBy && (node.limit != null || node.offset != null))) {
+  if (distinctValuesOnly(node, model)) return executeDistinctValues(node, model, opts);
+
+  if (hasRelationFilter(node.where) || node.distinct?.length || (node.partitionBy && (node.limit != null || node.offset != null))) {
     return executeSelectAsPipeline(node, model, opts);
   }
 
@@ -117,6 +119,87 @@ export async function executeSelect(
   return out;
 }
 
+// `distinct: [f]` selecting only `f`: the server's own distinct command, which
+// returns just the values. Held to one required scalar of a kind whose values
+// never spread (an array field would be flattened into its elements) and to
+// no paging, which the command cannot do.
+const DISTINCT_VALUE_KINDS = new Set(['id', 'objectId', 'string', 'text', 'int', 'float', 'enum', 'bool', 'dateTime', 'uuid']);
+function distinctValuesOnly(node: SelectNode, model: ModelDef<any>): boolean {
+  if (node.distinct?.length !== 1 || node.limit != null || node.offset != null || node.cursor) return false;
+  if (node.hydration?.length || node.projection?.counts?.length || node.partitionBy || hasRelationFilter(node.where)) return false;
+  const f = node.distinct[0];
+  const p = node.projection;
+  if (!p?.exclusive || p.fields.length !== 1 || p.fields[0] !== f) return false;
+  if (node.orderBy?.some((e) => e.field !== f || e.nearTo || e.agg)) return false;
+  const fd = (model.fields as any)[f];
+  return !!fd && !fd.optional && DISTINCT_VALUE_KINDS.has(fd.kind);
+}
+
+function compareValues(a: any, b: any): number {
+  if (a instanceof Date && b instanceof Date) return a.getTime() - b.getTime();
+  if (typeof a === 'number' && typeof b === 'number') return a - b;
+  if (typeof a === 'boolean' && typeof b === 'boolean') return Number(a) - Number(b);
+  const x = String(a), y = String(b);
+  // Code points, which is the order Mongo's binary string comparison gives.
+  let i = 0, j = 0;
+  while (i < x.length && j < y.length) {
+    const cx = x.codePointAt(i)!, cy = y.codePointAt(j)!;
+    if (cx !== cy) return cx - cy;
+    i += cx > 0xffff ? 2 : 1; j += cy > 0xffff ? 2 : 1;
+  }
+  return (x.length - i) - (y.length - j);
+}
+
+async function executeDistinctValues(node: SelectNode, model: ModelDef<any>, opts: ExecOpts): Promise<any[]> {
+  const f = node.distinct![0];
+  const key = appKeyToDbKey(f);
+  const artifact = compileSelect({ ...node, distinct: undefined, orderBy: undefined }, model);
+  const values = await mongoDb(opts).collection(artifact.collection)
+    .distinct(key, artifact.args.filter ?? {}, opts.session ? { session: opts.session } : {});
+  const dir = node.orderBy?.[0]?.direction === 'desc' ? -1 : 1;
+  if (node.orderBy?.length) values.sort((a: any, b: any) => dir * compareValues(a, b));
+  return values.map((v: any) => decodeRow(model, { [key]: v }));
+}
+
+/**
+ * The targets of a cascading delete plus, per child relation, whether any
+ * child exists: one aggregation with a `$limit: 1` lookup per relation, so the
+ * walker does not send a write (or open a transaction) for relations that
+ * hold nothing.
+ */
+export async function executeSelectWithChildPresence(
+  node: SelectNode,
+  model: ModelDef<any>,
+  probes: Array<{ collection: string; on: string; refs: string; scope?: string }>,
+  opts: ExecOpts = {},
+): Promise<{ rows: any[]; present: boolean[] }> {
+  if (hasRelationFilter(node.where)) {
+    node = { ...node, where: await resolveRelationFilters(model, node.where!, opts) };
+  }
+  const pipeline = compileSelectPipeline(node, model);
+  const flags = probes.map((_, i) => `__forge_has_${i}`);
+  probes.forEach((p, i) => {
+    const match: Record<string, any> = { $expr: { $eq: [`$${appKeyToDbKey(p.on)}`, '$$k'] } };
+    if (p.scope) match[appKeyToDbKey(p.scope)] = null;
+    pipeline.push({
+      $lookup: {
+        from: p.collection,
+        let: { k: `$${appKeyToDbKey(p.refs)}` },
+        pipeline: [{ $match: match }, { $limit: 1 }, { $project: { _id: 1 } }],
+        as: flags[i],
+      },
+    });
+  });
+  const docs = await mongoDb(opts).collection(model.collection)
+    .aggregate(pipeline, { ...(opts.session ? { session: opts.session } : {}), batchSize: WHOLE_RESULT_BATCH })
+    .toArray();
+  const present = probes.map(() => false);
+  for (const d of docs) {
+    flags.forEach((f, i) => { if ((d[f] as unknown[] | undefined)?.length) present[i] = true; delete d[f]; });
+  }
+  return { rows: docs.map((r) => decodeRow(model, r)), present };
+}
+
 // Relation filters ($lookup) and per-parent pages ($setWindowFields) — the
 // two selects a find cannot express — as one aggregation.
 async function executeSelectAsPipeline(
@@ -129,7 +212,8 @@ async function executeSelectAsPipeline(
     .collection(model.collection)
     .aggregate(pipeline, {
       ...(opts.session ? { session: opts.session } : {}),
-      ...(opts.wholeResult ? { batchSize: WHOLE_RESULT_BATCH } : {}),
+      ...(opts.wholeResult || node.distinct?.length ? { batchSize: WHOLE_RESULT_BATCH } : {}),
+      ...(node.distinct?.length ? { allowDiskUse: true } : {}),
     })
     .toArray();
   let out: any[] = docs.map((r) => decodeRow(model, r));
@@ -448,6 +532,8 @@ export async function executeUpdate(
   model: ModelDef<any>,
   opts: ExecOpts = {},
 ): Promise<{ doc?: any; count: number }> {
+  // A relation filter becomes an $in on the join key first, as on reads.
+  if (hasRelationFilter(node.where)) node = { ...node, where: await resolveRelationFilters(model, node.where!, opts) };
   const artifact = compileUpdate(node, model);
   const coll = mongoDb(opts).collection(artifact.collection);
   const sessOpt = opts.session ? { session: opts.session } : undefined;
@@ -503,6 +589,8 @@ export async function executeDelete(
   model: ModelDef<any>,
   opts: ExecOpts = {},
 ): Promise<{ doc?: any; count: number }> {
+  // A relation filter becomes an $in on the join key first, as on reads.
+  if (hasRelationFilter(node.where)) node = { ...node, where: await resolveRelationFilters(model, node.where!, opts) };
   const artifact = compileDelete(node, model);
   const coll = mongoDb(opts).collection(artifact.collection);
   const sessOpt = opts.session ? { session: opts.session } : undefined;
@@ -550,6 +638,7 @@ export async function executeGroupBy(
   model: ModelDef<any>,
   opts: ExecOpts = {},
 ): Promise<any[]> {
+  if (hasRelationFilter(node.where)) node = { ...node, where: await resolveRelationFilters(model, node.where!, opts) };
   const artifact = compileGroupBy(node, model);
   const coll = mongoDb(opts).collection(artifact.collection);
   const sessOpt = opts.session ? { session: opts.session } : undefined;

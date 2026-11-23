@@ -1,4 +1,7 @@
 import type { Adapter, AdapterCapabilities, DoctorReport, ExecOpts } from '../types';
+import * as errorsMod from './errors';
+import * as rawSql from '../../raw-sql';
+import * as compileIr from './compile-from-ir';
 import { ForgeEmitter } from '../../events';
 import { isDriverInstalled, loadDriver } from '../missing-driver';
 import {
@@ -131,7 +134,7 @@ export class MssqlAdapter implements Adapter {
   ): Promise<T> {
     if (!this.emitter.hasListeners()) return exec();
     const { compileSelect, compileCount, compileGroupBy, compileInsert, compileUpdate, compileDelete } =
-      await import('./compile-from-ir');
+      compileIr;
     const artifact =
       op === 'select'  ? compileSelect(node, model, dialect)  :
       op === 'count'   ? compileCount(node, model, dialect)   :
@@ -212,17 +215,17 @@ export class MssqlAdapter implements Adapter {
   }
 
   async $queryRaw(fragment: import('../../raw-sql').SqlFragment, opts?: ExecOpts): Promise<any[]> {
-    const { compileSqlFragment } = await import('../../raw-sql');
+    const { compileSqlFragment } = rawSql;
     const { sql, params } = compileSqlFragment(fragment, 'postgres');
-    const { withMssqlErrors } = await import('./errors');
+    const { withMssqlErrors } = errorsMod;
     const { rows } = await withMssqlErrors(() => this.handle(opts).query(sql, params));
     return rows;
   }
 
   async $executeRaw(fragment: import('../../raw-sql').SqlFragment, opts?: ExecOpts): Promise<number> {
-    const { compileSqlFragment } = await import('../../raw-sql');
+    const { compileSqlFragment } = rawSql;
     const { sql, params } = compileSqlFragment(fragment, 'postgres');
-    const { withMssqlErrors } = await import('./errors');
+    const { withMssqlErrors } = errorsMod;
     const { rowCount } = await withMssqlErrors(() => this.handle(opts).query(sql, params));
     return rowCount ?? 0;
   }

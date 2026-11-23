@@ -22,6 +22,7 @@ import { rowDecoder, parseJsonText, type Convert } from '../shared/row-decoder';
 import type { SqliteDriver } from './driver';
 import { fromDriverBytes } from '../../bytes';
 import { hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
+import { refineFallbackGeo } from '../shared/haversine';
 
 // Window functions are always available here, so a nested page is one query.
 const WINDOWED: WindowedPaging = { enabled: true };
@@ -105,7 +106,6 @@ export async function executeSqliteSelect(
   let rows = decodeRows(model, raw);
   if (node.distinct?.length) rows = dedupeBy(rows, node.distinct);
   // Fallback geoPoint refinement — exact-circle + sort post-process.
-  const { refineFallbackGeo } = await import('../shared/haversine');
   rows = refineFallbackGeo(rows, node, model);
   if (node.projection?.counts?.length) liftRelationCounts(rows, node.projection.counts);
   if (node.hydration?.length) await hydrate(exec, rows, model, node.hydration);
@@ -175,10 +175,12 @@ export async function executeSqliteUpdate(
 ): Promise<{ doc?: any; count: number }> {
   const exec = opts.db ?? db;
   const artifact = compileUpdate(node, model);
+  if (node.many) {
+    const r = await withSqliteErrors(() => exec.run(artifact.sql, encodeParams(artifact.params)));
+    return { count: r.changes };
+  }
   const raw = await withSqliteErrors(() => exec.all(artifact.sql, encodeParams(artifact.params)));
-  const decoded = raw.map((r) => decodeRow(model, r));
-  if (node.many) return { count: decoded.length };
-  return { doc: decoded[0], count: decoded.length };
+  return { doc: raw.length ? decodeRow(model, raw[0]) : undefined, count: raw.length };
 }
 
 export async function executeSqliteDelete(
@@ -189,10 +191,12 @@ export async function executeSqliteDelete(
 ): Promise<{ doc?: any; count: number }> {
   const exec = opts.db ?? db;
   const artifact = compileDelete(node, model);
+  if (node.many) {
+    const r = await withSqliteErrors(() => exec.run(artifact.sql, encodeParams(artifact.params)));
+    return { count: r.changes };
+  }
   const raw = await withSqliteErrors(() => exec.all(artifact.sql, encodeParams(artifact.params)));
-  const decoded = raw.map((r) => decodeRow(model, r));
-  if (node.many) return { count: decoded.length };
-  return { doc: decoded[0], count: decoded.length };
+  return { doc: raw.length ? decodeRow(model, raw[0]) : undefined, count: raw.length };
 }
 
 async function hydrate(

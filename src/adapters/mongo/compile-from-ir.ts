@@ -57,7 +57,7 @@ function compileWhereNode(model: ModelDef<any>, tree: WhereTree, lk?: LookupCtx)
       const parts = tree.children.map((c) => compileWhereNode(model, c, lk)).filter(nonEmpty);
       if (parts.length === 0) return {};
       if (parts.length === 1) return parts[0];
-      return { $and: parts };
+      return mergeConjunction(parts);
     }
     case 'or':
       return { $or: tree.children.map((c) => compileWhereNode(model, c, lk)) };
@@ -397,13 +397,35 @@ export function compileSelect(node: SelectNode, modelOverride?: ModelDef<any>): 
  * numbered with $setWindowFields). Rows come back in the same shape a find
  * returns.
  */
+const DISTINCT_DOC = '__forge_doc';
+const ROOT_VAR = '$' + '$ROOT';
+
+// `{ a: 1 }, { b: 2 }` is one filter document, not `$and` of two: the same
+// match, and the shape the planner and every hand-written query use. Only
+// plain field keys that do not repeat are merged; anything else keeps $and.
+function mergeConjunction(parts: Record<string, any>[]): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const p of parts) {
+    for (const k of Object.keys(p)) {
+      if (k.startsWith('$') || k in out) return { $and: parts };
+      out[k] = p[k];
+    }
+  }
+  return out;
+}
+
 export function compileSelectPipeline(node: SelectNode, modelOverride?: ModelDef<any>): Record<string, any>[] {
   const m = modelDef(node.model, modelOverride);
   const sort = compileOrderBy(node.orderBy);
   const sortObj = sort?.length ? Object.fromEntries(sort) : undefined;
   const partitioned = !!node.partitionBy && (node.limit != null || node.offset != null);
+  // A distinct whose order only names its own keys picks the same document
+  // per key whatever order the group sees, so the sort waits until after it.
+  const sortAfterGroup = !!node.distinct?.length
+    && (node.orderBy ?? []).every((e) => node.distinct!.includes(e.field));
   const { stages, internal } = compileMatchStages(
-    m, node.where, compileCursor(m, node.cursor, node.orderBy), partitioned ? undefined : sortObj,
+    m, node.where, compileCursor(m, node.cursor, node.orderBy),
+    partitioned || sortAfterGroup ? undefined : sortObj,
   );
   if (partitioned) {
     const fk = appKeyToDbKey(node.partitionBy!);
@@ -423,6 +445,22 @@ export function compileSelectPipeline(node: SelectNode, modelOverride?: ModelDef
     stages.push({ $sort: { [fk]: 1, [PARTITION_ROW_ALIAS]: 1 } });
     internal.push(PARTITION_ROW_ALIAS);
   } else {
+    if (node.distinct?.length) {
+      // DISTINCT ON: the first document per key in the requested order, then
+      // that order again ($group does not keep it), then the page. Paging
+      // before the dedupe would return fewer rows than `take`.
+      const key: Record<string, string> = {};
+      for (const f of node.distinct) key[f] = `$${appKeyToDbKey(f)}`;
+      const p = node.projection;
+      if (p?.exclusive && p.fields.length && !internal.length) {
+        const keep: Record<string, 1> = { _id: 1 };
+        for (const f of [...p.fields, ...node.distinct, ...(node.orderBy ?? []).map((e) => e.field)]) keep[appKeyToDbKey(f)] = 1;
+        stages.push({ $project: keep });
+      }
+      stages.push({ $group: { _id: key, [DISTINCT_DOC]: { $first: ROOT_VAR } } });
+      stages.push({ $replaceRoot: { newRoot: `$${DISTINCT_DOC}` } });
+      if (sortObj) stages.push({ $sort: sortObj });
+    }
     if (node.offset) stages.push({ $skip: node.offset });
     const limit = node.cardinality === 'one' ? 1 : node.limit;
     if (limit != null) stages.push({ $limit: limit });

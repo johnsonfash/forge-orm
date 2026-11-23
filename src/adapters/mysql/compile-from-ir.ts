@@ -95,11 +95,9 @@ export function compileUpdate(node: UpdateNode, modelOverride?: ModelDef<any>): 
     'UPDATE $1 SET $2 WHERE $3 LIMIT 1',
   );
 
-  // Upsert: rewrite each `col = ?` after ON DUPLICATE KEY UPDATE to
-  // `col = VALUES(col)`, reusing the values already supplied in VALUES(...).
   // An empty `update: {}` compiles to a self-assignment (`id` = `users`.`id`)
-  // so the statement is valid SQL. It must NOT go through the VALUES()
-  // rewrite below: `id` = VALUES(`id`) assigns the id the INSERT proposed,
+  // so the statement is valid SQL. It must never become `id` = VALUES(`id`),
+  // which assigns the id the INSERT proposed:
   // so a conflict would overwrite the existing row's primary key with a
   // freshly generated one — silently, and taking every foreign key that
   // referenced it with it. `col` = `col` is MySQL's own no-op idiom.
@@ -111,24 +109,11 @@ export function compileUpdate(node: UpdateNode, modelOverride?: ModelDef<any>): 
     return post({ ...a, sql });
   }
 
-  if (node.upsertCreate && sql.includes('ON DUPLICATE KEY UPDATE')) {
-    const m = sql.match(/ON DUPLICATE KEY UPDATE (.+?)$/);
-    if (m) {
-      const rewritten = m[1].split(',').map((assign) => {
-        const eq = assign.indexOf('=');
-        if (eq < 0) return assign;
-        const lhs = assign.slice(0, eq).trim();
-        return ` ${lhs} = VALUES(${lhs})`;
-      }).join(',').trim();
-      sql = sql.replace(/ON DUPLICATE KEY UPDATE .+$/, `ON DUPLICATE KEY UPDATE ${rewritten}`);
-
-      // Params are [values_params..., set_clause_params...]. The SET params are
-      // now embedded as VALUES(col), so drop them — keep only the VALUES params.
-      const keep = Object.keys(node.upsertCreate).length;
-      return post({ ...a, sql, params: a.params.slice(0, keep) });
-    }
-  }
-
+  // A real assignment keeps its own value (`col` = ?). It used to be
+  // rewritten to `col` = VALUES(`col`) with the update's parameters dropped,
+  // which assigned the value the INSERT proposed: `create: { n: 0 }, update:
+  // { n: 11 }` left n at 0 on a conflict, and an update of a column the create
+  // did not mention set it to the create's default.
   return post({ ...a, sql });
 }
 

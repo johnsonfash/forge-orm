@@ -2,7 +2,8 @@
 // relational query API (`db.query.*.findMany({ with })`) for includes, and the
 // `sql` template where Drizzle has no operator (JSON paths, full-text).
 
-import { and, asc, avg, count, desc, eq, exists, getTableColumns, gt, gte, ilike, inArray, like, lt, max, min, ne, not, notExists, or, sql, sum } from "drizzle-orm";
+import { and, asc, avg, count, desc, eq, exists, getTableColumns, gt, gte, ilike, inArray, isNull, like, lt, max, min, ne, not, notExists, or, sql, sum } from "drizzle-orm";
+import { drizzleLadder } from "../ladder";
 import type { EngineImpl } from "../core";
 import { POOL, DialectCtx } from "../dialects";
 import * as DS from "../drizzle-schema";
@@ -214,5 +215,7 @@ export async function drizzleEngine(ctx: DialectCtx): Promise<EngineImpl | { na:
     },
   };
   for (const k of Object.keys(na)) delete (ops as any)[k];
+  Object.assign(ops, drizzleLadder({ db, d, F, T, schema, frg, affected, ops: { and, asc, avg, count, desc, eq, exists, gte, isNull, ne, not, or, sql, sum } }));
+  for (const key of Object.keys(na)) delete (ops as any)[key];
   return { ops, na, close: async () => {} };
 }

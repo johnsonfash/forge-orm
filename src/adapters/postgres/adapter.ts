@@ -1,4 +1,9 @@
 import type { Adapter, AdapterCapabilities, DoctorReport, ExecOpts } from '../types';
+import * as errorsMod from './errors';
+import * as rawSql from '../../raw-sql';
+import * as driverMod from './driver';
+import * as wideInt from '../shared/wide-int';
+import * as compileIr from './compile-from-ir';
 import { ForgeEmitter } from '../../events';
 import { isDriverInstalled, loadDriver } from '../missing-driver';
 import {
@@ -129,7 +134,7 @@ export class PostgresAdapter implements Adapter {
   ): Promise<T> {
     if (!this.emitter.hasListeners()) return exec();
     const { compileSelect, compileCount, compileGroupBy, compileInsert, compileUpdate, compileDelete } =
-      await import('./compile-from-ir');
+      compileIr;
     const artifact =
       op === 'select'  ? compileSelect(node, model)  :
       op === 'count'   ? compileCount(node, model)   :
@@ -181,9 +186,9 @@ export class PostgresAdapter implements Adapter {
   }
 
   async *streamSelect(node: any, model: any, _opts?: ExecOpts): AsyncIterable<any> {
-    const { compileSelect } = await import('./compile-from-ir');
+    const { compileSelect } = compileIr;
     const a = compileSelect(node, model);
-    const { decodeWideIntegers } = await import('../shared/wide-int');
+    const { decodeWideIntegers } = wideInt;
     if (this.driver.stream) {
       for await (const r of this.driver.stream(a.sql, a.params)) yield decodeWideIntegers(model, r);
     } else {
@@ -193,13 +198,13 @@ export class PostgresAdapter implements Adapter {
   }
 
   async *streamSelectBatches(node: any, model: any, opts?: ExecOpts & { batchSize?: number }): AsyncIterable<any[]> {
-    const { compileSelect } = await import('./compile-from-ir');
-    const { decodeWideIntegerRows } = await import('../shared/wide-int');
+    const { compileSelect } = compileIr;
+    const { decodeWideIntegerRows } = wideInt;
     const a = compileSelect(node, model);
     const size = opts?.batchSize ?? 1000;
     const session = opts?.session as { query?: (s: string, p?: unknown[]) => Promise<{ rows: any[] }> } | undefined;
     if (session?.query) {
-      const { cursorBatches } = await import('./driver');
+      const { cursorBatches } = driverMod;
       for await (const rows of cursorBatches(session as any, a.sql, a.params, size)) yield decodeWideIntegerRows(model, rows);
       return;
     }
@@ -265,17 +270,17 @@ export class PostgresAdapter implements Adapter {
   }
 
   async $queryRaw(fragment: import('../../raw-sql').SqlFragment, opts?: ExecOpts): Promise<any[]> {
-    const { compileSqlFragment } = await import('../../raw-sql');
+    const { compileSqlFragment } = rawSql;
     const { sql, params } = compileSqlFragment(fragment, 'postgres');
-    const { withPgErrors } = await import('./errors');
+    const { withPgErrors } = errorsMod;
     const { rows } = await withPgErrors(() => this.handle(opts).query(sql, params));
     return rows;
   }
 
   async $executeRaw(fragment: import('../../raw-sql').SqlFragment, opts?: ExecOpts): Promise<number> {
-    const { compileSqlFragment } = await import('../../raw-sql');
+    const { compileSqlFragment } = rawSql;
     const { sql, params } = compileSqlFragment(fragment, 'postgres');
-    const { withPgErrors } = await import('./errors');
+    const { withPgErrors } = errorsMod;
     const { rowCount } = await withPgErrors(() => this.handle(opts).query(sql, params));
     return rowCount ?? 0;
   }

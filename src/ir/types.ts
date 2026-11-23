@@ -26,6 +26,9 @@ export const PARTITION_ROW_ALIAS = '__forge_rn';
 
 /** SQL alias prefix of a `_count` relation subquery column; the executor folds it into `_count`. */
 export const COUNT_ALIAS_PREFIX = '__forge_count_';
+/** A relation loaded inside the parent's own SELECT (Postgres) arrives as JSON in this column. */
+export const JSON_REL_ALIAS_PREFIX = '__forge_rel_';
+export const JSON_ORD_ALIAS = '__forge_ord';
 
 export interface SelectNode {
   kind: 'select';
@@ -64,6 +67,9 @@ export interface InsertNode {
   /** The caller needs only the count (createMany): an executor may skip
    *  RETURNING or the read-back that would hand the rows over. */
   countOnly?: boolean;
+  /** Set by an executor whose driver reports the inserted-row count without
+   *  RETURNING (DuckDB's built-in driver). */
+  driverReportsCount?: boolean;
 }
 
 export interface UpdateNode {
@@ -94,6 +100,8 @@ export interface UpdateNode {
    * column. Optional; absent for plain update / upsert calls.
    */
   semantic?: 'softDelete' | 'softDeleteMany' | 'restore' | 'restoreMany';
+  /** updateMany on a driver that reports changed rows: no RETURNING. */
+  countOnly?: boolean;
 }
 
 export interface DeleteNode {
@@ -102,6 +110,8 @@ export interface DeleteNode {
   where: WhereTree;
   many: boolean;
   returning?: ProjectionPlan;
+  /** deleteMany on a driver that reports changed rows: no RETURNING. */
+  countOnly?: boolean;
 }
 
 export interface CountNode {

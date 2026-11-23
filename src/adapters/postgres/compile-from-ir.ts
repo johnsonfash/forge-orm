@@ -10,7 +10,8 @@ import type {
   UpdateNode,
   WhereTree,
 } from '../../ir/types';
-import { COUNT_ALIAS_PREFIX, PARTITION_ROW_ALIAS } from '../../ir/types';
+import { COUNT_ALIAS_PREFIX, JSON_ORD_ALIAS, JSON_REL_ALIAS_PREFIX, PARTITION_ROW_ALIAS } from '../../ir/types';
+import type { RelationPlan } from '../../ir/types';
 import type { SQLArtifact } from '../../compile';
 import type { FieldDef, ModelDef } from '../../schema/types';
 import { rowLockSql } from '../row-lock';
@@ -443,6 +444,133 @@ function compileRelationCountCols(ctx: CompileCtx, counts: string[] | undefined)
   return cols.join(', ');
 }
 
+// ─── Includes inside the parent's SELECT (Postgres) ──────────────────────────
+//
+// A relation whose rows JSON can carry without loss is loaded by a correlated
+// subquery in the parent's own select list, so a three-level include is one
+// round trip instead of four:
+//
+//   (SELECT coalesce(json_agg(t ORDER BY t."__forge_ord"), '[]'::json) FROM (
+//      SELECT j1.<cols>, <its own nested relations>, ROW_NUMBER() OVER (ORDER BY …) AS "__forge_ord"
+//      FROM posts j1 WHERE j1.author_id = users.id AND <nested where> ORDER BY … LIMIT n OFFSET m
+//   ) t) AS "__forge_rel_posts"
+//
+// The ROW_NUMBER carries the include's order through json_agg, which would
+// otherwise only usually keep it. 64-bit integers and numerics are sent as
+// text (a JSON number would round them); timestamps arrive as ISO text and are
+// decoded by the executor. A relation holding bytes, geography or vector
+// columns, or using distinct / cursor / a distance sort, keeps the query per
+// level.
+
+const JSON_SAFE_KINDS = new Set([
+  'id', 'objectId', 'string', 'text', 'int', 'float', 'decimal', 'uuid', 'bigint', 'bool',
+  'dateTime', 'json', 'enum', 'embed', 'embedMany', 'stringArray', 'intArray',
+]);
+
+function relTarget(rel: RelationPlan, schemaOverride?: Record<string, ModelDef<any>>): ModelDef<any> | undefined {
+  return schemaOverride?.[rel.target] ?? ((schema as any)[rel.target] as ModelDef<any> | undefined);
+}
+
+export function selectedFields(model: ModelDef<any>, plan: ProjectionPlan | undefined): string[] {
+  const all = Object.keys(model.fields);
+  if (!plan) return all;
+  if (plan.exclusive && plan.fields.length) return plan.fields.filter((f) => model.fields[f] != null);
+  if (plan.omit?.length) { const drop = new Set(plan.omit); return all.filter((f) => !drop.has(f)); }
+  return all;
+}
+
+/** Whether `rel` (and everything it includes) can be loaded as JSON in the parent's SELECT. */
+export function jsonRelationEligible(
+  parent: ModelDef<any>,
+  rel: RelationPlan,
+  schemaOverride?: Record<string, ModelDef<any>>,
+): boolean {
+  const target = relTarget(rel, schemaOverride);
+  if (!target) return false;
+  const n = (rel.nested ?? {}) as Partial<SelectNode>;
+  if (n.distinct?.length || n.cursor || n.lock || n.partitionBy) return false;
+  if (n.orderBy?.some((e) => e.nearTo || e.agg)) return false;
+  if (rel.kind === 'one' && (n.limit != null || n.offset != null)) return false;
+  if (hasGeoOp(n.where)) return false;
+  const owning = rel.kind === 'one' && parent.fields[rel.on] != null;
+  if (owning ? target.fields[rel.refs] == null : target.fields[rel.on] == null) return false;
+  for (const f of selectedFields(target, n.projection)) {
+    if (!JSON_SAFE_KINDS.has((target.fields[f] as FieldDef).kind)) return false;
+  }
+  return (n.hydration ?? []).every((h) => jsonRelationEligible(target, h, schemaOverride));
+}
+
+function hasGeoOp(w: WhereTree | undefined): boolean {
+  if (!w) return false;
+  switch (w.kind) {
+    case 'leaf': return w.op === 'near' || w.op === 'withinPolygon';
+    case 'and': case 'or': return w.children.some(hasGeoOp);
+    case 'not': return hasGeoOp(w.child);
+    default: return false;
+  }
+}
+
+function jsonColumnExpr(d: Dialect, table: string, name: string, fd: FieldDef): string {
+  const col = `${table}.${d.quoteIdent(name)}`;
+  const wide = fd.kind === 'bigint' || fd.kind === 'decimal' || (fd.kind === 'id' && (fd as any).idType === 'bigserial');
+  return wide ? `${col}::text AS ${d.quoteIdent(name)}` : col;
+}
+
+function compileJsonRelationCols(ctx: CompileCtx, hydration: RelationPlan[] | undefined): string {
+  if (ctx.d.name !== 'postgres' || !hydration?.length) return '';
+  const cols: string[] = [];
+  for (const rel of hydration) {
+    if (!jsonRelationEligible(ctx.model, rel, ctx.schemaOverride)) continue;
+    cols.push(`${compileJsonRelation(ctx, rel)} AS ${ctx.d.quoteIdent(JSON_REL_ALIAS_PREFIX + rel.name)}`);
+  }
+  return cols.join(', ');
+}
+
+function compileJsonRelation(ctx: CompileCtx, rel: RelationPlan): string {
+  const d = ctx.d;
+  const target = relTarget(rel, ctx.schemaOverride)!;
+  const n = (rel.nested ?? {}) as Partial<SelectNode>;
+  ctx.aliasCount.n += 1;
+  const alias = d.quoteIdent(`j${ctx.aliasCount.n}`);
+  const sub: CompileCtx = { ...ctx, model: target, table: alias };
+
+  const parts = selectedFields(target, n.projection).map((f) => jsonColumnExpr(d, alias, f, target.fields[f] as FieldDef));
+  const counts = compileRelationCountCols(sub, n.projection?.counts);
+  if (counts) parts.push(counts);
+  const nestedRels = compileJsonRelationCols(sub, n.hydration);
+  if (nestedRels) parts.push(nestedRels);
+
+  const owning = rel.kind === 'one' && ctx.model.fields[rel.on] != null;
+  const join = owning
+    ? `${alias}.${d.quoteIdent(rel.refs)} = ${ctx.table}.${d.quoteIdent(rel.on)}`
+    : `${alias}.${d.quoteIdent(rel.on)} = ${ctx.table}.${d.quoteIdent(rel.refs)}`;
+  const w = compileWhere(sub, n.where);
+  const where = `WHERE ${join}${w ? ` AND ${w}` : ''}`;
+  const order = compileOrder(d, alias, n.orderBy, target);
+
+  if (rel.kind === 'one') {
+    const inner = `SELECT ${parts.join(', ')} FROM ${d.quoteIdent(target.collection)} ${alias} ${where} LIMIT 1`;
+    return `(SELECT row_to_json(${d.quoteIdent('t')}) FROM (${inner}) ${d.quoteIdent('t')})`;
+  }
+  const ord = d.quoteIdent(JSON_ORD_ALIAS);
+  const t = d.quoteIdent('t');
+  // The aggregate sorts by the include's own columns when they are all in
+  // the row; a ROW_NUMBER carries the order otherwise.
+  const selected = new Set(selectedFields(target, n.projection));
+  const byColumns = !!order && (n.orderBy ?? []).every((e) => selected.has(e.field));
+  if (order && !byColumns) parts.push(`ROW_NUMBER() OVER (${order}) AS ${ord}`);
+  const page = [
+    n.limit != null ? `LIMIT ${Number(n.limit)}` : '',
+    n.offset != null ? `OFFSET ${Number(n.offset)}` : '',
+  ].filter(Boolean).join(' ');
+  const inner = [`SELECT ${parts.join(', ')} FROM ${d.quoteIdent(target.collection)} ${alias}`, where, order, page]
+    .filter(Boolean).join(' ');
+  const agg = !order ? `json_agg(${t})`
+    : byColumns ? `json_agg(${t} ${compileOrder(d, t, n.orderBy, target)})`
+      : `json_agg(${t} ORDER BY ${t}.${ord})`;
+  return `(SELECT coalesce(${agg}, '[]'::json) FROM (${inner}) ${t})`;
+}
+
 function notEmpty(s: string): boolean {
   return s.length > 0;
 }
@@ -558,6 +686,8 @@ export function compileSelect(
   let cols = compileProjectionCols(dialect, table, m, node.projection);
   const counts = compileRelationCountCols(ctx, node.projection?.counts);
   if (counts) cols = `${cols}, ${counts}`;
+  const rels = compileJsonRelationCols(ctx, node.hydration);
+  if (rels) cols = `${cols}, ${rels}`;
   const distinctClause = node.distinct?.length
     ? `DISTINCT ON (${node.distinct.map((f) => `${table}.${dialect.quoteIdent(f)}`).join(', ')}) `
     : '';
@@ -728,7 +858,8 @@ export function compileInsert(
   const onConflict = node.skipDuplicates ? ' ON CONFLICT DO NOTHING' : '';
   // Postgres and SQLite report the count without RETURNING; DuckDB and SQL
   // Server read it from the returned rows, so they keep the clause.
-  const countOnly = node.countOnly && (dialect.name === 'postgres' || dialect.name === 'sqlite');
+  const countOnly = node.countOnly && (dialect.name === 'postgres' || dialect.name === 'sqlite'
+    || (dialect.name === 'duckdb' && node.driverReportsCount === true));
   const returning = countOnly ? '' : node.returning?.exclusive && node.returning.fields.length
     ? ` RETURNING ${node.returning.fields.map((f) => dialect.quoteIdent(f)).join(', ')}`
     : ' RETURNING *';
@@ -1038,9 +1169,10 @@ export function compileUpdate(
   // For updateOne (many=false) the statement is constrained to one row by
   // primary key — see singleRowWhere, and why it is not `ctid`.
   const finalWhere = node.many ? whereClause : singleRowWhere(dialect, m, table, where, node.where);
-  const returning = node.returning?.exclusive && node.returning.fields.length
-    ? ` RETURNING ${node.returning.fields.map((f) => dialect.quoteIdent(f)).join(', ')}`
-    : ' RETURNING *';
+  const returning = manyCountOnly(node, dialect) ? ''
+    : node.returning?.exclusive && node.returning.fields.length
+      ? ` RETURNING ${node.returning.fields.map((f) => dialect.quoteIdent(f)).join(', ')}`
+      : ' RETURNING *';
 
   const sql = `UPDATE ${table} SET ${setParts.join(', ')} ${finalWhere}${returning}`;
   return { kind: 'sql', dialect: dialect.name, sql, params };
@@ -1059,8 +1191,19 @@ export function compileDelete(
   const where = compileWhere(ctx, node.where);
   const whereClause = where ? `WHERE ${where}` : '';
   const finalWhere = node.many ? whereClause : singleRowWhere(dialect, m, table, where, node.where);
-  const sql = `DELETE FROM ${table} ${finalWhere} RETURNING *`;
+  const sql = `DELETE FROM ${table} ${finalWhere}${manyCountOnly(node, dialect) ? '' : ' RETURNING *'}`;
   return { kind: 'sql', dialect: dialect.name, sql, params };
+}
+
+// updateMany / deleteMany hand back a count and nothing else, and Postgres and
+// SQLite report it without RETURNING, so the rows are neither sent nor
+// decoded. DuckDB does too, but only through a driver that says so
+// (`countOnly`, set by its executor); SQL Server and MySQL rewrite the tail
+// themselves.
+function manyCountOnly(node: UpdateNode | DeleteNode, d: Dialect): boolean {
+  if (!node.many) return false;
+  if (d.name === 'postgres' || d.name === 'sqlite') return true;
+  return d.name === 'duckdb' && node.countOnly === true;
 }
 
 // Helper: collect column names from a where tree's eq leaves (used to guess

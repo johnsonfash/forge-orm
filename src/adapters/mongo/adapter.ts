@@ -1,4 +1,5 @@
 import { clearDefaultClient, DatabaseClient, setDefaultClient } from './client';
+import * as compileIr from './compile-from-ir';
 import type { Adapter, AdapterCapabilities, DoctorReport, ExecOpts } from '../types';
 import { ForgeEmitter } from '../../events';
 import { isDriverInstalled } from '../missing-driver';
@@ -10,6 +11,7 @@ import {
   executeInsert,
   executeSelect,
   executeUpdate,
+  executeSelectWithChildPresence,
 } from './execute';
 import { coerceCreatePayload, decodeRow } from './coerce';
 import { applyCascadesForDelete as mongoCascade } from './cascade';
@@ -151,10 +153,18 @@ export class MongoAdapter implements Adapter {
       (r) => r.length);
   }
 
+  selectWithChildPresence(
+    node: any, model: any,
+    probes: Array<{ collection: string; on: string; refs: string; scope?: string }>,
+    opts?: ExecOpts,
+  ) {
+    return executeSelectWithChildPresence(node, model, probes, this.mongoOpts(opts));
+  }
+
   // Native streaming via Mongo's cursor.stream(): compile the IR SelectNode
   // into a cursor and yield each document, decoded via the row decoder.
   async *streamSelect(node: any, model: any, opts?: ExecOpts): AsyncIterable<any> {
-    const { compileSelect } = await import('./compile-from-ir');
+    const { compileSelect } = compileIr;
     const a: any = compileSelect(node, model);
     const coll = this._client.db.collection(model.collection);
     const cursor = coll.find(a.args.filter, {
@@ -166,12 +176,15 @@ export class MongoAdapter implements Adapter {
     }
   }
   async *streamSelectBatches(node: any, model: any, opts?: ExecOpts & { batchSize?: number }): AsyncIterable<any[]> {
-    const { compileSelect } = await import('./compile-from-ir');
+    const { compileSelect } = compileIr;
     const a: any = compileSelect(node, model);
     const cursor = this._client.db.collection(model.collection).find(a.args.filter, {
       ...a.args.options,
       session: this.mongoOpts(opts).session,
-      batchSize: opts?.batchSize ?? 1000,
+      // Without a chunkSize the server's own batching applies (101 documents,
+      // then up to 16 MiB per getMore), which is bounded and takes far fewer
+      // round trips than a fixed 1000.
+      ...(opts?.batchSize ? { batchSize: opts.batchSize } : {}),
     });
     try {
       // hasNext() fetches the next server batch when the buffer is empty;

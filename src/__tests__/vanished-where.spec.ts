@@ -80,7 +80,7 @@ describe('a filter whose every value is undefined is refused', () => {
 describe('what must keep working', () => {
   test('no `where` at all still means every row — that is how you say it', () => {
     expect(sql(compileDelete(buildDelete('a', Acct, { many: true } as never), Acct)))
-      .toBe('DELETE FROM "accounts"  RETURNING *');
+      .toBe('DELETE FROM "accounts" ');
   });
 
   test('an explicitly empty `where: {}` also still means every row', () => {

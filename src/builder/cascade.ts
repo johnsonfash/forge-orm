@@ -50,6 +50,15 @@ export function hasCascadeWork(models: Models, modelKey: string): boolean {
   return childRelations(models, modelKey).length > 0;
 }
 
+/**
+ * One probe per child relation of `modelKey`, in the walker's order: "does
+ * any row of this child point at the rows being deleted". Fed to an adapter's
+ * `selectWithChildPresence`, and its answer back to `applyCascades`.
+ */
+export function cascadeProbes(models: Models, modelKey: string): Array<{ collection: string; on: string; refs: string }> {
+  return childRelations(models, modelKey).map((c) => ({ collection: c.child.collection, on: c.rel.on, refs: c.rel.refs }));
+}
+
 /** The parent columns the walker reads off each row about to be deleted. */
 export function cascadeKeyFields(models: Models, modelKey: string, model: ModelDef<any>): string[] {
   const out = new Set<string>([pkField(model)]);
@@ -80,15 +89,18 @@ export async function applyCascades(
   modelKey: string,
   model: ModelDef<any>,
   rows: Record<string, unknown>[],
+  /** Per child relation (cascadeProbes order): false = no child row, skip it. */
+  present?: boolean[],
 ): Promise<void> {
   const ctx: WalkCtx = { adapter, session, models, visited: new Set() };
   for (const r of rows) ctx.visited.add(`${modelKey}:${String(r[pkField(model)])}`);
-  await walk(ctx, modelKey, rows);
+  await walk(ctx, modelKey, rows, present);
 }
 
-async function walk(ctx: WalkCtx, parentKey: string, rows: Record<string, unknown>[]): Promise<void> {
+async function walk(ctx: WalkCtx, parentKey: string, rows: Record<string, unknown>[], present?: boolean[]): Promise<void> {
   if (rows.length === 0) return;
-  const rels = childRelations(ctx.models, parentKey);
+  const all = childRelations(ctx.models, parentKey);
+  const rels = present ? all.filter((_, i) => present[i] !== false) : all;
   if (rels.length === 0) return;
   const opts = { session: ctx.session };
 

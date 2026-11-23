@@ -27,6 +27,7 @@ import { decodeJsonColumns } from '../shared/json-columns';
 import type { DuckdbQueryable } from './driver';
 import type { Dialect } from '../postgres/dialect';
 import { hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
+import { refineFallbackGeo } from '../shared/haversine';
 
 // Window functions are always available here, so a nested page is one query.
 const WINDOWED: WindowedPaging = { enabled: true };
@@ -52,7 +53,6 @@ export async function executeDuckdbSelect(
   if (node.distinct?.length) out = dedupeBy(out, node.distinct);
 
   // Fallback geoPoint refinement — exact-circle + sort post-process.
-  const { refineFallbackGeo } = await import('../shared/haversine');
   out = refineFallbackGeo(out, node, model);
 
   if (node.projection?.counts?.length) {
@@ -94,6 +94,32 @@ export async function executeDuckdbGroupBy(
   return rows.map((r: any) => reshapeGroupByRow(r, node.by));
 }
 
+/**
+ * The rows a cascading delete targets, plus per child relation whether any
+ * child row points at one of them: an EXISTS column per probe around the
+ * select, so the walker can skip empty relations in the same round trip.
+ */
+export async function executeDuckdbSelectWithChildPresence(
+  driver: DuckdbQueryable,
+  node: SelectNode,
+  model: ModelDef<any>,
+  probes: Array<{ collection: string; on: string; refs: string }>,
+  opts: DuckdbExecOpts = {},
+): Promise<{ rows: any[]; present: boolean[] }> {
+  const exec = opts.client ?? driver;
+  const artifact = compileSelect(node, model, opts.dialect);
+  const q = (s: string) => `"${s.replace(/"/g, '""')}"`;
+  const flags = probes.map((p, i) =>
+    `EXISTS (SELECT 1 FROM ${q(p.collection)} ${q(`p${i}`)} WHERE ${q(`p${i}`)}.${q(p.on)} = ${q('__t')}.${q(p.refs)}) AS ${q(`__forge_has_${i}`)}`);
+  const sql = `SELECT ${q('__t')}.*${flags.length ? ', ' + flags.join(', ') : ''} FROM (${artifact.sql}) ${q('__t')}`;
+  const { rows } = await withDuckdbErrors(() => exec.query(sql, artifact.params));
+  const present = probes.map(() => false);
+  for (const r of rows) {
+    probes.forEach((_, i) => { const k = `__forge_has_${i}`; if (r[k]) present[i] = true; delete r[k]; });
+  }
+  return { rows: decodeWideIntegerRows(model, decodeJsonColumns(model, rows)), present };
+}
+
 export async function executeDuckdbCount(
   driver: DuckdbQueryable,
   node: CountNode,
@@ -113,8 +139,10 @@ export async function executeDuckdbInsert(
   opts: DuckdbExecOpts = {},
 ): Promise<{ docs: any[]; count: number }> {
   const exec = opts.client ?? driver;
-  const artifact = compileInsert(node, model, opts.dialect);
+  const counted = node.countOnly && exec.reportsChangedRows === true;
+  const artifact = compileInsert(counted ? { ...node, driverReportsCount: true } : node, model, opts.dialect);
   const { rows, rowCount } = await withDuckdbErrors(() => exec.query(artifact.sql, artifact.params));
+  if (counted) return { docs: [], count: rowCount ?? 0 };
   return { docs: decodeWideIntegerRows(model, decodeJsonColumns(model, rows)), count: rowCount ?? rows.length };
 }
 
@@ -125,7 +153,8 @@ export async function executeDuckdbUpdate(
   opts: DuckdbExecOpts = {},
 ): Promise<{ doc?: any; count: number }> {
   const exec = opts.client ?? driver;
-  const artifact = compileUpdate(node, model, opts.dialect);
+  const countOnly = node.many && exec.reportsChangedRows === true;
+  const artifact = compileUpdate(countOnly ? { ...node, countOnly } : node, model, opts.dialect);
   const { rows, rowCount } = await withDuckdbErrors(() => exec.query(artifact.sql, artifact.params));
   if (node.many) return { count: rowCount ?? rows.length };
   return { doc: decodeWideIntegers(model, decodeJsonColumns(model, rows)[0]), count: rows.length };
@@ -138,7 +167,8 @@ export async function executeDuckdbDelete(
   opts: DuckdbExecOpts = {},
 ): Promise<{ doc?: any; count: number }> {
   const exec = opts.client ?? driver;
-  const artifact = compileDelete(node, model, opts.dialect);
+  const countOnly = node.many && exec.reportsChangedRows === true;
+  const artifact = compileDelete(countOnly ? { ...node, countOnly } : node, model, opts.dialect);
   const { rows, rowCount } = await withDuckdbErrors(() => exec.query(artifact.sql, artifact.params));
   if (node.many) return { count: rowCount ?? rows.length };
   return { doc: decodeWideIntegers(model, decodeJsonColumns(model, rows)[0]), count: rows.length };

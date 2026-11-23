@@ -7,6 +7,7 @@ import type { EngineImpl } from "../core";
 import { POOL, DialectCtx } from "../dialects";
 import { params, postFields, postData, userData, wid } from "../scenarios";
 import * as S from "../schema";
+import { prismaLadder } from "../ladder";
 
 export async function prismaEngine(ctx: DialectCtx): Promise<EngineImpl | { na: string }> {
   const d = ctx.dialect;
@@ -141,6 +142,9 @@ export async function prismaEngine(ctx: DialectCtx): Promise<EngineImpl | { na: 
       return { fresh: fresh.count, stale: stale.count };
     },
   };
+  for (const k of Object.keys(na)) delete (ops as any)[k];
+  Object.assign(ops, prismaLadder(db, T, d));
+  if (d === "sqlite") na.json_fts_rel = "Prisma has no full-text or JSON path filter on SQLite";
   for (const k of Object.keys(na)) delete (ops as any)[k];
   return { ops, na, countsOwnQueries: viaEvent, close: () => db.$disconnect() };
 }

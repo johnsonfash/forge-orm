@@ -97,8 +97,8 @@ describe('the substitute assignment is genuinely a no-op', () => {
 
   it('MySQL uses its own `col` = `col` idiom, NOT VALUES(col)', () => {
     // This one is the dangerous case. MySQL rewrites each assignment to
-    // `col = VALUES(col)` so the upsert reuses the INSERT's values —
-    // correct for a real update, catastrophic for the no-op, because
+    // `col = VALUES(col)` (it no longer does for a real update) — and for
+    // the no-op that is catastrophic, because
     // VALUES(`id`) is the id the INSERT proposed. On conflict that
     // silently replaces the existing row's primary key with a freshly
     // generated uuid, and every foreign key pointing at it goes stale.
@@ -107,9 +107,11 @@ describe('the substitute assignment is genuinely a no-op', () => {
     expect(sql).not.toMatch(/VALUES\(`id`\)/);
   });
 
-  it('MySQL still rewrites a REAL assignment to VALUES(col)', () => {
-    const sql = mysqlCompileUpdate(upsertNode({ name: 'B' }), User as never).sql;
-    expect(sql).toContain('ON DUPLICATE KEY UPDATE `name` = VALUES(`name`)');
+  it('MySQL assigns the UPDATE value on a conflict, not the one the INSERT proposed', () => {
+    const a = mysqlCompileUpdate(upsertNode({ name: 'B' }), User as never);
+    expect(a.sql).toMatch(/ON DUPLICATE KEY UPDATE `name` = \?$/);
+    expect(a.sql).not.toMatch(/VALUES\(`name`\)/);
+    expect(a.params[a.params.length - 1]).toBe('B');
   });
 });
 

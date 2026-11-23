@@ -1,4 +1,7 @@
 import type { Adapter, AdapterCapabilities, DoctorReport, ExecOpts } from '../types';
+import * as rawSql from '../../raw-sql';
+import * as execMod from './execute';
+import * as compileIr from './compile-from-ir';
 import { ForgeEmitter } from '../../events';
 import { isDriverInstalled, loadDriver } from '../missing-driver';
 import {
@@ -124,7 +127,7 @@ export class MysqlAdapter implements Adapter {
     semanticOp?: ExecOpts['semanticOp'],
   ): Promise<T> {
     if (!this.emitter.hasListeners()) return exec();
-    const c = await import('./compile-from-ir');
+    const c = compileIr;
     const a =
       op === 'select'  ? c.compileSelect(node, model)  :
       op === 'count'   ? c.compileCount(node, model)   :
@@ -169,8 +172,8 @@ export class MysqlAdapter implements Adapter {
   }
 
   async *streamSelect(node: any, model: any, _opts?: ExecOpts): AsyncIterable<any> {
-    const { compileSelect } = await import('./compile-from-ir');
-    const { decodeRow } = await import('./execute');
+    const { compileSelect } = compileIr;
+    const { decodeRow } = execMod;
     const a = compileSelect(node, model);
     if (this.driver.stream) {
       for await (const row of this.driver.stream(a.sql, a.params)) yield decodeRow(model, row);
@@ -181,8 +184,8 @@ export class MysqlAdapter implements Adapter {
   }
 
   async *streamSelectBatches(node: any, model: any, opts?: ExecOpts & { batchSize?: number }): AsyncIterable<any[]> {
-    const { compileSelect } = await import('./compile-from-ir');
-    const { decodeRow } = await import('./execute');
+    const { compileSelect } = compileIr;
+    const { decodeRow } = execMod;
     const a = compileSelect(node, model);
     const size = opts?.batchSize ?? 1000;
     const dec = (rows: any[]) => { for (let i = 0; i < rows.length; i++) rows[i] = decodeRow(model, rows[i]); return rows; };
@@ -208,7 +211,7 @@ export class MysqlAdapter implements Adapter {
   async applyProjectionAndHydration(): Promise<void> { /* executor does it */ }
 
   async $queryRaw(fragment: import('../../raw-sql').SqlFragment, opts?: ExecOpts): Promise<any[]> {
-    const { compileSqlFragment } = await import('../../raw-sql');
+    const { compileSqlFragment } = rawSql;
     const { sql, params } = compileSqlFragment(fragment, 'mysql');
     const exec = this.handle(opts);
     const [rows] = await withMysqlErrors(() => exec.query(sql, params));
@@ -216,7 +219,7 @@ export class MysqlAdapter implements Adapter {
   }
 
   async $executeRaw(fragment: import('../../raw-sql').SqlFragment, opts?: ExecOpts): Promise<number> {
-    const { compileSqlFragment } = await import('../../raw-sql');
+    const { compileSqlFragment } = rawSql;
     const { sql, params } = compileSqlFragment(fragment, 'mysql');
     const exec = this.handle(opts);
     const [result]: any = await withMysqlErrors(() => exec.execute(sql, params));

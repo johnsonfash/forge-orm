@@ -18,6 +18,7 @@ import { fromDriverBytes, isBytesInput, toBytes } from '../../bytes';
 export interface DuckdbDriver {
   readonly kind: Extract<AdapterKind, 'duckdb'>;
   query(sql: string, params?: unknown[]): Promise<DuckdbQueryResult>;
+  reportsChangedRows?: boolean;
   /** Begin a transaction. Caller invokes the callback with a queryable
    *  bound to the transaction; resolves on commit, rejects on rollback. */
   transaction<T>(fn: (qc: DuckdbQueryable) => Promise<T>): Promise<T>;
@@ -26,6 +27,9 @@ export interface DuckdbDriver {
 
 export interface DuckdbQueryable {
   query(sql: string, params?: unknown[]): Promise<DuckdbQueryResult>;
+  /** True when `rowCount` is the changed-row count for a write without
+   *  RETURNING. updateMany / deleteMany then skip RETURNING *. */
+  reportsChangedRows?: boolean;
 }
 
 /**
@@ -132,6 +136,11 @@ function unwrapBlobs(row: Record<string, unknown>): Record<string, unknown> {
 export function duckdbDriver(connection: any): DuckdbDriver {
   const runQuery = async (sql: string, params?: unknown[]) => {
     const result = await connection.run(sql, coerceParams(params));
+    // An INSERT / UPDATE / DELETE with no RETURNING has no rows to read, and
+    // getRowObjects() would throw for it: report the changed-row count.
+    if (result?.returnType === 1 /* CHANGED_ROWS */ && 'rowsChanged' in result) {
+      return { rows: [], rowCount: Number(result.rowsChanged) };
+    }
     try {
       const rows = await result.getRowObjects();
       return {
@@ -147,10 +156,11 @@ export function duckdbDriver(connection: any): DuckdbDriver {
   return {
     kind: 'duckdb',
     query: runQuery,
+    reportsChangedRows: true,
     async transaction(fn) {
       await connection.run('BEGIN TRANSACTION');
       try {
-        const out = await fn({ query: runQuery });
+        const out = await fn({ query: runQuery, reportsChangedRows: true });
         await connection.run('COMMIT');
         return out;
       } catch (err) {

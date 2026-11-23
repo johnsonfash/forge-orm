@@ -122,7 +122,7 @@ export function extractFallbackGeoOps(
 
 /** True when the select carries a fallback-mode geo filter or nearTo sort. */
 export function hasFallbackGeo(node: SelectNode, model: ModelDef<any> | undefined): boolean {
-  if (!model) return false;
+  if (!model || !modelHasFallbackGeo(model)) return false;
   const ops = extractFallbackGeoOps(node, model);
   return !!(ops.near || ops.nearTo || ops.withinPolygon);
 }
@@ -134,12 +134,23 @@ export function hasFallbackGeo(node: SelectNode, model: ModelDef<any> | undefine
  * page off and it is applied here, after the circle test and the sort.
  */
 export function refineFallbackGeo<T>(rows: T[], node: SelectNode, model: ModelDef<any>): T[] {
+  if (!modelHasFallbackGeo(model)) return rows;
   const ops = extractFallbackGeoOps(node, model);
   if (!(ops.near || ops.nearTo || ops.withinPolygon)) return rows;
   const out = applyHaversinePostFilter(rows, ops.near, ops.nearTo, ops.withinPolygon);
   if (node.limit == null && node.offset == null) return out;
   const start = node.offset ?? 0;
   return out.slice(start, node.limit != null ? start + node.limit : undefined);
+}
+
+const fallbackGeoModels = new WeakMap<object, boolean>();
+function modelHasFallbackGeo(model: ModelDef<any>): boolean {
+  let v = fallbackGeoModels.get(model);
+  if (v === undefined) {
+    v = Object.values(model.fields).some((f: any) => f?.kind === 'geoPoint' && f.geo?.fallback);
+    fallbackGeoModels.set(model, v);
+  }
+  return v;
 }
 
 function walkWhere(tree: any, cb: (leaf: any) => void): void {

@@ -147,6 +147,17 @@ export interface Adapter {
   // (adapters/<kind>/execute.ts) flow through here so CollectionWrapper stays
   // adapter-agnostic at runtime.
   executeSelect(node: any, model: any, opts?: ExecOpts): Promise<any[]>;
+  /**
+   * The rows a cascading delete is about to remove, and for each probe
+   * whether any child row points at one of them, in one round trip. Optional:
+   * the walker then skips the relations with nothing to do, and the whole
+   * transaction when none has.
+   */
+  selectWithChildPresence?(
+    node: any, model: any,
+    probes: Array<{ collection: string; on: string; refs: string; scope?: string }>,
+    opts?: ExecOpts,
+  ): Promise<{ rows: any[]; present: boolean[] }>;
   executeCount(node: any, model: any, opts?: ExecOpts): Promise<number>;
   executeGroupBy(node: any, model: any, opts?: ExecOpts): Promise<any[]>;
   executeInsert(node: any, model: any, opts?: ExecOpts): Promise<{ docs: any[]; count: number }>;

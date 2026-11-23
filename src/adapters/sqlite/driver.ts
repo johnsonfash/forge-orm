@@ -19,17 +19,34 @@ export interface SqliteDriver {
 }
 
 // ─── better-sqlite3 (synchronous; the default driver) ───────────────────────
+// Statements are cached by SQL text: preparing one costs more than running a
+// point lookup. A cached statement that is busy (an open iterate()) is never
+// reused, and DDL clears the cache, so a statement never outlives the schema
+// it was prepared against.
+const STMT_CACHE_MAX = 256;
 export function betterSqlite3Driver(db: any): SqliteDriver {
+  const cache = new Map<string, any>();
+  const prepare = (sql: string): any => {
+    let st = cache.get(sql);
+    if (st !== undefined) {
+      if (!st.busy) return st;
+      return db.prepare(sql);
+    }
+    st = db.prepare(sql);
+    if (cache.size >= STMT_CACHE_MAX) cache.delete(cache.keys().next().value as string);
+    cache.set(sql, st);
+    return st;
+  };
   return {
     kind: 'sqlite',
-    all: async (sql, params) => db.prepare(sql).all(...params),
-    get: async (sql, params) => db.prepare(sql).get(...params),
+    all: async (sql, params) => prepare(sql).all(...params),
+    get: async (sql, params) => prepare(sql).get(...params),
     run: async (sql, params) => {
-      const r = db.prepare(sql).run(...params);
+      const r = prepare(sql).run(...params);
       return { changes: r.changes, lastInsertRowid: r.lastInsertRowid };
     },
-    exec: async (sql) => { db.exec(sql); },
-    close: async () => { db.close?.(); },
+    exec: async (sql) => { cache.clear(); db.exec(sql); },
+    close: async () => { cache.clear(); db.close?.(); },
     iterate: (sql, params) => db.prepare(sql).iterate(...params),
   };
 }

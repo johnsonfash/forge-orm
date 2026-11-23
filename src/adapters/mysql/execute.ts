@@ -22,6 +22,7 @@ import { rowDecoder, parseJsonText, type Convert } from '../shared/row-decoder';
 import { buildSelect, buildWhereTree } from '../../ir/build';
 import { fromDriverBytes } from '../../bytes';
 import { hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
+import { refineFallbackGeo } from '../shared/haversine';
 
 // MySQL 8 and MariaDB 10.2 number rows per parent with ROW_NUMBER(); 5.7 has
 // no window functions and answers with a syntax error. The first such error
@@ -102,7 +103,6 @@ export async function executeMysqlSelect(
   let out = decodeRows(model, rows as any[]);
   if (node.distinct?.length) out = dedupeBy(out, node.distinct);
   // Fallback geoPoint refinement — bbox prefilter → exact circle + sort.
-  const { refineFallbackGeo } = await import('../shared/haversine');
   out = refineFallbackGeo(out, node, model);
   if (node.projection?.counts?.length) liftRelationCounts(out, node.projection.counts);
   if (node.hydration?.length) await hydrate(pool, opts, out, model, node.hydration);

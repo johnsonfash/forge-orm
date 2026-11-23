@@ -28,6 +28,7 @@ const MSSQL_JSON = { arrays: true };
 import type { MssqlQueryable } from './driver';
 import type { Dialect } from '../postgres/dialect';
 import { hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
+import { refineFallbackGeo } from '../shared/haversine';
 
 // Window functions are always available here, so a nested page is one query.
 const WINDOWED: WindowedPaging = { enabled: true };
@@ -52,7 +53,6 @@ export async function executeMssqlSelect(
   if (node.distinct?.length) out = dedupeBy(out, node.distinct);
 
   // Fallback geoPoint refinement — exact-circle + sort post-process.
-  const { refineFallbackGeo } = await import('../shared/haversine');
   out = refineFallbackGeo(out, node, model);
 
   if (node.projection?.counts?.length) {

@@ -8,6 +8,7 @@ import type { DialectCtx } from "../dialects";
 import { params, postData, userData, wid } from "../scenarios";
 import * as S from "../schema";
 import { frag, PLACEHOLDERS as Q, sqlClient, Sql } from "./sql";
+import { rawLadder } from "../ladder";
 
 export const USER_COLS = "id, email, name, role, active, created_at, prefs";
 export const POST_COLS = "id, author_id, title, body, status, views, version, published_at, created_at, meta";
@@ -236,7 +237,8 @@ export async function rawEngine(ctx: DialectCtx): Promise<EngineImpl> {
       return { fresh, stale };
     },
   };
-  if (!ctx.features.tx) { na.tx_interactive = na.tx_rollback = "no transactions on this server"; }
+  Object.assign(ops, rawLadder({ c, d, F, Q, T, USER_COLS, POST_COLS, userVals, postVals }));
+  if (!ctx.features.tx) { na.tx_interactive = na.tx_rollback = na.tx_mixed = "no transactions on this server"; }
   for (const k of Object.keys(na)) delete (ops as any)[k];
   return { ops, na, close: async () => {} };
 }

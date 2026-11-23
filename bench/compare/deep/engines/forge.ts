@@ -5,6 +5,7 @@ import type { EngineImpl } from "../core";
 import type { DialectCtx } from "../dialects";
 import { params, postData, postFields, userData, wid } from "../scenarios";
 import * as S from "../schema";
+import { forgeLadder } from "../ladder";
 
 export async function forgeEngine(ctx: DialectCtx, db: any = ctx.forge): Promise<EngineImpl> {
   const P = params(ctx.sizes);
@@ -133,6 +134,8 @@ export async function forgeEngine(ctx: DialectCtx, db: any = ctx.forge): Promise
       return { fresh: fresh.count, stale: stale.count };
     },
   };
+  Object.assign(ops, forgeLadder(db, T));
+  if (!ctx.features.tx) na.tx_mixed = na.tx_interactive;
   for (const k of Object.keys(na)) delete (ops as any)[k];
   return { ops, na, close: async () => {} };
 }

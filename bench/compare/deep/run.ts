@@ -12,7 +12,14 @@ import * as fs from "fs";
 import * as path from "path";
 import { counted, DIALECTS, Dialect, EngineImpl, EngineName, ENGINES, now, RT, stable, summarize, uncounted } from "./core";
 import { DialectCtx, openDialect } from "./dialects";
-import { SCENARIOS, Scenario } from "./scenarios";
+import { SCENARIOS as BASE, Scenario } from "./scenarios";
+import { LADDER } from "./ladder";
+
+// The ladder rungs sit with their kind, after the original catalogue.
+const SCENARIOS: Scenario[] = [
+  ...BASE.filter((s) => s.kind === "read"), ...LADDER.filter((s) => s.kind === "read"),
+  ...BASE.filter((s) => s.kind === "write"), ...LADDER.filter((s) => s.kind === "write"),
+];
 import { EngineResult, ScenarioResult, RunResult, writeReport } from "./report";
 import { runCapture } from "./capture";
 

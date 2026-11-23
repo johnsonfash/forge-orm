@@ -189,7 +189,8 @@ describe('PG compile — UPDATE', () => {
     const a = compileUpdate(buildUpdate('user', User, {
       where: { active: false }, data: { active: true }, many: true,
     }), User);
-    expect(a.sql).toMatch(/UPDATE "users" SET "active" = \$1 WHERE "users"\."active" = \$2 RETURNING/);
+    // A count is all updateMany returns, and rowCount carries it: no RETURNING.
+    expect(a.sql).toBe('UPDATE "users" SET "active" = $1 WHERE "users"."active" = $2');
     expect(a.params).toEqual([true, false]);
   });
 
@@ -224,7 +225,7 @@ describe('PG compile — DELETE', () => {
 
   it('deleteMany emits flat WHERE', () => {
     const a = compileDelete(buildDelete('user', User, { where: { active: false }, many: true }), User);
-    expect(a.sql).toMatch(/DELETE FROM "users" WHERE "users"\."active" = \$1 RETURNING \*/);
+    expect(a.sql).toBe('DELETE FROM "users" WHERE "users"."active" = $1');
     expect(a.params).toEqual([false]);
   });
 });

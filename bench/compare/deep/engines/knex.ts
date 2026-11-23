@@ -7,6 +7,7 @@ import { POOL, DialectCtx } from "../dialects";
 import { params, postData, userData, wid } from "../scenarios";
 import * as S from "../schema";
 import { frag } from "./sql";
+import { knexLadder, kyselyLadder } from "../ladder";
 import { USER_COLS, POST_COLS } from "./raw";
 
 export async function knexEngine(ctx: DialectCtx): Promise<EngineImpl | { na: string }> {
@@ -197,6 +198,8 @@ export async function knexEngine(ctx: DialectCtx): Promise<EngineImpl | { na: st
       return { fresh, stale };
     },
   };
+  for (const key of Object.keys(na)) delete (ops as any)[key];
+  Object.assign(ops, knexLadder({ k, d, F, T, U, uVals, pVals, affected, upsert }));
   for (const key of Object.keys(na)) delete (ops as any)[key];
   return { ops, na, close: () => k.destroy() };
 }

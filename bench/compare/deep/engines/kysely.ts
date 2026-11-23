@@ -7,6 +7,7 @@ import { POOL, DialectCtx } from "../dialects";
 import { params, postData, userData, wid } from "../scenarios";
 import * as S from "../schema";
 import { frag } from "./sql";
+import { knexLadder, kyselyLadder } from "../ladder";
 import { USER_COLS, POST_COLS } from "./raw";
 
 export async function kyselyEngine(ctx: DialectCtx): Promise<EngineImpl | { na: string }> {
@@ -223,5 +224,7 @@ export async function kyselyEngine(ctx: DialectCtx): Promise<EngineImpl | { na: 
   for (const k of Object.keys(na)) delete (ops as any)[k];
   // Kysely's destroy() would end the pg / mysql2 pools it was handed, which
   // belong to the dialect context; only the dialects it owns are torn down.
+  Object.assign(ops, kyselyLadder({ db, sql, d, F, T, lim, frg, jsonArrayFrom, jsonObjectFrom, uVals, pVals, n0, upsert, cols, USER_COLS }));
+  for (const key of Object.keys(na)) delete (ops as any)[key];
   return { ops, na, close: async () => { if (ms) await db.destroy(); } };
 }

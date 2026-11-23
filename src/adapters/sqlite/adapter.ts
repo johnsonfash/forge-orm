@@ -1,4 +1,7 @@
 import type { Adapter, AdapterCapabilities, DoctorReport, ExecOpts } from '../types';
+import * as rawSql from '../../raw-sql';
+import * as execMod from './execute';
+import * as compileIr from './compile-from-ir';
 import { TxQueue } from '../shared/tx-queue';
 import { ForgeEmitter } from '../../events';
 import { isDriverInstalled, loadDriver } from '../missing-driver';
@@ -114,7 +117,7 @@ export class SqliteAdapter implements Adapter {
     semanticOp?: ExecOpts['semanticOp'],
   ): Promise<T> {
     if (!this.emitter.hasListeners()) return exec();
-    const c = await import('./compile-from-ir');
+    const c = compileIr;
     const a =
       op === 'select'  ? c.compileSelect(node, model)  :
       op === 'count'   ? c.compileCount(node, model)   :
@@ -161,8 +164,8 @@ export class SqliteAdapter implements Adapter {
   // Stream via the driver's native cursor when it exposes one (better-sqlite3
   // stmt.iterate()); otherwise materialise via all() — still one yield per row.
   async *streamSelect(node: any, model: any, _opts?: ExecOpts): AsyncIterable<any> {
-    const { compileSelect } = await import('./compile-from-ir');
-    const { decodeRow } = await import('./execute');
+    const { compileSelect } = compileIr;
+    const { decodeRow } = execMod;
     const a = compileSelect(node, model);
     if (this.db.iterate) {
       for await (const row of this.db.iterate(a.sql, a.params)) yield decodeRow(model, row);
@@ -173,8 +176,8 @@ export class SqliteAdapter implements Adapter {
   }
 
   async *streamSelectBatches(node: any, model: any, opts?: ExecOpts & { batchSize?: number }): AsyncIterable<any[]> {
-    const { compileSelect } = await import('./compile-from-ir');
-    const { decodeRow } = await import('./execute');
+    const { compileSelect } = compileIr;
+    const { decodeRow } = execMod;
     const a = compileSelect(node, model);
     const size = opts?.batchSize ?? 500;
     if (!this.db.iterate) {
@@ -214,14 +217,14 @@ export class SqliteAdapter implements Adapter {
   async applyProjectionAndHydration(): Promise<void> { /* no-op; executor does it */ }
 
   async $queryRaw(fragment: import('../../raw-sql').SqlFragment, opts?: ExecOpts): Promise<any[]> {
-    const { compileSqlFragment } = await import('../../raw-sql');
+    const { compileSqlFragment } = rawSql;
     const { sql, params } = compileSqlFragment(fragment, 'sqlite');
     const exec = (opts?.session as SqliteDriver | undefined) ?? this.db;
     return withSqliteErrors(() => exec.all(sql, params));
   }
 
   async $executeRaw(fragment: import('../../raw-sql').SqlFragment, opts?: ExecOpts): Promise<number> {
-    const { compileSqlFragment } = await import('../../raw-sql');
+    const { compileSqlFragment } = rawSql;
     const { sql, params } = compileSqlFragment(fragment, 'sqlite');
     const exec = (opts?.session as SqliteDriver | undefined) ?? this.db;
     const r = await withSqliteErrors(() => exec.run(sql, params));

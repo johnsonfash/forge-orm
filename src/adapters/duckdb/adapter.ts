@@ -1,4 +1,7 @@
 import type { Adapter, AdapterCapabilities, DoctorReport, ExecOpts } from '../types';
+import * as errorsMod from './errors';
+import * as rawSql from '../../raw-sql';
+import * as compileIr from './compile-from-ir';
 import { TxQueue } from '../shared/tx-queue';
 import { ForgeEmitter } from '../../events';
 import { isDriverInstalled, loadDriver } from '../missing-driver';
@@ -10,6 +13,7 @@ import {
   executeDuckdbSelect,
   executeDuckdbUpdate,
   type DuckdbExecOpts,
+  executeDuckdbSelectWithChildPresence,
 } from './execute';
 import { duckdbDriver, type DuckdbDriver, type DuckdbQueryable } from './driver';
 import { duckdbFtsDialect } from './dialect';
@@ -150,7 +154,7 @@ export class DuckdbAdapter implements Adapter {
   ): Promise<T> {
     if (!this.emitter.hasListeners()) return exec();
     const { compileSelect, compileCount, compileGroupBy, compileInsert, compileUpdate, compileDelete } =
-      await import('./compile-from-ir');
+      compileIr;
     const artifact =
       op === 'select'  ? compileSelect(node, model, dialect)  :
       op === 'count'   ? compileCount(node, model, dialect)   :
@@ -169,6 +173,12 @@ export class DuckdbAdapter implements Adapter {
     return this._track('select', node, model,
       () => executeDuckdbSelect(this.handle(opts), node, model, this.duckdbOpts(opts, d)),
       (r) => r.length, undefined, d);
+  }
+  async selectWithChildPresence(
+    node: any, model: any, probes: Array<{ collection: string; on: string; refs: string }>, opts?: ExecOpts,
+  ) {
+    const d = await this.dialectFor(node, model, opts);
+    return executeDuckdbSelectWithChildPresence(this.handle(opts), node, model, probes, this.duckdbOpts(opts, d));
   }
   async executeCount(node: any, model: any, opts?: ExecOpts) {
     const d = await this.dialectFor(node, model, opts);
@@ -233,17 +243,17 @@ export class DuckdbAdapter implements Adapter {
   }
 
   async $queryRaw(fragment: import('../../raw-sql').SqlFragment, opts?: ExecOpts): Promise<any[]> {
-    const { compileSqlFragment } = await import('../../raw-sql');
+    const { compileSqlFragment } = rawSql;
     const { sql, params } = compileSqlFragment(fragment, 'postgres');
-    const { withDuckdbErrors } = await import('./errors');
+    const { withDuckdbErrors } = errorsMod;
     const { rows } = await withDuckdbErrors(() => this.handle(opts).query(sql, params));
     return rows;
   }
 
   async $executeRaw(fragment: import('../../raw-sql').SqlFragment, opts?: ExecOpts): Promise<number> {
-    const { compileSqlFragment } = await import('../../raw-sql');
+    const { compileSqlFragment } = rawSql;
     const { sql, params } = compileSqlFragment(fragment, 'postgres');
-    const { withDuckdbErrors } = await import('./errors');
+    const { withDuckdbErrors } = errorsMod;
     const { rowCount } = await withDuckdbErrors(() => this.handle(opts).query(sql, params));
     return rowCount ?? 0;
   }

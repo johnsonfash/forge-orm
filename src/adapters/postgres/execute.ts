@@ -16,10 +16,13 @@ import {
   compileInsert,
   compileSelect,
   compileUpdate,
+  jsonRelationEligible,
 } from './compile-from-ir';
+import { JSON_ORD_ALIAS, JSON_REL_ALIAS_PREFIX } from '../../ir/types';
 import { withPgErrors } from './errors';
 import { decodeWideIntegerRows, decodeWideIntegers } from '../shared/wide-int';
 import { hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
+import { refineFallbackGeo } from '../shared/haversine';
 
 // Postgres IR executor — wires SQLArtifacts to a pg pool.
 //
@@ -55,16 +58,74 @@ export async function executePgSelect(
   // orderBy references a fallback-mode geo column, the SQL emitted a bbox
   // prefilter only (over-inclusive). Refine to the exact circle + annotate
   // _distanceMeters in app.
-  const { refineFallbackGeo } = await import('../shared/haversine');
   out = refineFallbackGeo(out, node, model);
 
   if (node.projection?.counts?.length) {
     liftRelationCounts(out, node.projection.counts);
   }
   if (node.hydration?.length) {
-    await hydrate(exec, out, model, node.hydration);
+    const rest = liftJsonRelations(out, model, node.hydration);
+    if (rest.length) await hydrate(exec, out, model, rest);
   }
   return out;
+}
+
+// The relations compileSelect loaded as JSON columns: decode them onto each
+// row and hand back the ones still to load per level.
+function liftJsonRelations(rows: any[], model: ModelDef<any>, hydration: RelationPlan[]): RelationPlan[] {
+  const rest: RelationPlan[] = [];
+  for (const rel of hydration) {
+    if (!jsonRelationEligible(model, rel)) { rest.push(rel); continue; }
+    const key = JSON_REL_ALIAS_PREFIX + rel.name;
+    const target = (schema as any)[rel.target] as ModelDef<any>;
+    for (const r of rows) {
+      let v = r[key];
+      delete r[key];
+      if (typeof v === 'string') v = JSON.parse(v);
+      if (rel.kind === 'one') r[rel.name] = v == null ? null : decodeJsonRow(target, rel, v);
+      else {
+        const list = v ?? [];
+        for (let i = 0; i < list.length; i++) list[i] = decodeJsonRow(target, rel, list[i]);
+        r[rel.name] = list;
+      }
+    }
+  }
+  return rest;
+}
+
+const JSON_FLOATS: Record<string, number> = { NaN: NaN, Infinity: Infinity, '-Infinity': -Infinity };
+const jsonDecodePlans = new WeakMap<object, Array<[string, (v: any) => any]>>();
+
+function jsonDecodePlan(model: ModelDef<any>): Array<[string, (v: any) => any]> {
+  let plan = jsonDecodePlans.get(model);
+  if (plan) return plan;
+  plan = [];
+  for (const [name, f] of Object.entries(model.fields)) {
+    const kind = (f as { kind: string }).kind;
+    if (kind === 'dateTime') {
+      plan.push([name, (v) => (typeof v !== 'string' ? v
+        : v === 'infinity' ? Infinity : v === '-infinity' ? -Infinity : new Date(v))]);
+    } else if (kind === 'float') {
+      plan.push([name, (v) => (typeof v === 'string' && v in JSON_FLOATS ? JSON_FLOATS[v] : v)]);
+    }
+  }
+  jsonDecodePlans.set(model, plan);
+  return plan;
+}
+
+function decodeJsonRow(model: ModelDef<any>, rel: RelationPlan, row: any): any {
+  const plan = jsonDecodePlan(model);
+  for (let i = 0; i < plan.length; i++) {
+    const [k, c] = plan[i];
+    const v = row[k];
+    if (v != null) row[k] = c(v);
+  }
+  if (JSON_ORD_ALIAS in row) delete row[JSON_ORD_ALIAS];
+  row = decodeWideIntegers(model, row);
+  const n = rel.nested;
+  if (n?.projection?.counts?.length) liftRelationCounts([row], n.projection.counts);
+  if (n?.hydration?.length) liftJsonRelations([row], model, n.hydration);
+  return row;
 }
 
 
