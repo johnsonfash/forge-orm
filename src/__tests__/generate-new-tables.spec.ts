@@ -32,10 +32,10 @@ const Post = model('blog_posts', {
 const User = model('blog_users', { id: f.id({ type: 'uuid' }) }) as unknown as ModelDef<any>;
 
 const schema = { blogComment: Comment, blogPost: Post, blogUser: User };
-const empty = { kind: 'postgres' as const, tables: [] };
+const empty = (kind: string) => ({ kind, tables: [] }) as never;
 
-describe('generate: new tables', () => {
-  const ups = generateMigration(schema, empty as never).map((p) => p.up);
+describe('generate: new tables (postgres)', () => {
+  const ups = generateMigration(schema, empty('postgres')).map((p) => p.up);
 
   it('a foreign key references the physical table, not the schema key', () => {
     const fks = ups.filter((u) => u.includes('FOREIGN KEY'));
@@ -58,6 +58,34 @@ describe('generate: new tables', () => {
     const create = ups.find((u) => u.startsWith('CREATE TABLE IF NOT EXISTS "blog_posts"'))!;
     expect(create).toMatch(/"title" text NOT NULL/);
     expect(create).toMatch(/"subtitle" text,/);
+  });
+});
+
+// `forge generate` writes SQL for postgres, mysql and sqlite (Mongo has no DDL
+// to version; DuckDB and MSSQL use push). The same schema must come out right
+// on all three.
+describe('generate: new tables (mysql)', () => {
+  const ups = generateMigration(schema, empty('mysql')).map((p) => p.up);
+
+  it('foreign keys reference the physical tables, after every CREATE TABLE', () => {
+    const fks = ups.filter((u) => u.includes('FOREIGN KEY'));
+    expect(fks).toHaveLength(2);
+    expect(fks[0]).toContain('REFERENCES `blog_posts`');
+    expect(fks[1]).toContain('REFERENCES `blog_users`');
+    const lastCreate = Math.max(...ups.map((u, i) => (u.startsWith('CREATE TABLE') ? i : -1)));
+    expect(ups.findIndex((u) => u.includes('FOREIGN KEY'))).toBeGreaterThan(lastCreate);
+    expect(ups.join('\n')).not.toMatch(/blog(Post|User)/);
+  });
+});
+
+describe('generate: new tables (sqlite)', () => {
+  const ups = generateMigration(schema, empty('sqlite')).map((p) => p.up);
+
+  it('the inline foreign keys reference the physical tables', () => {
+    const create = ups.find((u) => /CREATE TABLE[^(]*"blog_comments"/.test(u))!;
+    expect(create).toContain('REFERENCES "blog_posts"');
+    expect(create).toContain('REFERENCES "blog_users"');
+    expect(ups.join('\n')).not.toMatch(/blog(Post|User)/);
   });
 });
 
