@@ -269,7 +269,12 @@ export function expectedFromSchema(schema: Record<string, any>): {
 
 // Coarse categories so type comparison survives dialect quirks. Returns
 // undefined for shapes we can't confidently categorise — then we don't flag.
-export function fieldCategory(kind: string): string | undefined {
+// Pass the field itself where you have it: a `bigserial` id is an integer
+// column, and judged by its kind alone it read as text, so `forge diff`
+// reported drift on every table with one (schema=string db=bigint).
+export function fieldCategory(kindOrField: string | { kind: string; idType?: string }): string | undefined {
+  const kind = typeof kindOrField === 'string' ? kindOrField : kindOrField.kind;
+  if (typeof kindOrField !== 'string' && kind === 'id' && kindOrField.idType === 'bigserial') return 'bigint';
   switch (kind) {
     case 'id': case 'objectId': case 'string': case 'text': case 'uuid': case 'enum': return 'string';
     case 'int': return 'int';
@@ -325,7 +330,7 @@ export function diffIntrospection(
         const ac = actCols.get(col);
         if (!ac) { items.push({ kind: 'column', direction: 'missing', table: name, detail: `column '${col}'` }); continue; }
         if (checkTypes) {
-          const ec = fieldCategory(fd.kind);
+          const ec = fieldCategory(fd);
           const dc = dbTypeCategory(ac.type);
           if (ec && dc && ec !== dc) {
             items.push({ kind: 'columnType', direction: 'mismatch', table: name, detail: `column '${col}': schema=${ec} db=${ac.type}` });

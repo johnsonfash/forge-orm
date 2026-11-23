@@ -61,6 +61,16 @@ export function generateMigration(
   const pairs: MigrationPair[] = [];
   const actualTables = new Map(actual.tables.map((t) => [t.name, t]));
 
+  // The DDL for the WHOLE schema, built once. A new table's statements are taken
+  // from it rather than from that model on its own, because a foreign key needs
+  // the other model to resolve its physical table name: built alone, a relation
+  // to the schema key 'userRoles' came out as REFERENCES "userRoles" instead of
+  // "user_roles". Dialects whose statements carry no `table` fall back below.
+  const wholeDDL = buildDDLFor(kind, schema as Record<string, unknown>);
+  // Foreign keys of new tables wait until every new table exists, so one may
+  // point at a table that sorts later in the schema.
+  const newTableFks: MigrationPair[] = [];
+
   for (const key of Object.keys(schema)) {
     const m = schema[key] as ModelDef<any> | undefined;
     if (!m || m.view) continue;
@@ -77,9 +87,16 @@ export function generateMigration(
     // is not: the file is the only record, and a migration whose `up` is
     // a comment applies cleanly and creates nothing.
     if (!act) {
-      const ddl = buildDDLFor(kind, { [key]: m } as Record<string, unknown>);
+      const own = wholeDDL.filter((s) => (s as { table?: string }).table === m.collection);
+      const ddl = own.length > 0
+        // CREATE TABLE already carries every column and its nullability; the
+        // push-style ADD COLUMN IF NOT EXISTS / DROP NOT NULL repeats are noise
+        // in a migration file that only ever runs against a database without
+        // the table.
+        ? own.filter((s) => s.kind !== 'column' && s.kind !== 'nullability')
+        : buildDDLFor(kind, { [key]: m } as Record<string, unknown>);
       for (const stmt of ddl) {
-        pairs.push({
+        (stmt.kind === 'foreignKey' ? newTableFks : pairs).push({
           up: stmt.sql,
           // Dropping the table takes its indexes and constraints with it,
           // so only the table statement needs a reverse.
@@ -265,6 +282,8 @@ export function generateMigration(
       });
     }
   }
+
+  pairs.push(...newTableFks);
 
   // Extra tables the schema dropped → DROP TABLE (down can't recreate them).
   const schemaCollections = new Set(

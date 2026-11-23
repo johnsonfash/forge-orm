@@ -123,7 +123,11 @@ export function diffColumn(
   field: FieldDef,
   actual: IntrospectedColumn,
 ): ColumnChange | null {
-  const declaredType = d.columnType(field).toLowerCase();
+  // `bigserial` / `serial` are CREATE TABLE shorthand: the column a database
+  // reports is `bigint` / `integer` with a sequence default. Compare that, or every
+  // auto-numbered id reads as a type change.
+  const declaredType = d.columnType(field).toLowerCase()
+    .replace(/^bigserial$/, 'bigint').replace(/^serial$/, 'integer');
   const actualType = (actual.type ?? '').toLowerCase();
   const typeChanged =
     actualType !== '' &&

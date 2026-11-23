@@ -76,13 +76,35 @@ function ensureTsNodeRegistered(): void {
   }
 }
 
-function importSchemaModule(absPath: string): any {
-  if (absPath.endsWith('.ts') || absPath.endsWith('.tsx') ||
-      absPath.endsWith('.mts') || absPath.endsWith('.cts')) {
-    ensureTsNodeRegistered();
+// The consumer's own tsx, if they have it. tsx resolves `./users.model.js` to
+// `./users.model.ts`, which is how every NodeNext / "type": "module" project writes
+// its imports, and which neither ts-node's CommonJS mode nor Node's own type
+// stripping understand: a schema split across files failed to load with
+// "Cannot find module .../users.model.js". Resolved from the project, never bundled.
+function consumerTsxRequire(): ((id: string, from: string) => any) | undefined {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const api = require(require.resolve('tsx/cjs/api', { paths: [process.cwd()] }));
+    return typeof api?.require === 'function' ? api.require : undefined;
+  } catch {
+    return undefined;
   }
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const mod = require(absPath);
+}
+
+function isTypeScript(absPath: string): boolean {
+  return /\.(ts|tsx|mts|cts)$/.test(absPath);
+}
+
+function importSchemaModule(absPath: string): any {
+  let mod: any;
+  const tsxRequire = isTypeScript(absPath) ? consumerTsxRequire() : undefined;
+  if (tsxRequire) {
+    mod = tsxRequire(absPath, __filename);
+  } else {
+    if (isTypeScript(absPath)) ensureTsNodeRegistered();
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    mod = require(absPath);
+  }
   if (mod?.schema) return mod.schema;
   if (mod?.default?.schema) return mod.default.schema;
   if (mod?.default && typeof mod.default === 'object' && !Array.isArray(mod.default)) {

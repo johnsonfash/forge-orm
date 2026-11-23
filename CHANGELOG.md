@@ -4,6 +4,33 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.23.2 — `forge generate` foreign keys, NodeNext schemas, bigserial drift
+
+**A new table's foreign key referenced the schema KEY, not the table.**
+`forge generate` built each new table's SQL from that one model on its own,
+so a relation could not look up the model it points at and fell back to the
+key: `rel.one('userRoles', …)` came out as `REFERENCES "userRoles"` when the
+table is `user_roles`, and the migration failed on apply. It only showed when
+a key and its table name differ. New tables now take their statements from
+the whole schema's DDL.
+
+**Foreign keys of new tables now come after every new table**, so a key may
+point at a model declared later in the schema.
+
+**A new table no longer repeats its columns.** The push-style
+`ADD COLUMN IF NOT EXISTS` and `DROP NOT NULL` lines that followed every
+`CREATE TABLE` in a generated file are gone; `CREATE TABLE` already says it.
+
+**The CLI loads a schema written with NodeNext imports.** A schema split
+across files that imports `./users.model.js` (how every `"type": "module"`
+TypeScript project writes it) failed with "Cannot find module". The CLI now
+loads TypeScript through the project's own `tsx` when installed, and falls
+back to `ts-node` as before.
+
+**`forge diff` no longer reports every `bigserial` id as drift**
+(`schema=string db=bigint`), and `diff apply` no longer plans a type change
+for it.
+
 ## 2.23.1 — JSON over postgres.js, and the CLI without pg or dotenv
 
 **A JSON value written through a model over postgres.js was stored as a

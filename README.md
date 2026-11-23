@@ -3013,10 +3013,12 @@ If the scan finds more than one candidate (e.g. a real schema + a fixture
 schema in `examples/`), forge prints both paths and asks you to disambiguate
 via `package.json` or `--schema=`.
 
-TypeScript schemas are loaded with `ts-node` registered in **transpile-only**
-mode under the hood, so push runs in milliseconds even on schemas with dozens
-of models (no full type-check at push time — the consumer's own build catches
-type errors separately).
+TypeScript schemas are loaded with the project's own `tsx` when it has one,
+which follows NodeNext-style imports (`./users.model.js` resolving to
+`./users.model.ts`), and otherwise with `ts-node` registered in
+**transpile-only** mode. Either way nothing is type-checked at load time, so
+every command starts in milliseconds; the consumer's own build catches type
+errors.
 
 `forge:diff:apply` writes a timestamped SQL file with an `up` and a `down`
 section into a `migrations/` folder and records it in a `_forge_migrations`
