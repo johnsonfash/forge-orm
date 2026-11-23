@@ -22,6 +22,7 @@ adapter-specific and described below.
 * [List column ops — `push`, `addToSet`, `pull`](#list-column-ops--push-addtoset-pull)
 * [`set` vs `unset`](#set-vs-unset)
 * [Nested writes](#nested-writes)
+* [Writes that return nothing — `select: false`](#writes-that-return-nothing--select-false)
 * [`createMany` + `skipDuplicates`](#createmany--skipduplicates)
 * [Returning shape](#returning-shape)
 * [Idempotency](#idempotency)
@@ -859,6 +860,31 @@ deleting the row, `set` replaces the entire set of linked rows with the
 listed ones, `connectOrCreate` is the lookup-or-make pattern in one
 shape.
 
+Inside `update`, `update` / `updateMany` / `upsert` / `delete` /
+`deleteMany` on a relation reach **this parent's** children only: the
+child's foreign key is added to the filter you give. (Before 2.26.0
+`update`, `updateMany` and `upsert` were accepted and ignored, and
+`delete` / `deleteMany` matched the filter alone, so
+`posts: { deleteMany: {} }` emptied the whole table.)
+
+```ts
+await db.user.update({
+  where: { id: 'u1' },
+  data: {
+    posts: {
+      update: [{ where: { id: 'p1' }, data: { title: 'Edited' } }],
+      upsert: [{ where: { id: 'p9' }, create: { id: 'p9', title: 'New' }, update: { views: 0 } }],
+      deleteMany: { views: { lt: 10 } },          // only u1's posts
+    },
+  },
+});
+```
+
+They run in Prisma's order: creates and connects, then `update` /
+`updateMany` / `upsert`, then `delete` / `deleteMany`, so a delete filter
+sees the rows as the updates left them. On a to-one relation `update`
+takes the data itself or `{ where?, data }`.
+
 ### Write order and transactionality
 
 A `create` or `update` carrying nested writes runs inside one transaction
@@ -985,7 +1011,12 @@ What you can read back after a write, per dialect:
 | `upsert`          | row      | row*  | row            | row    | row   | row                    |
 
 \* MySQL does the second `SELECT` to materialise the row, so it is one
-logical call but two statements.
+logical call but two statements (one round trip with a
+`multipleStatements` pool; none with [`select: false`](#writes-that-return-nothing--select-false)).
+
+`updateMany`, `deleteMany` and `createMany` take their count from the
+driver: since 2.26.0 they send no `RETURNING` on Postgres, SQLite and
+DuckDB (the built-in DuckDB driver; a custom one keeps `RETURNING`).
 
 You can shape the returned row with `select` or `include`, the same way
 reads do:
@@ -1007,8 +1038,48 @@ On Postgres / SQLite / DuckDB the `select` narrows the `RETURNING` list.
 On MSSQL it narrows the `OUTPUT INSERTED.*` list. On MySQL it narrows
 the follow-up `SELECT`. On Mongo `select` becomes a projection.
 
-`include` always does a second query (or a Mongo `$lookup`) — relations
-do not come back through `RETURNING`.
+Relations do not come back through `RETURNING`, so a write with
+`include` (or a relation or `_count` in `select`) reads the written row
+back through the normal read path: on Postgres that is one query for the
+row and all its relations, elsewhere one query per relation level. A
+`delete` reads its relations **before** the row goes. (Before 2.26.0 the
+SQL dialects returned these writes without their relations at all.)
+
+## Writes that return nothing — `select: false`
+
+New in 2.27.0. `create`, `update`, `upsert` and `delete` accept
+`select: false`: the write happens and the call resolves to `null`,
+without the row being read back.
+
+```ts
+await db.post.update({ where: { id }, data: { views: { increment: 1 } }, select: false });
+await db.user.upsert({ where: { email }, create: { email, name }, update: { name }, select: false });
+await db.session.delete({ where: { id }, select: false });
+await db.event.create({ data: { kind: 'login' }, select: false });
+```
+
+What it saves:
+
+| dialect | without | with `select: false` |
+|---|---|---|
+| Postgres, SQLite, DuckDB | `RETURNING *`, every column decoded | no `RETURNING`; the driver's row count |
+| MySQL / MariaDB | the write plus a `SELECT` (2 round trips) | the write only (1) |
+| Mongo | `findOneAndUpdate` / `findOneAndDelete` | `updateOne` / `deleteOne` |
+
+A miss still throws `P2025`, and `updateFirst` / `deleteFirst` still
+return `null` for it. On MySQL a match that changes nothing (writing the
+value the row already has) is still a match: forge reads "Rows matched"
+rather than `affectedRows`, which counts changed rows only.
+
+An `update` with nested writes still needs the parent's key; when the
+`where` names it by value (`{ id: 'u1' }`) and every nested write hangs off
+that key, it is taken from the `where` and the parent is not read either.
+
+On MySQL a write that **does** return the row is two statements. If your
+pool is created with `multipleStatements: true`, forge sends them as one
+round trip (`UPDATE …; SELECT …`). forge never turns that option on
+itself: it also lets one query string carry several statements, which is
+only safe if no SQL anywhere in your app is built by concatenation.
 
 ---
 

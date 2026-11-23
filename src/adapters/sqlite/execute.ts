@@ -18,7 +18,7 @@ import {
   compileUpdate,
 } from './compile-from-ir';
 import { withSqliteErrors } from './errors';
-import { rowDecoder, parseJsonText, type Convert } from '../shared/row-decoder';
+import { rowDecoder, parseJsonText, parseIsoDate, type Convert } from '../shared/row-decoder';
 import type { SqliteDriver } from './driver';
 import { fromDriverBytes } from '../../bytes';
 import { hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
@@ -43,7 +43,7 @@ export interface SqliteExecOpts {
 // re-hydrate at the executor edge to the schema's JS types.
 const decodePlans = new WeakMap<object, any>();
 const toBool = (v: any) => v === 1 || v === true;
-const toDate = (v: any) => (typeof v === 'string' ? new Date(v) : v);
+const toDate = parseIsoDate;
 function sqliteConvert(kind: string): Convert | null {
   switch (kind) {
     // better-sqlite3 / mysql2 hand back a Buffer, the wasm build a
@@ -175,7 +175,7 @@ export async function executeSqliteUpdate(
 ): Promise<{ doc?: any; count: number }> {
   const exec = opts.db ?? db;
   const artifact = compileUpdate(node, model);
-  if (node.many) {
+  if (node.many || node.noReturn) {
     const r = await withSqliteErrors(() => exec.run(artifact.sql, encodeParams(artifact.params)));
     return { count: r.changes };
   }
@@ -191,7 +191,7 @@ export async function executeSqliteDelete(
 ): Promise<{ doc?: any; count: number }> {
   const exec = opts.db ?? db;
   const artifact = compileDelete(node, model);
-  if (node.many) {
+  if (node.many || node.noReturn) {
     const r = await withSqliteErrors(() => exec.run(artifact.sql, encodeParams(artifact.params)));
     return { count: r.changes };
   }

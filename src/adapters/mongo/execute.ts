@@ -242,9 +242,25 @@ const RELATION_KEYS_INLINE_MAX = 10_000;
  * inline is left as a relation filter, which the pipeline path then answers
  * with $lookup, so the result never depends on which way it went.
  */
-async function resolveRelationFilters(model: ModelDef<any>, tree: WhereTree, opts: ExecOpts): Promise<WhereTree> {
+async function resolveRelationFilters(model: ModelDef<any>, tree: WhereTree, opts: ExecOpts, restrict?: unknown[]): Promise<WhereTree> {
   switch (tree.kind) {
-    case 'and':
+    case 'and': {
+      // A `none` / `every` / `isNot` filter is answered by the keys it EXCLUDES,
+      // which without a bound means grouping the whole child collection. When
+      // the rest of the AND narrows the parents to a few keys, those keys bound
+      // the child lookup instead (raw Mongo code does the same by hand).
+      const neg = (c: WhereTree) => c.kind === 'relation' && (c.mode === 'none' || c.mode === 'every' || c.mode === 'isNot');
+      const rest = await Promise.all(tree.children.filter((c) => !neg(c)).map((c) => resolveRelationFilters(model, c, opts)));
+      const negs = tree.children.filter(neg) as Extract<WhereTree, { kind: 'relation' }>[];
+      if (negs.length === 0) return { kind: 'and', children: rest };
+      const bound = rest.length ? await parentKeys(model, { kind: 'and', children: rest }, negs, opts) : null;
+      const resolved = await Promise.all(negs.map((c) => {
+        const rel = model.relations()[c.relation];
+        const field = rel && model.fields[rel.on] != null ? rel.on : rel?.refs;
+        return resolveRelationFilters(model, c, opts, field && bound ? bound.get(field) : undefined);
+      }));
+      return { kind: 'and', children: [...rest, ...resolved] };
+    }
     case 'or':
       return { kind: tree.kind, children: await Promise.all(tree.children.map((c) => resolveRelationFilters(model, c, opts))) };
     case 'not':
@@ -267,7 +283,8 @@ async function resolveRelationFilters(model: ModelDef<any>, tree: WhereTree, opt
   const sd = tree.withDeleted ? undefined : softDeleteField(target);
   if (sd) parts.push({ kind: 'leaf', field: sd, op: 'eq', value: null });
   if (nested) parts.push(negate ? { kind: 'not', child: nested } : nested);
-  const { stages } = compileMatchStages(target, { kind: 'and', children: parts }, { [childKey]: { $ne: null } });
+  const keyMatch = restrict ? { $ne: null, $in: restrict } : { $ne: null };
+  const { stages } = compileMatchStages(target, { kind: 'and', children: parts }, { [childKey]: keyMatch });
   const keys = await mongoDb(opts)
     .collection(target.collection)
     .aggregate(
@@ -278,6 +295,35 @@ async function resolveRelationFilters(model: ModelDef<any>, tree: WhereTree, opt
   if (keys.length > RELATION_KEYS_INLINE_MAX) return { ...tree, nested };
   const found = tree.mode === 'some' || tree.mode === 'is' || (tree.mode === 'every' && !negate);
   return { kind: 'leaf', field: parentField, op: found ? 'in' : 'nin', value: keys.map((k) => k._id) };
+}
+
+// The values of the parent fields the negative relation filters join on, over
+// the parents the rest of an AND already selects: null when that is too many
+// to inline (or the rest still holds a relation filter).
+async function parentKeys(
+  model: ModelDef<any>, rest: WhereTree, negs: Extract<WhereTree, { kind: 'relation' }>[], opts: ExecOpts,
+): Promise<Map<string, unknown[]> | null> {
+  if (hasRelationFilter(rest)) return null;
+  const fields = new Set<string>();
+  for (const c of negs) {
+    const rel = model.relations()[c.relation];
+    if (rel) fields.add(model.fields[rel.on] != null ? rel.on : rel.refs);
+  }
+  if (!fields.size) return null;
+  const { stages } = compileMatchStages(model, rest);
+  const project: Record<string, 1> = {};
+  for (const f of fields) project[appKeyToDbKey(f)] = 1;
+  const docs = await mongoDb(opts).collection(model.collection)
+    .aggregate([...stages, { $project: project }, { $limit: RELATION_KEYS_INLINE_MAX + 1 }],
+      { ...(opts.session ? { session: opts.session } : {}), batchSize: RELATION_KEYS_INLINE_MAX + 1 })
+    .toArray();
+  if (docs.length > RELATION_KEYS_INLINE_MAX) return null;
+  const out = new Map<string, unknown[]>();
+  for (const f of fields) {
+    const k = appKeyToDbKey(f);
+    out.set(f, [...new Set(docs.map((d) => d[k]).filter((v) => v != null))]);
+  }
+  return out;
 }
 
 // $setWindowFields arrived in MongoDB 5.0. An older server rejects the stage
@@ -552,6 +598,12 @@ export async function executeUpdate(
       }
       return { count: await coll.countDocuments(filter, sessOpt) };
     }
+    if (artifact.op === 'findOneAndUpdate' && node.noReturn && !options.sort) {
+      // `select: false`: the write without the document coming back.
+      const { returnDocument: _r, projection: _p, ...rest } = options as any;
+      const r = await coll.updateOne(filter, update, { ...rest, ...(sessOpt ?? {}) });
+      return { count: r.matchedCount + (r.upsertedCount ?? 0) };
+    }
     if (artifact.op === 'findOneAndUpdate') {
       // Force the ModifyResult wrapper so the return shape is deterministic
       // across driver versions: v5 defaults to `{ value, ok, lastErrorObject }`,
@@ -598,6 +650,9 @@ export async function executeDelete(
   // onDelete actions run in the wrapper before this, on the same session, so
   // the delete itself is one round trip.
   try {
+    if (artifact.op === 'findOneAndDelete' && node.noReturn) {
+      return { count: (await coll.deleteOne(filter, sessOpt)).deletedCount };
+    }
     if (artifact.op === 'findOneAndDelete') {
       const raw: any = await coll.findOneAndDelete(filter, { ...(sessOpt ?? {}), includeResultMetadata: true });
       const doc = raw ? raw.value : null;

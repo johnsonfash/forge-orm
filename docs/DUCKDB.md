@@ -924,6 +924,23 @@ forge does cover). Raw SQL is the escape hatch.
 
 ---
 
+## Streaming, counts and cascades
+
+* **Pass the instance to stream natively** (2.27.0):
+  `duckdbDriver(conn, { instance })`. `findManyStream` then reads one
+  streaming result on a connection of its own, so queries and writes on the
+  main connection mid-stream cannot end it. Without the instance, or inside
+  a transaction, it pages by key. See
+  [STREAMING.md](./STREAMING.md#duckdb-and-mssql--keyset-pages).
+* **Counts come from the driver.** The built-in driver reports the changed-row
+  count (`reportsChangedRows`), so `updateMany`, `deleteMany`, `createMany`
+  and `select: false` writes send no `RETURNING`. A custom driver keeps the
+  `RETURNING` form.
+* **Cascades skip empty relations.** A `deleteMany` reads its targets with an
+  `EXISTS` column per child relation; relations with no children are skipped,
+  and with none the delete runs without a transaction. See
+  [FOREIGN-KEYS.md](./FOREIGN-KEYS.md#skipping-what-has-nothing-to-cascade-2260).
+
 ## Common errors and limitations
 
 The DuckDB adapter's `errors.ts` maps DuckDB's `errorType` and message

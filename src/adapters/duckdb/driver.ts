@@ -19,6 +19,12 @@ export interface DuckdbDriver {
   readonly kind: Extract<AdapterKind, 'duckdb'>;
   query(sql: string, params?: unknown[]): Promise<DuckdbQueryResult>;
   reportsChangedRows?: boolean;
+  /**
+   * A streaming read on a connection of its own, so a query on the main
+   * connection mid-stream cannot end it. Present when the driver was given
+   * the instance (`duckdbDriver(conn, { instance })`).
+   */
+  streamBatches?(sql: string, params?: unknown[]): AsyncIterable<any[]>;
   /** Begin a transaction. Caller invokes the callback with a queryable
    *  bound to the transaction; resolves on commit, rejects on rollback. */
   transaction<T>(fn: (qc: DuckdbQueryable) => Promise<T>): Promise<T>;
@@ -133,7 +139,8 @@ function unwrapBlobs(row: Record<string, unknown>): Record<string, unknown> {
   return copy ?? row;
 }
 
-export function duckdbDriver(connection: any): DuckdbDriver {
+export function duckdbDriver(connection: any, opts: { instance?: any } = {}): DuckdbDriver {
+  const instance = opts.instance;
   const runQuery = async (sql: string, params?: unknown[]) => {
     const result = await connection.run(sql, coerceParams(params));
     // An INSERT / UPDATE / DELETE with no RETURNING has no rows to read, and
@@ -157,6 +164,19 @@ export function duckdbDriver(connection: any): DuckdbDriver {
     kind: 'duckdb',
     query: runQuery,
     reportsChangedRows: true,
+    ...(instance && typeof instance.connect === 'function' ? {
+      async *streamBatches(sql: string, params?: unknown[]) {
+        // DuckDB ends a pending streaming result as soon as its connection
+        // runs anything else, so the stream gets a connection of its own.
+        const reader = await instance.connect();
+        try {
+          const result = await reader.stream(sql, coerceParams(params));
+          for await (const rows of result.yieldRowObjects()) yield (rows as any[]).map(unwrapBlobs);
+        } finally {
+          try { reader.closeSync?.(); } catch { /* already closed */ }
+        }
+      },
+    } : {}),
     async transaction(fn) {
       await connection.run('BEGIN TRANSACTION');
       try {

@@ -540,6 +540,10 @@ entries) and need their own indexes and policies.
 
 ## Deep includes
 
+On Postgres a whole include, every level, is one query (2.26.0); on the
+other dialects it is one query per level. See
+[N-PLUS-ONE.md](./N-PLUS-ONE.md#postgres-the-whole-include-in-one-query).
+
 `include` takes either `true` (load the relation, all columns) or an
 options object that can itself nest `include`:
 

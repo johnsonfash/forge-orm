@@ -12,7 +12,7 @@
 // Honest split: section A is what forge catches strictly; section B documents
 // the known-loose surface so callers know what they get.
 
-import { createDb, forgeSql, ForgeDbNull, f, model, rel } from './src';
+import { createDb, forgeSql, ForgeDbNull, f, model, rel, duckdbDriver } from './src';
 import type { ForgeOf, ForgeDb } from './src';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -216,6 +216,25 @@ async function _customSchemaTyping() {
   await inferred.$disconnect();
 }
 void _customSchemaTyping;
+
+// =============================================================================
+// Section D: `select: false` writes resolve to null (2.27.0); a DuckDB driver
+// built with its instance is accepted by createDb (2.27.0).
+// =============================================================================
+async function _selectFalseTyping(conn: unknown, instance: unknown) {
+  const D = model('d_things', { id: f.id({ type: 'string' }), n: f.int(), email: f.string().unique() });
+  const ddb = await createDb({ url: 'sqlite::memory:', schema: { thing: D } });
+  const u = await ddb.thing.update({ where: { id: 'a' }, data: { n: { increment: 1 } }, select: false });
+  type _D1 = Expect<Equal<typeof u, null>>;
+  const c = await ddb.thing.create({ data: { id: 'b', n: 1, email: 'x' }, select: false });
+  type _D2 = Expect<Equal<typeof c, null>>;
+  const full = await ddb.thing.update({ where: { id: 'a' }, data: { n: 2 } });
+  type _D3 = Expect<Equal<IsAny<typeof full>, false>>;
+  void full.n.toFixed;
+  const duck = await createDb({ schema: { thing: D }, driver: duckdbDriver(conn, { instance }) });
+  void duck.thing;
+}
+void _selectFalseTyping;
 
 // =============================================================================
 // Summary

@@ -157,7 +157,10 @@ export async function executeMysqlInsert(
     const [rows] = await withMysqlErrors(() => exec.query(`${a.sql} RETURNING *`, a.params));
     return { docs: (rows as any[]).map((r) => decodeRow(model, r)), count: (rows as any[]).length };
   }
-  const [result]: any = await withMysqlErrors(() => exec.execute(a.sql, a.params));
+  // A multi-row INSERT is a new statement shape for every row count, so the
+  // binary protocol pays a server-side prepare it never reuses; the text
+  // protocol (mysql2 escapes each value) skips it.
+  const [result]: any = await withMysqlErrors(() => (node.rows.length > 1 ? exec.query(a.sql, a.params) : exec.execute(a.sql, a.params)));
   if (node.countOnly) return { docs: [], count: result.affectedRows };
   // Every column's value is already known (written by us, or a literal
   // default, or the insert id): hand the rows back without reading them.
@@ -192,8 +195,20 @@ export async function executeMysqlUpdate(
 ): Promise<{ doc?: any; count: number }> {
   const exec = opts.conn ?? pool;
   const a = compileUpdate(node, model);
+  if (!node.many && !node.noReturn && (exec as { multiStatements?: boolean }).multiStatements) {
+    // One round trip: the write and its read-back as two statements of one query.
+    const sel = compileSelect(buildSelect(node.model, model, { where: irWhereToObject(node.where), take: 1 }, 'one'), model);
+    const [res]: any = await withMysqlErrors(() => exec.query(`${a.sql}; ${sel.sql}`, [...a.params, ...sel.params]));
+    const [head, rows] = res as [any, any[]];
+    if (whereHasNonEq(node.where) && head.affectedRows === 0) return { doc: undefined, count: 0 };
+    const doc = rows?.[0];
+    return { doc: doc ? decodeRow(model, doc) : undefined, count: head.affectedRows };
+  }
   const [result]: any = await withMysqlErrors(() => exec.execute(a.sql, a.params));
   if (node.many) return { count: result.affectedRows };
+  // `select: false`: no read-back. MySQL's affectedRows counts CHANGED rows,
+  // so a match that changed nothing is read off the "Rows matched" info.
+  if (node.noReturn) return { count: node.upsertCreate ? 1 : matchedRows(result) };
   // Guarded update (e.g. `col()` precondition, or any non-eq predicate): when
   // nothing changed, the row didn't match the guard → surface not-found (P2025).
   // For plain eq-by-id updates we tolerate affectedRows=0 (MySQL counts CHANGED
@@ -215,7 +230,7 @@ export async function executeMysqlDelete(
   opts: MysqlExecOpts = {},
 ): Promise<{ doc?: any; count: number }> {
   const exec = opts.conn ?? pool;
-  if (node.many) {
+  if (node.many || node.noReturn) {
     const a = compileDelete(node, model);
     const [result]: any = await withMysqlErrors(() => exec.execute(a.sql, a.params));
     return { count: result.affectedRows };
@@ -240,6 +255,11 @@ export async function executeMysqlDelete(
   // SELECT found the (unguarded) row.
   if (whereHasNonEq(node.where) && result.affectedRows === 0) return { doc: undefined, count: 0 };
   return { doc: decodeRow(model, doc), count: result.affectedRows };
+}
+
+function matchedRows(result: any): number {
+  const m = typeof result?.info === 'string' ? /Rows matched:\s*(\d+)/.exec(result.info) : null;
+  return m ? Number(m[1]) : Number(result?.affectedRows ?? 0);
 }
 
 type ColPlan = { name: string; kind: string; absent: 'null' | 'unknown' | { value: unknown }; autoInc: boolean };

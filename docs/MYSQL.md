@@ -1067,6 +1067,38 @@ which can confuse load balancers expecting graceful drains.
 
 ---
 
+## Round trips and what forge does about them
+
+MySQL has no `RETURNING`, so a write that hands back its row is the write
+plus a `SELECT`. Three ways that gets cheaper:
+
+* `select: false` on `create` / `update` / `upsert` / `delete` (2.27.0): one
+  statement, no read-back. A match that changes nothing is still a match
+  (forge reads "Rows matched", not `affectedRows`). See
+  [MUTATIONS.md](./MUTATIONS.md#writes-that-return-nothing--select-false).
+* A pool created with `multipleStatements: true`: the write and its
+  read-back go as one query (`UPDATE …; SELECT …`), one round trip. forge
+  never enables it; it is only safe if no SQL in your app is concatenated.
+* MariaDB 10.5+ takes `RETURNING` on `INSERT` and `DELETE`.
+
+Also:
+
+* **`upsert` writes the update value on a conflict** (fixed in 2.26.0). It
+  used to compile to `ON DUPLICATE KEY UPDATE col = VALUES(col)`, which is
+  the value the INSERT proposed: `create: { n: 0 }, update: { n: 11 }` left
+  `n` at 0. It is `col = ?` with the update's own value now.
+* **A filtered `DISTINCT` carries `/*+ NO_GROUP_INDEX(t) */`** (2.27.0).
+  MySQL tends to walk an index that leads with the distinct column and look
+  up every row to test the filter: 15 ms where a scan takes 2.5 on the bench
+  shape. Measured against `GROUP BY` (no better), `IGNORE INDEX` (slower
+  when the filter uses an index) and deduping in memory (28x slower on a
+  low-cardinality column), the hint was never slower when there is a
+  `WHERE`; without one the index is a loose scan and is left alone. MySQL
+  before 8.0.20 and MariaDB ignore the hint.
+* **A multi-row `INSERT` goes over the text protocol** (mysql2 escapes each
+  value). Every row count is a new statement shape, so the binary protocol
+  paid a server-side prepare it never reused.
+
 ## Common errors and fixes
 
 The full mapping lives in `src/adapters/mysql/errors.ts` and surfaces

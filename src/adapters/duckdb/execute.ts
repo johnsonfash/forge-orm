@@ -153,10 +153,10 @@ export async function executeDuckdbUpdate(
   opts: DuckdbExecOpts = {},
 ): Promise<{ doc?: any; count: number }> {
   const exec = opts.client ?? driver;
-  const countOnly = node.many && exec.reportsChangedRows === true;
+  const countOnly = (node.many || !!node.noReturn) && exec.reportsChangedRows === true;
   const artifact = compileUpdate(countOnly ? { ...node, countOnly } : node, model, opts.dialect);
   const { rows, rowCount } = await withDuckdbErrors(() => exec.query(artifact.sql, artifact.params));
-  if (node.many) return { count: rowCount ?? rows.length };
+  if (node.many || countOnly) return { count: rowCount ?? rows.length };
   return { doc: decodeWideIntegers(model, decodeJsonColumns(model, rows)[0]), count: rows.length };
 }
 
@@ -167,10 +167,10 @@ export async function executeDuckdbDelete(
   opts: DuckdbExecOpts = {},
 ): Promise<{ doc?: any; count: number }> {
   const exec = opts.client ?? driver;
-  const countOnly = node.many && exec.reportsChangedRows === true;
+  const countOnly = (node.many || !!node.noReturn) && exec.reportsChangedRows === true;
   const artifact = compileDelete(countOnly ? { ...node, countOnly } : node, model, opts.dialect);
   const { rows, rowCount } = await withDuckdbErrors(() => exec.query(artifact.sql, artifact.params));
-  if (node.many) return { count: rowCount ?? rows.length };
+  if (node.many || countOnly) return { count: rowCount ?? rows.length };
   return { doc: decodeWideIntegers(model, decodeJsonColumns(model, rows)[0]), count: rows.length };
 }
 

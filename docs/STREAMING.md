@@ -132,10 +132,22 @@ order:
 `chunkSize` sets the batch size on every path (the cursor's FETCH size on
 Postgres, the page size on the keyset path). `take` / `skip` are honoured.
 
-DuckDB's own streaming result is deliberately not used: any other
-statement on the same connection ends it **silently** — the stream just
-stops early, with no error — and a loop that writes while it reads is the
-normal shape of an export job.
+DuckDB's own streaming result ends **silently** when its connection runs
+any other statement, and a loop that writes while it reads is the normal
+shape of an export job. So since 2.27.0 DuckDB streams natively only when
+the driver is given the instance, and then on a connection of its own:
+
+```ts
+const instance = await DuckDBInstance.create('app.duckdb');
+const conn = await instance.connect();
+const db = await createDb({ schema, driver: duckdbDriver(conn, { instance }) });
+for await (const row of db.event.findManyStream({ orderBy: { id: 'asc' } })) { /* … */ }
+```
+
+One statement for the whole result, and queries or writes on the main
+connection mid-stream cannot end it. Inside `$transaction` (where only the
+transaction's connection sees its own writes), or without the instance,
+it pages by key as below.
 
 ## Per-driver internals
 
@@ -318,7 +330,8 @@ as usual.
 
 ### DuckDB and MSSQL — keyset pages
 
-Neither adapter exposes a native stream. Both use the builder-level
+MSSQL, and DuckDB without the instance (see above) or inside a
+transaction, have no native stream. Both use the builder-level
 keyset pager described above: `chunkSize` rows per statement, each page
 starting after the previous page's last sort key. An order on a nullable
 column cannot be resumed that way and falls back to OFFSET / LIMIT, which
@@ -339,8 +352,9 @@ What is actually resident in V8 heap at any moment during a stream:
 | MariaDB / PlanetScale | **full result** (no cursor today) | none |
 | SQLite (`better-sqlite3`) | current row | the open prepared statement (negligible) |
 | SQLite (libsql) | **full result** (no cursor) | none |
-| Mongo | current row + batch (`batchSize` docs, default ~101) | the cursor's BSON buffer |
-| DuckDB / MSSQL | `chunkSize` rows (default 1000), one keyset page | none |
+| Mongo | current row + the server's batch (101 docs, then up to 16 MiB; `chunkSize` caps it) | the cursor's BSON buffer |
+| DuckDB with the instance | current row + one result chunk (~2 048 rows) | the open streaming result |
+| DuckDB without it / MSSQL | `chunkSize` rows (default 1000), one keyset page | none |
 
 "Current row" is one decoded JS object plus the driver's
 connection buffer (TLS frame, TCP receive). For 1 KB rows that is

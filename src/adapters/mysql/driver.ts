@@ -10,6 +10,12 @@ import { guardMysql2Pool, guardPoolErrors } from '../pool-errors';
 export interface MysqlQueryable {
   query(sql: string, params?: unknown[]): Promise<[any, any]>;
   execute(sql: string, params?: unknown[]): Promise<[any, any]>;
+  /**
+   * True when the pool was created with `multipleStatements: true`. A single
+   * update or upsert then sends the write and its read-back in one round trip
+   * (`UPDATE …; SELECT …`) instead of two. forge never turns it on itself.
+   */
+  multiStatements?: boolean;
 }
 
 /** A connection held for the caller alone until `release()`. */
@@ -43,9 +49,12 @@ const exact = (sql: string, params?: unknown[]) =>
   (params === undefined ? { sql, supportBigNumbers: true } : { sql, values: params, supportBigNumbers: true });
 
 function exactQueryable(target: any): MysqlQueryable {
+  const cfg = target?.pool?.config?.connectionConfig ?? target?.config?.connectionConfig
+    ?? target?.connection?.config ?? target?.config;
   return {
     query: (sql, params) => target.query(exact(sql, params)),
     execute: (sql, params) => target.execute(exact(sql, params)),
+    ...(cfg?.multipleStatements === true ? { multiStatements: true } : {}),
   };
 }
 

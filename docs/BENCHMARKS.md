@@ -184,6 +184,29 @@ Neither case fails the run.
 
 ---
 
+## The deep comparison
+
+`bench/compare/deep/` compares forge with the raw driver, Prisma, Drizzle,
+Kysely and Knex on about fifty realistic scenarios per dialect, reads and
+writes, from a primary-key lookup to a transaction mixing every kind of
+write, with every engine's results checked against each other. How to run
+it, and what each scenario does, is in
+[bench/compare/README.md](../bench/compare/README.md):
+
+```sh
+BENCH_SEED=1000 BENCH_ITER=10 npm run forge:bench:deep -- --dialect=postgres
+```
+
+On a shared or busy machine the sequential run can drift by 2x between
+engines run a minute apart. `bench/compare/deep/ab.ts` runs the same
+scenarios with the engines interleaved, one iteration each in rotation, so
+noise hits all of them alike:
+
+```sh
+TZ=UTC npx ts-node --transpile-only bench/compare/deep/ab.ts --dialect=postgres \
+  --engines=raw,forge,kysely,knex --scenario=pk,include_3 --iter=100
+```
+
 ## Methodology
 
 The measurement loop is intentionally simple. Here is the exact shape, copied

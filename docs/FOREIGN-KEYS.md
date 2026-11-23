@@ -406,6 +406,20 @@ did not cascade at all).
 
 ---
 
+### Skipping what has nothing to cascade (2.26.0)
+
+Mongo and DuckDB read the rows a `deleteMany` targets together with, per
+child relation, whether any child row points at one of them: a `$limit: 1`
+`$lookup` per relation on Mongo, an `EXISTS` column per relation on DuckDB.
+Relations without children are skipped, and when none has any the delete
+is a single statement with no transaction. A single-row `delete` on DuckDB
+walks the relations directly instead: there the `EXISTS` columns join whole
+child tables, which costs more than a few indexed lookups in-process.
+
+A many-delete whose filter reads a relation deletes the rows it matched by
+their keys, because the walk has already removed or re-pointed the
+children that filter tested.
+
 ## FK and soft-delete
 
 `softDelete()` is a **verb**, not a model modifier: `db.x.delete()` is

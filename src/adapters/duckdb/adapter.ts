@@ -2,6 +2,10 @@ import type { Adapter, AdapterCapabilities, DoctorReport, ExecOpts } from '../ty
 import * as errorsMod from './errors';
 import * as rawSql from '../../raw-sql';
 import * as compileIr from './compile-from-ir';
+import { decodeWideIntegerRows } from '../shared/wide-int';
+import { decodeJsonColumns } from '../shared/json-columns';
+import { rethrowDuckdbError } from './errors';
+import { hasFallbackGeo } from '../shared/haversine';
 import { TxQueue } from '../shared/tx-queue';
 import { ForgeEmitter } from '../../events';
 import { isDriverInstalled, loadDriver } from '../missing-driver';
@@ -177,6 +181,9 @@ export class DuckdbAdapter implements Adapter {
   async selectWithChildPresence(
     node: any, model: any, probes: Array<{ collection: string; on: string; refs: string }>, opts?: ExecOpts,
   ) {
+    // A single row: the EXISTS columns join whole child tables, which costs
+    // more here than walking the relations one indexed lookup at a time.
+    if (node.cardinality === 'one') return null;
     const d = await this.dialectFor(node, model, opts);
     return executeDuckdbSelectWithChildPresence(this.handle(opts), node, model, probes, this.duckdbOpts(opts, d));
   }
@@ -205,6 +212,26 @@ export class DuckdbAdapter implements Adapter {
     return this._track('groupBy', node, model,
       () => executeDuckdbGroupBy(this.handle(opts), node, model, this.duckdbOpts(opts)),
       (r) => r.length);
+  }
+
+  /** Native streaming needs the driver's own reader connection and no transaction. */
+  streamsFor(session: unknown): boolean {
+    return !!this.driver.streamBatches && session === undefined;
+  }
+
+  async *streamSelectBatches(node: any, model: any, opts?: ExecOpts & { batchSize?: number }): AsyncIterable<any[]> {
+    const d = await this.dialectFor(node, model, opts);
+    if (hasFallbackGeo(node, model)) {
+      // The exact distance pass needs every candidate row first.
+      yield await executeDuckdbSelect(this.handle(opts), node, model, this.duckdbOpts(opts, d));
+      return;
+    }
+    const a = compileIr.compileSelect(node, model, d);
+    try {
+      for await (const rows of this.driver.streamBatches!(a.sql, a.params)) {
+        yield decodeWideIntegerRows(model, decodeJsonColumns(model, rows));
+      }
+    } catch (err) { rethrowDuckdbError(err); }
   }
 
   private handle(opts?: ExecOpts): DuckdbQueryable {

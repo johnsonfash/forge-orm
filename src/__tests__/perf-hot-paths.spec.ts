@@ -265,3 +265,89 @@ describe('duckdb: a cascading delete with nothing to cascade is one write', () =
   });
 });
 
+
+describe('mysql: a filtered DISTINCT asks the planner not to group by an index', () => {
+  const { compileSelect } = require('../adapters/mysql/compile-from-ir');
+  const { buildSelect } = require('../ir/build');
+  test('with a WHERE it carries NO_GROUP_INDEX; without one it does not', () => {
+    const P = (sch as any).post;
+    const filtered = compileSelect(buildSelect('post', P, { where: { views: { lt: 100 } }, distinct: ['author_id'], select: { author_id: true } }, 'many', sch), P).sql;
+    expect(filtered).toMatch(/^SELECT \/\*\+ NO_GROUP_INDEX\(`posts`\) \*\/ DISTINCT `posts`\.`author_id`/);
+    const bare = compileSelect(buildSelect('post', P, { distinct: ['author_id'], select: { author_id: true } }, 'many', sch), P).sql;
+    expect(bare).toMatch(/^SELECT DISTINCT /);
+  });
+});
+
+describe('parseIsoDate is new Date(text), faster for the shape SQLite stores', () => {
+  const { parseIsoDate } = require('../adapters/shared/row-decoder');
+  test('identical results, including the shapes it hands to the general parser', () => {
+    const cases = [
+      '2025-01-01T00:00:00.000Z', '1999-12-31T23:59:59.999Z', '2024-02-29T12:30:45.123Z', '0050-06-01T00:00:00.000Z',
+      '2025-02-30T00:00:00.000Z', '2025-13-01T00:00:00.000Z', '2025-01-01T24:00:00.000Z', '2025-01-01 00:00:00',
+      '2025-01-01T00:00:00Z', '2025-01-01T00:00:00.000+01:00', 'garbage', '', '9999-12-31T23:59:59.999Z',
+    ];
+    for (let k = 0; k < 2000; k++) cases.push(new Date(Date.UTC(1970 + (k % 200), k % 12, 1 + (k % 28), k % 24, k % 60, k % 60, k % 1000)).toISOString());
+    for (const c of cases) {
+      const a = parseIsoDate(c), b = new Date(c);
+      expect([c, Number.isNaN(a.getTime()) ? 'NaN' : a.getTime()]).toEqual([c, Number.isNaN(b.getTime()) ? 'NaN' : b.getTime()]);
+    }
+    expect(parseIsoDate(null)).toBeNull();
+  });
+});
+
+describe('sqlite: an owning `is` filter is IN (subquery) on unpaged statements, EXISTS otherwise', () => {
+  let live: LiveDb;
+  beforeAll(async () => {
+    setActiveSchema(sch as never);
+    live = await openSqlite(sch);
+    await live.db.user.createMany({ data: [{ id: 'u1', email: 'a@x', name: 'Ann' }, { id: 'u2', email: 'b@x', name: 'Bob' }] });
+    await live.db.post.create({ data: { id: 'p1', author_id: 'u1', title: 't' } });
+    await live.db.comment.createMany({ data: [
+      { id: 'c1', post_id: 'p1', author_id: 'u1', body: 'x' }, { id: 'c2', post_id: 'p1', author_id: 'u2', body: 'y' },
+      { id: 'c3', post_id: 'p1', author_id: null, body: 'z' },
+    ] });
+  });
+  afterAll(async () => { await live?.close(); });
+
+  test('the SQL by shape', async () => {
+    live.log.length = 0;
+    await live.db.comment.count({ where: { author: { is: { name: 'Ann' } } } });
+    await live.db.comment.findMany({ where: { author: { is: { name: 'Ann' } } }, take: 5 });
+    await live.db.comment.updateMany({ where: { author: { is: { name: 'Nobody' } } }, data: { body: 'q' } });
+    expect(live.log[0]).toMatch(/"comments"\."author_id" IN \(SELECT/);
+    expect(live.log[1]).toMatch(/EXISTS \(SELECT 1 FROM "users"/);
+    expect(live.log[2]).toMatch(/IN \(SELECT/);
+  });
+
+  test('same answers, NULL keys included, and NOT keeps EXISTS', async () => {
+    expect(await live.db.comment.count({ where: { author: { is: { name: 'Ann' } } } })).toBe(1);
+    expect(await live.db.comment.count({ where: { OR: [{ author: { is: { name: 'Bob' } } }, { body: 'z' }] } })).toBe(2);
+    live.log.length = 0;
+    expect(await live.db.comment.count({ where: { NOT: { author: { is: { name: 'Ann' } } } } })).toBe(2);
+    expect(live.log[0]).toMatch(/NOT \(EXISTS/);
+    const g = await live.db.comment.groupBy({ by: ['author_id'], where: { author: { is: { name: { in: ['Ann', 'Bob'] } } } }, _count: { _all: true } });
+    expect(g.map((r: any) => r.author_id).sort()).toEqual(['u1', 'u2']);
+  });
+});
+
+describe('mongo: a `none` filter is bounded by the rest of its AND', () => {
+  const { openMongo } = require('./_live-dbs');
+  let live: any;
+  beforeAll(async () => {
+    live = await openMongo(sch);
+    if (!live) return;
+    await live.db.user.createMany({ data: [{ id: 'u1', email: 'a@x', name: 'Ann' }, { id: 'u2', email: 'b@x', name: 'Bob' }] });
+    await live.db.post.createMany({ data: ['p1', 'p2', 'p3', 'q1', 'q2'].map((id) => ({ id, author_id: id.startsWith('p') ? 'u1' : 'u2', title: id })) });
+    await live.db.comment.createMany({ data: [{ id: 'c1', post_id: 'p1', body: 'x' }, { id: 'c2', post_id: 'q1', body: 'y' }] });
+  });
+  afterAll(async () => { await live?.close(); });
+
+  test('same rows as before, for none, delete and every', async () => {
+    if (!live) return;
+    const rows = await live.db.post.findMany({ where: { author: { is: { email: 'a@x' } }, comments: { none: {} } }, orderBy: { id: 'asc' } });
+    expect(rows.map((r: any) => r.id)).toEqual(['p2', 'p3']);
+    expect(await live.db.post.deleteMany({ where: { author: { is: { email: 'b@x' } }, comments: { none: {} } } })).toEqual({ count: 1 });
+    expect((await live.db.post.findMany({ orderBy: { id: 'asc' } })).map((r: any) => r.id)).toEqual(['p1', 'p2', 'p3', 'q1']);
+    expect(await live.db.post.count({ where: { NOT: { author_id: 'u2' }, comments: { every: { body: 'x' } } } })).toBe(3);
+  });
+});

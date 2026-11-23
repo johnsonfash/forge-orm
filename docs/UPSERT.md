@@ -226,7 +226,10 @@ SELECT * FROM `users` WHERE `email` = ?;
 
 Two statements on the wire — MySQL has no `RETURNING` clause, so forge
 follows the `INSERT … ON DUPLICATE KEY UPDATE` with a `SELECT` keyed on
-the unique columns from `where`. Both statements run inside the same
+the unique columns from `where`. With `select: false` (2.27.0) the `SELECT`
+is skipped and the upsert is one statement. Before 2.26.0 each assignment
+was `col = VALUES(col)` — the value the INSERT proposed, not the update's —
+so a conflict wrote the `create` value. Both statements run inside the same
 connection and the same implicit transaction, so the row read back is
 the row the upsert produced.
 

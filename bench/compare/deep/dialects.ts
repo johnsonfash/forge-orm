@@ -243,7 +243,8 @@ async function openDuck(sizes: S.SeedSizes, log: (s: string) => void): Promise<D
     const schema = S.buildSchema({ geo: geoMode });
     const { buildSchemaDDL } = require("../../../src/adapters/duckdb/ddl");
     const { applyMigration } = require("../../../src/adapters/duckdb/migrate");
-    const driver = duckdbDriver(conn);
+    // The instance lets forge open a reader connection for findManyStream.
+    const driver = duckdbDriver(conn, { instance });
     const rep = await applyMigration(driver, buildSchemaDDL(schema as any));
     if (rep.failures?.length) notes.push(`DDL failures: ${JSON.stringify(rep.failures).slice(0, 400)}`);
     const forge = await createDb({ schema, driver } as any);

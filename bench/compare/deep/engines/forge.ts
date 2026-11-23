@@ -38,18 +38,22 @@ export async function forgeEngine(ctx: DialectCtx, db: any = ctx.forge): Promise
     rel_none: () => db.user.findMany({ where: { posts: { none: { status: "PUBLISHED" } } }, select: { id: true }, orderBy: { id: "asc" }, take: 50 }),
     rel_every: () => db.user.findMany({ where: { posts: { every: { status: "PUBLISHED" } } }, select: { id: true }, orderBy: { id: "asc" }, take: 50 }),
     include_1: (_i, n) => db.post.findMany({ where: { status: "PUBLISHED" }, orderBy: { id: "asc" }, take: n, include: { author: true } }),
+    // The include scenarios select the columns Kysely's versions select, so
+    // every engine moves the same data.
     include_2: (_i, n) => db.user.findMany({
       orderBy: { id: "asc" }, take: n,
-      include: { posts: { orderBy: { id: "asc" }, include: { comments: { orderBy: { id: "asc" } } } } },
+      include: { posts: { orderBy: { id: "asc" }, include: { comments: { orderBy: { id: "asc" }, select: { id: true, post_id: true, body: true } } } } },
     }),
     include_3: (_i, n) => db.user.findMany({
       where: { active: true }, orderBy: { id: "asc" }, take: n,
       include: { posts: {
         where: { status: "PUBLISHED" }, orderBy: [{ published_at: "desc" }, { id: "asc" }], take: 5,
-        include: { comments: { orderBy: { id: "asc" }, take: 3, include: { author: { select: { id: true, email: true } } } } },
+        select: { id: true, title: true, published_at: true,
+          comments: { orderBy: { id: "asc" }, take: 3, select: { id: true, author: { select: { id: true, email: true } } } } },
       } },
     }),
-    m2m_post_tags: (_i, n) => db.post.findMany({ orderBy: { id: "asc" }, take: n, include: { post_tags: { include: { tag: true } } } }),
+    m2m_post_tags: (_i, n) => db.post.findMany({ orderBy: { id: "asc" }, take: n,
+      select: { id: true, title: true, post_tags: { select: { id: true, tag: { select: { id: true, name: true } } } } } }),
     m2m_tag_counts: () => db.tag.findMany({ orderBy: { name: "asc" }, include: { _count: { select: { post_tags: true } } } }),
     count_rel: (_i, n) => db.user.findMany({ orderBy: { id: "asc" }, take: n, include: { _count: { select: { posts: true, comments: true } } } }),
     aggregate: () => db.post.aggregate({
@@ -82,7 +86,8 @@ export async function forgeEngine(ctx: DialectCtx, db: any = ctx.forge): Promise
       return { count, first, last, views };
     },
 
-    create: (i) => db.user.create({ data: userData(wid(T, "create", i)) }),
+    // Kysely and Knex insert and hand back their own input; so does this.
+    create: async (i) => { const u = userData(wid(T, "create", i)); await db.user.create({ data: u, select: false }); return u; },
     create_many: (i) => db.user.createMany({ data: Array.from({ length: 1000 }, (_, k) => ({ ...userData(`${wid(T, "cm", i)}_${k}`, wid(T, "cm", i)), role: "USER" })) }),
     nested_create: (i) => {
       const U = wid(T, "nc", i);
@@ -101,26 +106,27 @@ export async function forgeEngine(ctx: DialectCtx, db: any = ctx.forge): Promise
     update_by_id: (i) => db.user.update({ where: { id: P.updUser(i) }, data: { name: `Renamed ${i}` } }),
     update_many: (i) => db.post.updateMany({ where: { author_id: P.updManyAuthor(i) }, data: { views: 42 } }),
     increment_concurrent: (i) => Promise.all(Array.from({ length: 20 }, () =>
-      db.post.update({ where: { id: wid(T, "inc", i) }, data: { views: { increment: 1 } } }))),
+      db.post.update({ where: { id: wid(T, "inc", i) }, data: { views: { increment: 1 } }, select: false }))),
     upsert_insert: (i) => {
       const id = wid(T, "ups", i);
-      return db.user.upsert({ where: { email: `${id}@bench.dev` }, create: userData(id), update: { name: "Upserted" } });
+      return db.user.upsert({ where: { email: `${id}@bench.dev` }, create: userData(id), update: { name: "Upserted" }, select: false });
     },
-    upsert_update: (i) => db.user.upsert({ where: { email: P.upsertUpdateEmail }, create: userData(wid(T, "upu", i)), update: { name: "Upserted 5" } }),
-    delete_cascade: (i) => db.user.delete({ where: { id: wid(T, "dc", i) } }),
+    upsert_update: (i) => db.user.upsert({ where: { email: P.upsertUpdateEmail }, create: userData(wid(T, "upu", i)), update: { name: "Upserted 5" }, select: false }),
+    delete_cascade: (i) => db.user.delete({ where: { id: wid(T, "dc", i) }, select: false }),
     delete_many: (i) => db.user.deleteMany({ where: { name: wid(T, "dm", i) } }),
     tx_interactive: (i) => db.$transaction(async (tx: any) => {
       const U = wid(T, "tx", i);
-      await tx.user.create({ data: userData(U) });
-      const p = await tx.post.create({ data: postData(`${U}_p`, U, 0) });
+      await tx.user.create({ data: userData(U), select: false });
+      await tx.post.create({ data: postData(`${U}_p`, U, 0), select: false });
       const c = await tx.post.count({ where: { author_id: U } });
-      await tx.user.update({ where: { id: U }, data: { name: `has ${c} posts` } });
-      return tx.comment.create({ data: { id: `${U}_c`, post_id: p.id, author_id: U, parent_id: null, body: "tx", created_at: new Date(S.BASE_TIME) } });
+      await tx.user.update({ where: { id: U }, data: { name: `has ${c} posts` }, select: false });
+      await tx.comment.create({ data: { id: `${U}_c`, post_id: `${U}_p`, author_id: U, parent_id: null, body: "tx", created_at: new Date(S.BASE_TIME) }, select: false });
+      return c;
     }),
     tx_rollback: async (i) => {
       try {
         await db.$transaction(async (tx: any) => {
-          await tx.user.create({ data: userData(wid(T, "rb", i)) });
+          await tx.user.create({ data: userData(wid(T, "rb", i)), select: false });
           throw new Error("rollback");
         });
       } catch (e: any) { if (e.message !== "rollback") throw e; }

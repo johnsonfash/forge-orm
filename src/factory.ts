@@ -81,7 +81,9 @@ export type ForgeDriver =
   | import('./adapters/sqlite/driver').SqliteDriver
   | import('./adapters/postgres/driver').PostgresDriver
   | import('./adapters/mysql/driver').MysqlDriver
-  | import('./adapters/mongo/driver').MongoDriver;
+  | import('./adapters/mongo/driver').MongoDriver
+  | import('./adapters/duckdb/driver').DuckdbDriver
+  | import('./adapters/mssql/driver').MssqlDriver;
 
 export interface CreateDbOptionsDriver {
   driver: ForgeDriver;

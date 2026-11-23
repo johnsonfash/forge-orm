@@ -992,6 +992,20 @@ overrides, timeouts. The RLS pattern above is correct because of this.
 
 ---
 
+## Includes in one query
+
+Since 2.26.0 an `include` is loaded inside the parent's own `SELECT`: each
+relation level is a correlated subquery that returns the children as JSON,
+so a three-level include is one round trip. 64-bit integers and numerics
+travel as text, timestamps are decoded to `Date`, and each level is
+aggregated in its `orderBy`. A relation with a `bytes`, `geoPoint` or
+`vector` column, or using `distinct`, a cursor or a distance sort, keeps one
+query per level. Details and measurements in
+[N-PLUS-ONE.md](./N-PLUS-ONE.md#postgres-the-whole-include-in-one-query).
+
+`updateMany`, `deleteMany`, `createMany` and `select: false` writes send no
+`RETURNING`; the count is the driver's `rowCount`.
+
 ## Common errors and fixes
 
 forge maps Postgres SQLSTATE codes to its uniform `DbKnownError` shape

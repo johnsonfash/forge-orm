@@ -102,6 +102,8 @@ export interface UpdateNode {
   semantic?: 'softDelete' | 'softDeleteMany' | 'restore' | 'restoreMany';
   /** updateMany on a driver that reports changed rows: no RETURNING. */
   countOnly?: boolean;
+  /** A single update / upsert whose caller asked for no row (`select: false`). */
+  noReturn?: boolean;
 }
 
 export interface DeleteNode {
@@ -112,6 +114,8 @@ export interface DeleteNode {
   returning?: ProjectionPlan;
   /** deleteMany on a driver that reports changed rows: no RETURNING. */
   countOnly?: boolean;
+  /** A single delete whose caller asked for no row (`select: false`). */
+  noReturn?: boolean;
 }
 
 export interface CountNode {

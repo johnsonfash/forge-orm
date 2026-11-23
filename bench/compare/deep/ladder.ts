@@ -151,7 +151,8 @@ export function forgeLadder(db: any, T: string): Record<string, (i: number, n: n
         _count: { select: { posts: true } },
         posts: {
           where: { status: "PUBLISHED" }, orderBy: [{ views: "desc" }, { id: "asc" }], take: 3,
-          include: {
+          select: {
+            id: true, views: true,
             _count: { select: { comments: true } },
             comments: { orderBy: { id: "asc" }, take: 2, select: { id: true, author: { select: { id: true, email: true } } } },
           },
@@ -183,12 +184,12 @@ export function forgeLadder(db: any, T: string): Record<string, (i: number, n: n
           ],
           deleteMany: { views: { gte: 3 } },
         },
-      } });
+      }, select: false });
     },
     upsert_loop: async (i) => {
       let k = 0;
       for (const id of UL(T, i)) {
-        await db.user.upsert({ where: { email: `${id}@bench.dev` }, create: { ...fixUser(id), name: `Loop ${k}` }, update: { name: `Loop ${k}` } });
+        await db.user.upsert({ where: { email: `${id}@bench.dev` }, create: { ...fixUser(id), name: `Loop ${k}` }, update: { name: `Loop ${k}` }, select: false });
         k++;
       }
       return k;
@@ -197,11 +198,11 @@ export function forgeLadder(db: any, T: string): Record<string, (i: number, n: n
       const t = TXM(T, i);
       try {
         await db.$transaction(async (tx: any) => {
-          await tx.user.create({ data: userData(t.U) });
+          await tx.user.create({ data: userData(t.U), select: false });
           await tx.post.createMany({ data: t.posts.map((id, k) => fixPost(id, t.U, k)) });
           await tx.post.updateMany({ where: { author_id: t.U }, data: { views: 5 } });
-          await tx.tag.upsert({ where: { name: t.tag }, create: { id: t.tag, name: t.tag }, update: {} });
-          await tx.post.delete({ where: { id: t.posts[2] } });
+          await tx.tag.upsert({ where: { name: t.tag }, create: { id: t.tag, name: t.tag }, update: {}, select: false });
+          await tx.post.delete({ where: { id: t.posts[2] }, select: false });
           await tx.post.count({ where: { author_id: t.U } });
           throw new Error("rollback");
         });

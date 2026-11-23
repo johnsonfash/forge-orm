@@ -197,7 +197,7 @@ export async function executePgUpdate(
   const exec = opts.client ?? pool;
   const artifact = compileUpdate(node, model);
   const { rows, rowCount } = await withPgErrors(() => exec.query(artifact.sql, artifact.params));
-  if (node.many) return { count: rowCount ?? rows.length };
+  if (node.many || node.noReturn) return { count: rowCount ?? rows.length };
   return { doc: decodeWideIntegers(model, rows[0]), count: rows.length };
 }
 
@@ -212,7 +212,7 @@ export async function executePgDelete(
   // delegated to the DB engine via ON DELETE clauses set in DDL.
   const artifact = compileDelete(node, model);
   const { rows, rowCount } = await withPgErrors(() => exec.query(artifact.sql, artifact.params));
-  if (node.many) return { count: rowCount ?? rows.length };
+  if (node.many || node.noReturn) return { count: rowCount ?? rows.length };
   return { doc: decodeWideIntegers(model, rows[0]), count: rows.length };
 }
 

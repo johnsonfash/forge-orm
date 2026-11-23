@@ -1181,6 +1181,28 @@ vs schema-per-tenant), see [MULTI-TENANT.md](./MULTI-TENANT.md) and
 
 ---
 
+## What forge does per query
+
+* **Statements are prepared once** (`betterSqlite3Driver`, 2.26.0). Each SQL
+  text is prepared on first use and cached (256 statements). A statement
+  still being iterated by a stream is never reused, and `exec` (DDL) empties
+  the cache, so a statement never outlives the schema it was prepared
+  against. Preparing cost more than running a primary-key lookup.
+* **Dates are parsed from their digits.** forge stores timestamps as
+  `toISOString()` text; that exact shape is turned back into a `Date`
+  without the general parser (about twice as fast), and anything else goes
+  through `new Date(text)`, so the value is always the same.
+* **`IN` or `EXISTS` for a relation filter, by shape** (2.27.0). SQLite runs
+  a correlated `EXISTS` once per outer row. For a filter on the row's own
+  parent (`author: { is: … }`) on a statement that reads every match
+  (`count`, `groupBy`, `updateMany`, `deleteMany`, an unpaged `findMany`)
+  forge writes `author_id IN (SELECT id FROM users WHERE …)`, built once:
+  7x to 80x faster measured. Under a `LIMIT`, for a single pinned row, under
+  `NOT` (where a NULL key would change the answer), and for `some` / `none`
+  on children, it stays `EXISTS`, which stops early.
+* **Counts without `RETURNING`**: `updateMany` / `deleteMany` / `createMany`
+  and `select: false` writes read the driver's change count.
+
 ## Common errors and fixes
 
 ### `SQLITE_BUSY: database is locked`

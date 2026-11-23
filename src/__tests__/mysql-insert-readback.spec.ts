@@ -26,7 +26,9 @@ function fakePool(result: any, selectRows: any[] = []) {
   const pool = {
     calls,
     execute: async (sql: string) => { calls.push(sql); return [result, undefined]; },
-    query: async (sql: string) => { calls.push(sql); return [selectRows, undefined]; },
+    // A multi-row INSERT goes over the text protocol (query), the rest of
+    // the writes over execute; reads are always query.
+    query: async (sql: string) => { calls.push(sql); return [/^INSERT/.test(sql) && !/RETURNING/.test(sql) ? result : selectRows, undefined]; },
   };
   return pool as any;
 }

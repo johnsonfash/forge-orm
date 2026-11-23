@@ -538,39 +538,43 @@ and the whole query runs as one aggregation with a bounded `$lookup` per
 filter instead. Both forms are in
 [RELATIONS.md](./RELATIONS.md#per-dialect-emit).
 
-**Writes still refuse them.** Up to 2.17.0 `compileWhereNode` returned
-`{}` for a relation filter — match-all — and the same compiler builds the
-filter for writes, so
+A `none` / `every` / `isNot` filter is answered by the keys it excludes,
+which without a bound means grouping the whole child collection. Since
+2.27.0, when the rest of the same `AND` narrows the parents (for example
+`author: { is: { email } }` next to `comments: { none: {} }`), forge reads
+those parents' keys first and looks the children up for those keys only,
+through the foreign-key index — the shape hand-written Mongo code uses.
 
-```ts
-// On 2.17.0 and earlier this compiled to deleteMany({})
-// and emptied the collection.
-await db.post.deleteMany({ where: { author: { is: { email: 'x' } } } });
-```
+**Writes and `groupBy` take them too, since 2.26.0.** `updateMany`,
+`deleteMany` and `groupBy` resolve a relation filter to `$in` / `$nin`
+exactly as reads do. (Up to 2.17.0 a relation filter compiled to `{}` —
+match-all — so `deleteMany({ where: { author: { is: … } } })` emptied the
+collection; from 2.18.0 to 2.25.0 these calls threw.) The `compile` API,
+which has no round trip to make, still refuses them.
 
-From 2.18.0 `updateMany` / `deleteMany` (and the `compile` API, which
-has no second round trip to make) throw, naming the relation and its
-mode:
+A cascading `deleteMany` whose filter reads a relation deletes the rows it
+matched by key: the cascade walk removes children first, and the filter
+re-run afterwards would no longer match them.
 
-```
-[forge:mongo] a relation filter on 'author' (is) cannot be compiled for
-Mongo — a find has no join. Resolve it in two steps:
-  const ids = (await db.author.findMany({ where: { email: 'x' }, select: { id: true } })).map(a => a.id);
-  await db.post.findMany({ where: { author_id: { in: ids } } });
-Or use db.<model>.aggregate([{ $lookup: … }]) for a single round trip.
-```
+### Other round-trip savings
 
-Resolve the ids with a read (which now takes the relation filter), then
-write by id:
-
-```ts
-const ids = (await db.post.findMany({
-  where:  { author: { is: { email: 'x' } } },
-  select: { id: true },
-})).map((p) => p.id);
-
-await db.post.deleteMany({ where: { id: { in: ids } } });
-```
+* `distinct` is one round trip (2.26.0): the server's `distinct` command
+  when a single required scalar is selected alone, otherwise one `$group`
+  pipeline that keeps the first document per key in your order and pages
+  after the dedupe (before, `take` cut the rows before duplicates were
+  removed and returned fewer than asked).
+* `findManyStream` without a `chunkSize` uses the server's own batching
+  (101 documents, then up to 16 MiB per `getMore`): 2 round trips for
+  10 000 documents, was 10.
+* A cascading `delete` / `deleteMany` asks, in the same aggregation that
+  finds the rows, whether any child of each relation exists (a `$limit: 1`
+  `$lookup` per relation). Relations with no children are skipped, and
+  with none at all the delete is one `deleteOne` / `deleteMany` with no
+  transaction: 2 round trips where it was 6.
+* `select: false` on `update` / `upsert` / `delete` uses `updateOne` /
+  `deleteOne` instead of the find-and-modify commands (2.27.0).
+* Conditions on different fields compile to one filter document instead
+  of `$and`.
 
 `aggregate()` is two methods behind one name, and only one of them is
 Mongo-specific. Forge dispatches on the arguments: any of the five

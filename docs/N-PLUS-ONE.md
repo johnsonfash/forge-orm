@@ -196,6 +196,27 @@ drop to `$queryRaw` and write the JOIN yourself; see
 
 ---
 
+## Postgres: the whole include in one query
+
+Since 2.26.0 Postgres does not run a query per level at all when it can
+avoid it. Each relation level becomes a subquery in the parent's own
+`SELECT` that returns the children as JSON (`json_agg`, or `row_to_json`
+for a to-one), paged inside the subquery and ordered by the include's
+`orderBy`. `users → posts(take 5) → comments(take 3) → author` is **one**
+round trip; posts → post_tags → tag is one. Values come back as a query
+per level would return them: 64-bit integers and numerics travel as text,
+timestamps are decoded to `Date`.
+
+A relation keeps the query-per-level plan when JSON cannot carry it
+faithfully or the SQL would differ: a `bytes`, `geoPoint` or `vector`
+column in the selection, `distinct`, a `cursor`, or a distance `orderBy`.
+Measured in-process against the query-per-level plan, it is level on a
+single to-one and up to 25% faster on paged, deep and many-to-many
+includes. The other dialects keep one query per level: MySQL's JSON
+aggregation either loses the order or goes through a derived table it
+re-materialises per row, and on SQLite and DuckDB a round trip costs
+almost nothing.
+
 ## Nested paging no longer changes the query count
 
 A nested `take` or `skip` means "give each parent its own page". Since

@@ -1,0 +1,97 @@
+mysql: 40 interleaved iterations, median ms
+scenario                     raw     forge    prisma   drizzle    kysely      knex   forge vs best
+pk                         0.192     0.210     0.422     0.285     0.207     0.226   level or faster
+unique_email               0.125     0.145     0.319     0.212     0.141     0.161   +3%
+filter_offset              0.513     0.548     0.795     0.652     0.548     0.568   level or faster
+cursor                     0.171     0.190     0.435     0.290     0.188     0.207   level or faster
+count_filter               5.517     5.615     6.520     5.860     5.750     5.823   level or faster
+exists                     0.117     0.127     0.289     0.171     0.136     0.149   level or faster
+select_cols                0.135     0.158     0.304     0.202     0.156     0.172   level or faster
+in_100                     0.521     0.537     0.845     0.697     0.548     0.558   level or faster
+or_not_like                0.296     0.325     0.556     0.412     0.326     0.347   level or faster
+rel_some                   0.215     0.241     0.371     0.312     0.251     0.264   level or faster
+rel_none                   1.155     1.191     1.323     1.247     1.191     1.209   level or faster
+rel_every                  3.034     3.212     3.528     3.641     3.307     3.340   level or faster
+include_1                  1.606     1.644     3.128     2.953     2.327     1.725   level or faster
+include_2                  5.156     4.502    12.910     7.701     5.018     5.102   level or faster
+include_3                  5.543     5.180     7.867     6.633     4.593     5.608   +13%
+m2m_post_tags              1.717     3.889     5.757     4.109     3.383     3.508   +15%
+m2m_tag_counts             6.847     2.586     3.485     7.683     7.158     7.195   level or faster
+count_rel                  1.336     1.655    11.039     2.359     1.630     1.721   level or faster
+aggregate                  5.672     5.832     6.605     6.239     5.938     6.014   level or faster
+groupby                   15.635    15.910    17.159    16.434    16.004    16.072   level or faster
+distinct                  14.938     3.569     6.243    15.458    15.117    15.234   level or faster
+json_prefs                 0.241     0.271     0.502     0.312     0.264     0.285   level or faster
+json_meta                  3.682     3.858     5.632     3.967     3.908     4.036   level or faster
+fts                        3.775     3.922     4.546     4.185     3.944     3.988   level or faster
+geo_near                   3.848     4.449       n/a       n/a       n/a       n/a   
+large_findmany            12.350    12.887    44.752    29.011    16.301    12.619   level or faster
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+Calling conn.end() to release a pooled connection is deprecated. In next version calling conn.end() will be restored to default conn.end() behavior. Use conn.release() instead.
+stream                    13.450    15.196       n/a    47.092    25.964    16.925   level or faster
+create                     0.133     0.151     0.549     0.174     0.145     0.152   +4%
+create_many               14.944    15.605    78.370    23.653    14.262    15.240   +9%
+nested_create              0.700     0.893     2.209     1.043     0.832     0.902   +7%
+update_by_id               0.185     0.236     0.625     0.280     0.214     0.257   +10%
+update_many                0.167     0.192     0.385     0.197     0.184     0.201   +4%
+increment_concurrent       0.871     1.103     8.031     1.317     1.079     1.299   level or faster
+upsert_insert              0.125     0.139     0.602     0.161     0.141     0.152   level or faster
+upsert_update              0.129     0.141     0.588     0.177     0.149     0.156   level or faster
+delete_cascade             0.378     0.399     0.809     0.443     0.428     0.426   level or faster
+delete_many                2.007     2.083     2.670     2.134     2.067     2.056   level or faster
+tx_interactive             0.559     0.651     1.908     0.769     0.650     0.735   level or faster
+tx_rollback                0.223     0.247     0.548     0.279     0.240     0.281   level or faster
+optimistic_update          0.257     0.308     0.800     0.393     0.302     0.350   level or faster
+rel_deep                   1.213     1.255     1.398     1.395     1.287     1.307   level or faster
+include_count              2.494     2.754    18.284     3.652     1.960     2.917   +41%
+groupby_rel                6.948     7.310     8.118     7.908     7.413     7.489   level or faster
+json_fts_rel               3.723     3.956     4.547     4.221     4.064     4.121   level or faster
+delete_by_id               0.186     0.221     0.498     0.249     0.211     0.236   +5%
+update_many_rel            0.178     0.183     0.435     0.251     0.224     0.235   level or faster
+delete_many_rel            0.186     0.188     0.331     0.294     0.229     0.260   level or faster
+nested_update              0.591     0.727     1.740     0.829     0.679     0.752   +7%
+upsert_loop                1.201     1.359     5.587     1.528     1.310     1.359   +4%
+tx_mixed                   0.718     0.846     2.279     0.986     0.856     0.868   level or faster

@@ -147,6 +147,8 @@ export interface Adapter {
   // (adapters/<kind>/execute.ts) flow through here so CollectionWrapper stays
   // adapter-agnostic at runtime.
   executeSelect(node: any, model: any, opts?: ExecOpts): Promise<any[]>;
+  /** False when this adapter's native stream cannot serve this session; the wrapper pages instead. */
+  streamsFor?(session: unknown): boolean;
   /**
    * The rows a cascading delete is about to remove, and for each probe
    * whether any child row points at one of them, in one round trip. Optional:
@@ -157,7 +159,7 @@ export interface Adapter {
     node: any, model: any,
     probes: Array<{ collection: string; on: string; refs: string; scope?: string }>,
     opts?: ExecOpts,
-  ): Promise<{ rows: any[]; present: boolean[] }>;
+  ): Promise<{ rows: any[]; present: boolean[] } | null>;
   executeCount(node: any, model: any, opts?: ExecOpts): Promise<number>;
   executeGroupBy(node: any, model: any, opts?: ExecOpts): Promise<any[]>;
   executeInsert(node: any, model: any, opts?: ExecOpts): Promise<{ docs: any[]; count: number }>;

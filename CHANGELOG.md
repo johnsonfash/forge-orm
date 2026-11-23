@@ -4,6 +4,55 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.27.0 — select: false writes, MySQL distinct 5x faster, DuckDB streams on its own connection, IN or EXISTS by shape on SQLite
+
+- **`select: false` on `create`, `update`, `upsert` and `delete`.** The write
+  happens and the call resolves to `null` without reading the row back: no
+  `RETURNING` on Postgres, SQLite and DuckDB, one statement instead of two on
+  MySQL, `updateOne` / `deleteOne` on Mongo. A miss still throws P2025; on
+  MySQL a match that changes nothing still counts (forge reads "Rows matched").
+  An `update` with nested writes skips the parent read too when its `where`
+  names the parent's key by value. Nested writes use it internally.
+- **MySQL: one round trip for a write that returns its row**, when the pool was
+  created with `multipleStatements: true` (`UPDATE …; SELECT …`). forge never
+  turns the option on.
+- **MySQL: a filtered `DISTINCT` carries `/*+ NO_GROUP_INDEX(t) */`.** MySQL
+  walked an index leading with the distinct column and looked up every row to
+  test the filter (15 ms vs 2.4 on the bench shape). Measured against GROUP BY,
+  IGNORE INDEX and in-memory dedupe on wide and selective filters; never
+  slower with a WHERE, left off without one.
+- **MySQL: a multi-row `INSERT` uses the text protocol**, skipping a server-side
+  prepare it never reused (`createMany` of 1 000 rows 19.1 → 17.5 ms).
+- **SQLite: `fk IN (SELECT …)` instead of a correlated `EXISTS`** for a positive
+  `is` relation filter on a statement that reads every match (count, groupBy,
+  updateMany, deleteMany, unpaged findMany): 7x to 80x faster measured. Paged
+  queries, pinned rows, `NOT` and child filters keep `EXISTS`.
+- **SQLite: timestamps parse from their digits** when they have the
+  `toISOString()` shape forge stores, about twice as fast as `new Date(text)`,
+  same result (anything else still goes to `new Date`).
+- **DuckDB: `findManyStream` streams natively** when the driver is built with
+  the instance, `duckdbDriver(conn, { instance })`, on a reader connection of
+  its own, so a query or write on the main connection mid-stream cannot end it
+  (2 round trips for 10 000 rows, was 20). In a transaction, or without the
+  instance, it pages by key as before.
+- **DuckDB: a single-row cascading delete walks the relations** instead of the
+  `EXISTS` probe, which joins whole child tables (1.5 → 1.0 ms).
+- **MongoDB: `none` / `every` / `isNot` relation filters are bounded** by the
+  parents the rest of their `AND` selects, so the child lookup reads only those
+  keys through the index (`deleteMany` through `author` + `comments: none`
+  62 → 18 ms).
+- **`createDb({ driver })` accepts DuckDB and SQL Server drivers in its types**
+  (they worked at runtime; the documented `driver: duckdbDriver(conn)` did not
+  type-check).
+- **Docs:** writes that return nothing, nested write scoping and order, writes
+  returning relations, Postgres one-query includes, Mongo relation filters on
+  writes, cascade probing, per-dialect round-trip notes, and a README
+  performance section with where forge is still slower and why.
+- **Bench:** `bench/compare/deep/ab.ts` runs scenarios with the engines
+  interleaved, to settle results the sequential run leaves within noise.
+  Forge's bench ops use `select: false` where the Kysely and Knex versions
+  return nothing, and the include scenarios select the columns Kysely's do.
+
 ## 2.26.0 — Nested-write and MySQL upsert data fixes; Postgres includes in one query; faster hot paths on every dialect
 
 - **SQLite statements are prepared once.** `betterSqlite3Driver` prepared every

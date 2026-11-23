@@ -65,6 +65,45 @@ describe('stream — duckdb pages by key', () => {
   });
 });
 
+describe('stream — duckdb with the instance: a native stream on its own connection', () => {
+  let live: Awaited<ReturnType<typeof openDuckdb>>;
+  beforeAll(async () => {
+    live = await openDuckdb(schema, { instance: true });
+    await live.db.item.createMany({ data: rows });
+  });
+  afterAll(() => live.close());
+
+  it('one statement, every row, in order, nothing on the main connection', async () => {
+    live.log.length = 0;
+    const got = await collect(live.db.item.findManyStream({ orderBy: { id: 'asc' } }));
+    expect(got.map((r) => r.id)).toEqual(rows.map((r) => r.id));
+    expect(live.log.filter((s) => /^SELECT/.test(s))).toHaveLength(0);
+  });
+
+  it('honours a compound order and take', async () => {
+    const expected = [...rows].sort((a, b) => b.n - a.n || a.id.localeCompare(b.id)).map((r) => r.id);
+    const first = await collect(live.db.item.findManyStream({ orderBy: [{ n: 'desc' }, { id: 'asc' }], take: 650 } as any));
+    expect(first.map((r) => r.id)).toEqual(expected.slice(0, 650));
+  });
+
+  it('survives queries and writes on the main connection mid-stream', async () => {
+    let seen = 0;
+    for await (const _r of live.db.item.findManyStream({ orderBy: { id: 'asc' } })) {
+      if (++seen % 400 === 0) { await live.db.item.count(); await live.db.item.updateMany({ where: { n: 1 }, data: { tag: 'b' } }); }
+    }
+    expect(seen).toBe(rows.length);
+  });
+
+  it('inside a transaction it pages on the transaction, and sees its writes', async () => {
+    await live.db.$transaction(async (tx: any) => {
+      await tx.item.create({ data: { id: 'zz', n: 99 } });
+      const inTx = await collect(tx.item.findManyStream({ where: { n: 99 } }));
+      expect(inTx.map((r) => r.id)).toEqual(['zz']);
+      throw Object.assign(new Error('rollback'), { rollback: true });
+    }).catch((e: any) => { if (!e.rollback) throw e; });
+  });
+});
+
 describe('stream — sqlite batches', () => {
   it('streams all rows, honours where and take, and sees its transaction', async () => {
     const live = await openSqlite(schema);

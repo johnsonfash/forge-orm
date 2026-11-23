@@ -1555,6 +1555,17 @@ await db.user.deleteMany({ where: { active: false } });
 Create and update can also return only selected fields or include relations,
 the same way reads do, by passing `select` or `include` alongside `data`.
 
+When you do not need the row back, say so with `select: false` (2.27.0). The
+write happens, the call resolves to `null`, and nothing is read back: no
+`RETURNING` on Postgres, SQLite and DuckDB, one statement instead of two on
+MySQL, `updateOne` instead of `findOneAndUpdate` on Mongo. A miss still throws.
+
+```ts
+await db.post.update({ where: { id }, data: { views: { increment: 1 } }, select: false });
+```
+
+Details in [docs/MUTATIONS.md](docs/MUTATIONS.md#writes-that-return-nothing--select-false).
+
 ### One row back, or `null` — `updateFirst` / `deleteFirst`
 
 `update` and `delete` write one row and hand it back, and **throw**
@@ -1653,13 +1664,16 @@ await db.user.create({
 
 Supported on a relation: `create`, `createMany`, `connect`, `connectOrCreate`
 (find one or make it), `disconnect`, `set`, `delete`, `deleteMany`, `update`,
-`updateMany`, `upsert`.
+`updateMany`, `upsert`. Inside `update`, the nested `update` / `upsert` /
+`delete` calls touch this parent's children only, and run updates before
+deletes, as Prisma does.
 
 ### Deletes and cascades
 
 If a relation declares `onDelete: 'Cascade'`, deleting the parent deletes the
 children too. On SQL this is enforced by a foreign key. On Mongo, which has no
-foreign keys, forge walks the relations and deletes the children for you.
+foreign keys, and DuckDB, which refuses cascades, forge walks the relations and
+deletes the children for you, skipping relations that have no children.
 
 ```ts
 await db.user.delete({ where: { id: 'u1' } });   // posts with onDelete:'Cascade' go too
@@ -3329,16 +3343,49 @@ See more — **[docs/TYPES.md](docs/TYPES.md)** for `Row`, every `Infer*` helper
 
 ## Performance
 
-forge adds a thin layer over the driver. In a local micro-benchmark of simple
-operations (find, count, update), its per-call overhead measured similar to,
-and often lower than, Prisma and Drizzle, with no separate engine process to
-start.
+What forge does on every query:
 
-Read that for what it is: a small synthetic test on localhost. The differences
-are fractions of a millisecond and disappear next to real network latency and
-query complexity. It says nothing about complex joins, correctness, or
-maturity. The point is only that the convenience does not cost you measurable
-performance. Run `forge:bench` and `forge:bench:compare` to see for yourself.
+* **Statements are cached.** On SQLite (`better-sqlite3`) each SQL text is
+  prepared once; Postgres through `postgres.js` uses prepared statements.
+* **An include is one query per level, or one query in total on Postgres**,
+  where each level is a JSON subquery in the parent's `SELECT`. A nested
+  `take` / `skip` is still one query per level (a window function pages
+  each parent).
+* **Counts need no rows.** `updateMany`, `deleteMany` and `createMany` take
+  the driver's count instead of `RETURNING *`, and `select: false` does the
+  same for a single write.
+* **Cascades on Mongo and DuckDB skip empty relations**, and with none the
+  delete is one statement.
+
+How it compares: `bench/compare/deep/` runs about fifty scenarios per
+dialect, reads and writes, against the raw driver, Prisma, Drizzle, Kysely
+and Knex, and checks that every engine returns the same rows. See
+[bench/compare/README.md](bench/compare/README.md):
+
+```sh
+BENCH_SEED=1000 BENCH_ITER=10 npm run forge:bench:deep -- --dialect=sqlite
+```
+
+On most scenarios forge is level with or faster than the fastest of Kysely
+and Knex. Where it is slower, and why:
+
+* **It returns more.** `update` and `upsert` hand back the whole row, decoded;
+  the Kysely and Knex versions return three columns or nothing. Use
+  `select: false` when you do not need it. On MySQL, which has no
+  `RETURNING`, the row costs a second statement.
+* **It decodes values.** A `findMany` of 10 000 rows on SQLite turns every
+  date and JSON column back into a `Date` or object; Knex returns the stored
+  text. That is most of the gap on large reads and streams.
+* **MySQL includes.** forge runs one query per level. Kysely's single JSON
+  query is faster for a small paged include or a many-to-many, and about
+  fifty times slower for an unpaged nested one, because MySQL re-reads the
+  derived table for every row.
+* **Mongo includes** take one round trip per level where a hand-written
+  `$lookup` takes one; on the bench forge is still faster in time.
+
+These are measured on localhost, where a round trip costs a fraction of a
+millisecond. Across a network, the round trips forge saves matter more than
+the microseconds it spends.
 
 See more — **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)** for the bench methodology, every shipped scenario, Prisma/Drizzle compare mode, profiling with clinic.js/0x, microbench traps (JIT warmup, GC pauses), and CI regression gating. **[docs/POOLING.md](docs/POOLING.md)** for connection-pool sizing per dialect and the per-runtime constraints (Lambda, Workers, Bun, pgbouncer). **[docs/CACHING.md](docs/CACHING.md)** for DataLoader / Redis cache-aside / CDN patterns. **[docs/N-PLUS-ONE.md](docs/N-PLUS-ONE.md)** for `include` vs DataLoader and how to detect query explosions via the event hook.
 

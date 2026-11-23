@@ -421,7 +421,7 @@ export class CollectionWrapper<
     const chunkSize = args.chunkSize ?? 1000;
     // Adapter-native streaming first, a batch at a time where it can.
     const adapter = this.adapter as Adapter;
-    if (adapter.streamSelectBatches || adapter.streamSelect) {
+    if ((adapter.streamSelectBatches || adapter.streamSelect) && (adapter.streamsFor?.(this.session) ?? true)) {
       const mk = this._modelKey();
       const filtered = this._withSoftDeleteFilter({ ...args, chunkSize: undefined });
       const node = buildSelect(mk, this.model, filtered ?? {}, 'many', schema as any);
@@ -643,23 +643,28 @@ export class CollectionWrapper<
 
   async create<A extends {
     data: ICreate<F, R>;
-    select?: ISelect<F, R, SM>;
+    /** `false`: write without reading the row back; resolves to null. */
+    select?: ISelect<F, R, SM> | false;
     include?: IInclude<R, SM>;
     omit?: { [K in keyof F]?: boolean };
-  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A, SM>> {
+  }>(args: A & NoBothSelectInclude<A>): Promise<A extends { select: false } ? null : Find1<F, R, A, SM>> {
     this._assertWritable('create');
     const split = this._splitNestedWrites(args.data, /*forCreate*/ true);
     if (split.nested.length === 0) {
+      if ((args as any).select === false) {
+        await this._insertRows([split], this.session, false);
+        return null as any;
+      }
       const [doc] = await this._insertRows([split], this.session);
-      return this._returnOne(doc, args);
+      return this._returnOne(doc, args as any);
     }
     // A create with nested writes is several statements; it commits or rolls
     // back as one wherever the database has transactions.
     return runAtomic(this.adapter, this.session, async (s) => {
       const w = this._bound(s);
       const [doc] = await w._insertRows([split], s ?? w.session);
-      return w._returnOne(doc, args);
-    });
+      return (args as any).select === false ? null : w._returnOne(doc, args as any);
+    }) as any;
   }
 
   /**
@@ -801,7 +806,8 @@ export class CollectionWrapper<
   async update<A extends {
     where: WhereInput<F>;
     data: IUpdate<F, R>;
-    select?: ISelect<F, R, SM>;
+    /** `false`: write without reading the row back; resolves to null. */
+    select?: ISelect<F, R, SM> | false;
     include?: IInclude<R, SM>;
     omit?: { [K in keyof F]?: boolean };
   }>(
@@ -811,7 +817,7 @@ export class CollectionWrapper<
     // (the `_` prefix is the convention); users should call softDelete()
     // / restore() directly rather than passing this themselves.
     _internal?: { semanticOp?: 'softDelete' | 'restore'; tolerateMissing?: boolean },
-  ): Promise<Find1<F, R, A, SM>> {
+  ): Promise<A extends { select: false } ? null : Find1<F, R, A, SM>> {
     this._assertWritable('update');
     this._assertStrictWhere(args.where);
     const mk = this._modelKey();
@@ -828,17 +834,31 @@ export class CollectionWrapper<
       },
       schema as any,
     ));
+    // `select: false` reads nothing back. Nested writes need the parent's key
+    // values, which the filter itself supplies when it names them by value
+    // and every nested write hangs off this row's own key (inverse side).
+    const known = (args as any).select === false && nested.length > 0 ? this._keysFromWhere(args.where, nested) : null;
+    const noReturn = (args as any).select === false && (nested.length === 0 || known !== null);
+    if (noReturn) node.noReturn = true;
     const run = async (w: CollectionWrapper<F, R, SM>) => {
-      const { doc } = await w.adapter.executeUpdate(node, w.model, {
+      const { doc, count } = await w.adapter.executeUpdate(node, w.model, {
         session: w.session,
         semanticOp: _internal?.semanticOp,
       });
+      if (noReturn) {
+        if (count > 0) {
+          if (known) await w._applyNestedWrites(known, nested);
+          return null as never;
+        }
+        if (_internal?.tolerateMissing) return null as never;
+        throw notFoundError(w.model.collection, args.where);
+      }
       if (!doc) {
         if (_internal?.tolerateMissing) return null as never;
         throw notFoundError(w.model.collection, args.where);
       }
       if (nested.length > 0) await w._applyNestedWrites(doc, nested);
-      return w._returnOne(doc, args);
+      return (args as any).select === false ? null as never : w._returnOne(doc, args as any);
     };
     if (nested.length === 0) return run(this);
     return runAtomic(this.adapter, this.session, (s) => run(this._bound(s)));
@@ -926,10 +946,11 @@ export class CollectionWrapper<
     where: WhereInput<F>;
     create: ICreate<F, R>;
     update: IUpdate<F, R>;
-    select?: ISelect<F, R, SM>;
+    /** `false`: write without reading the row back; resolves to null. */
+    select?: ISelect<F, R, SM> | false;
     include?: IInclude<R, SM>;
     omit?: { [K in keyof F]?: boolean };
-  }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A, SM>> {
+  }>(args: A & NoBothSelectInclude<A>): Promise<A extends { select: false } ? null : Find1<F, R, A, SM>> {
     this._assertWritable('upsert');
     this._assertStrictWhere(args.where);
     const mk = this._modelKey();
@@ -986,7 +1007,7 @@ export class CollectionWrapper<
           if (!doc) throw err;
         }
       }
-      return this._returnOne(doc, args);
+      return (args as any).select === false ? null as any : this._returnOne(doc, args as any);
     }
 
     // Build a coerced create payload for $setOnInsert. The compile-from-ir
@@ -998,36 +1019,47 @@ export class CollectionWrapper<
       { where: args.where, data: this._applyUpdatedAt(args.update), many: false, upsertCreate: createCoerced },
       schema as any,
     ));
+    if ((args as any).select === false) {
+      node.noReturn = true;
+      await this.adapter.executeUpdate(node, this.model, { session: this.session });
+      return null as any;
+    }
     const { doc } = await this.adapter.executeUpdate(node, this.model, { session: this.session });
-    return this._returnOne(doc, args);
+    return this._returnOne(doc, args as any);
   }
 
   async delete<A extends {
     where: WhereInput<F>;
-    select?: ISelect<F, R, SM>;
+    /** `false`: write without reading the row back; resolves to null. */
+    select?: ISelect<F, R, SM> | false;
     include?: IInclude<R, SM>;
     omit?: { [K in keyof F]?: boolean };
   }>(
     args: A & NoBothSelectInclude<A>,
     _internal?: { tolerateMissing?: boolean },
-  ): Promise<Find1<F, R, A, SM>> {
+  ): Promise<A extends { select: false } ? null : Find1<F, R, A, SM>> {
     this._assertWritable('delete');
     this._assertStrictWhere(args.where);
     const mk = this._modelKey();
     // Relations of a deleted row are read before it goes (Prisma does the
     // same): afterwards the row, and with a cascade its children, are gone.
-    const before = this._readsRelationsBack(args)
+    const noReturn = (args as any).select === false;
+    const before = !noReturn && this._readsRelationsBack(args as any)
       ? await this.findFirst({ where: args.where, select: args.select, include: args.include, omit: args.omit } as any)
       : undefined;
     // v2: delete() is ALWAYS a hard delete (Prisma parity) — no schema magic.
     // For the recoverable path on models that declare a `.softDeleteAt()`
     // field, use softDelete() / softDeleteMany() and restore() / restoreMany().
-    const { doc } = this._walksCascades(mk)
+    const delNode = buildDelete(mk, this.model, { where: args.where, many: false }, schema as any);
+    if (noReturn) delNode.noReturn = true;
+    const { doc, count } = this._walksCascades(mk)
       ? await this._deleteWithCascades(mk, args.where, false)
-      : await this.adapter.executeDelete(
-        buildDelete(mk, this.model, { where: args.where, many: false }, schema as any),
-        this.model, { session: this.session },
-      );
+      : await this.adapter.executeDelete(delNode, this.model, { session: this.session });
+    if (noReturn) {
+      if (count > 0) return null as any;
+      if (_internal?.tolerateMissing) return null as never;
+      throw notFoundError(this.model.collection, args.where);
+    }
     if (!doc) {
       if (_internal?.tolerateMissing) return null as never;
       throw notFoundError(this.model.collection, args.where);
@@ -1096,10 +1128,12 @@ export class CollectionWrapper<
     if (!adapter.selectWithChildPresence || this.session !== undefined) return undefined;
     const fields = cascadeKeyFields(models, mk, this.model);
     const select = Object.fromEntries(fields.map((f) => [f, true]));
-    const { rows: targets, present } = await adapter.selectWithChildPresence(
+    const probed = await adapter.selectWithChildPresence(
       buildSelect(mk, this.model, { where, select, ...(many ? {} : { take: 1 }) }, many ? 'many' : 'one', schema as any),
       this.model, cascadeProbes(models, mk), {},
     );
+    if (!probed) return undefined;
+    const { rows: targets, present } = probed;
     if (targets.length === 0) return { count: 0 };
     const delWhere = this._cascadeDeleteWhere(where, many, fields[0], targets);
     const del = (opts: { session?: unknown }) =>
@@ -1414,6 +1448,20 @@ export class CollectionWrapper<
     return pruned;
   }
 
+  // The parent-side key values nested inverse writes join on, when `where`
+  // pins them by plain equality (`{ id: 'u1' }`); null otherwise.
+  private _keysFromWhere(where: any, nested: NestedSpec[]): Record<string, unknown> | null {
+    if (!where || typeof where !== 'object') return null;
+    const out: Record<string, unknown> = {};
+    for (const sp of nested) {
+      if (sp.rel.kind === 'one' && !sp.rel.inverse) return null;
+      const v = where[sp.rel.refs];
+      if (v == null || typeof v === 'object') return null;
+      out[sp.rel.refs] = v;
+    }
+    return out;
+  }
+
   private _readsRelationsBack(args: { select?: any; include?: any }): boolean {
     // IndexedDB hydrates the written row itself; every other adapter only
     // does it right inside its select (Mongo applied no nested `select`).
@@ -1565,7 +1613,8 @@ export class CollectionWrapper<
           await targetWrapper.update({
             where: { id: tId },
             data: { [childFkField]: fkValue },
-          });
+            select: false,
+          } as any);
         }
         continue;
       }
@@ -1577,7 +1626,8 @@ export class CollectionWrapper<
           await targetWrapper.update({
             where: { id: tId } as any,
             data: { [childFkField]: null } as any,
-          });
+            select: false,
+          } as any);
         }
         continue;
       }
@@ -1593,7 +1643,7 @@ export class CollectionWrapper<
         const d = wrapsData(target, spec.data) ? spec.data.data : spec.data;
         const ref = parentDoc[rel.on];
         if (ref == null) throw notFoundError(target.collection, { [rel.refs]: ref });
-        await targetWrapper.update({ where: { [rel.refs]: ref } as any, data: d });
+        await targetWrapper.update({ where: { [rel.refs]: ref } as any, data: d, select: false } as any);
         continue;
       }
       if (op === 'update') {
@@ -1602,7 +1652,7 @@ export class CollectionWrapper<
         const items: any[] = rel.kind === 'many'
           ? (Array.isArray(spec.data) ? spec.data : [spec.data])
           : [wrapsData(target, spec.data) ? { where: spec.data.where, data: spec.data.data } : { data: spec.data }];
-        for (const it of items) await targetWrapper.update({ where: own(it.where), data: it.data });
+        for (const it of items) await targetWrapper.update({ where: own(it.where), data: it.data, select: false } as any);
         continue;
       }
       if (op === 'updateMany') {
@@ -1617,6 +1667,7 @@ export class CollectionWrapper<
             where: rel.kind === 'many' ? it.where : (it.where ?? { [childFkField]: fkValue }),
             create: { ...(it.create ?? {}), [childFkField]: fkValue },
             update: it.update ?? {},
+            select: false,
           } as any);
         }
         continue;
@@ -1624,7 +1675,7 @@ export class CollectionWrapper<
       if (op === 'delete') {
         const targets = rel.kind === 'one' && spec.data === true ? [{}] : (Array.isArray(spec.data) ? spec.data : [spec.data]);
         for (const t of targets) {
-          await targetWrapper.delete({ where: own(t) });
+          await targetWrapper.delete({ where: own(t), select: false } as any);
         }
         continue;
       }

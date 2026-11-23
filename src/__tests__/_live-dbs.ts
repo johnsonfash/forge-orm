@@ -105,12 +105,12 @@ export async function openSqlite(schema: Record<string, unknown>): Promise<LiveD
   return { db, log, close: async () => { h.close(); } };
 }
 
-export async function openDuckdb(schema: Record<string, unknown>): Promise<LiveDb> {
+export async function openDuckdb(schema: Record<string, unknown>, opts: { instance?: boolean } = {}): Promise<LiveDb> {
   const { DuckDBInstance } = require('@duckdb/node-api');
   const instance = await DuckDBInstance.create(':memory:');
   const conn = await instance.connect();
   const log: string[] = [];
-  const driver = duckdbDriver(conn);
+  const driver = duckdbDriver(conn, opts.instance ? { instance } : {});
   const { buildSchemaDDL } = require('../adapters/duckdb/ddl');
   const { applyMigration } = require('../adapters/duckdb/migrate');
   await applyMigration(driver, buildSchemaDDL(schema as never));
