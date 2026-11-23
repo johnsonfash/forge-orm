@@ -50,6 +50,19 @@ interface CompileCtx {
   negated?: boolean;
 }
 
+// some <-> none, is <-> isNot, and NOT every(p) = some(NOT p).
+function negateRelation(t: WhereTree): WhereTree | null {
+  if (t.kind !== 'relation') return null;
+  switch (t.mode) {
+    case 'some': return { ...t, mode: 'none' };
+    case 'none': return { ...t, mode: 'some' };
+    case 'is': return { ...t, mode: 'isNot' };
+    case 'isNot': return { ...t, mode: 'is' };
+    case 'every': return t.nested ? { ...t, mode: 'some', nested: { kind: 'not', child: t.nested } } : null;
+  }
+  return null;
+}
+
 function compileWhere(ctx: CompileCtx, tree: WhereTree | undefined): string {
   if (!tree) return '';
   return compileWhereNode(ctx, tree);
@@ -70,6 +83,12 @@ function compileWhereNode(ctx: CompileCtx, tree: WhereTree): string {
       return `(${parts.join(' OR ')})`;
     }
     case 'not': {
+      // NOT of a relation filter is the opposite filter, so the planner gets a
+      // plain EXISTS / NOT EXISTS it can turn into a semi- or anti-join:
+      // `NOT (NOT EXISTS …)` was planned as a subplan per row, 25% slower.
+      const flipped = negateRelation(tree.child);
+      if (flipped) return compileWhereNode(ctx, flipped);
+      if (tree.child.kind === 'not') return compileWhereNode(ctx, tree.child.child);
       const inner = compileWhereNode(ctx.negated ? ctx : { ...ctx, negated: true }, tree.child);
       return inner ? `NOT (${inner})` : '';
     }
@@ -591,7 +610,28 @@ function notEmpty(s: string): boolean {
   return s.length > 0;
 }
 
+// The column list is the same string for every query of one shape, and on a
+// point lookup building it was the largest single cost of compiling.
+const projectionCache = new WeakMap<object, Map<string, string>>();
+
 function compileProjectionCols(
+  d: Dialect,
+  table: string,
+  model: ModelDef<any>,
+  plan: ProjectionPlan | undefined,
+): string {
+  const key = `${d.name}|${table}|${!plan ? '*' : plan.exclusive && plan.fields.length ? `s:${plan.fields.join(',')}` : plan.omit?.length ? `o:${plan.omit.join(',')}` : '*'}`;
+  let byModel = projectionCache.get(model);
+  if (!byModel) { byModel = new Map(); projectionCache.set(model, byModel); }
+  let cols = byModel.get(key);
+  if (cols === undefined) {
+    cols = buildProjectionCols(d, table, model, plan);
+    if (byModel.size < 512) byModel.set(key, cols);
+  }
+  return cols;
+}
+
+function buildProjectionCols(
   d: Dialect,
   table: string,
   model: ModelDef<any>,
@@ -1176,7 +1216,11 @@ export function compileUpdate(
     const conflictClause = conflictCols.length
       ? dialect.upsertConflictClause(conflictCols, setParts.join(', '))
       : 'ON CONFLICT DO NOTHING';
-    const sql = `INSERT INTO ${table} (${colList}) VALUES (${valList}) ${conflictClause}${manyCountOnly(node, dialect) ? '' : ' RETURNING *'}`;
+    const ret = manyCountOnly(node, dialect) ? ''
+      : node.returning?.exclusive && node.returning.fields.length
+        ? ` RETURNING ${node.returning.fields.map((f) => dialect.quoteIdent(f)).join(', ')}`
+        : ' RETURNING *';
+    const sql = `INSERT INTO ${table} (${colList}) VALUES (${valList}) ${conflictClause}${ret}`;
     return { kind: 'sql', dialect: dialect.name, sql, params };
   }
 

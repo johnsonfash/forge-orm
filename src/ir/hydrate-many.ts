@@ -298,3 +298,14 @@ export function liftRelationCounts(rows: Record<string, any>[], counts: string[]
     r._count = out;
   }
 }
+
+/**
+ * Whether a SQL `SELECT DISTINCT` over the selected columns already returns
+ * one row per `distinct` key: true when exactly the distinct columns are
+ * selected, so the executor's dedupe by key would only repeat it.
+ */
+export function distinctIsExact(node: SelectNode): boolean {
+  const p = node.projection;
+  if (!node.distinct?.length || !p?.exclusive || !p.fields.length || node.hydration?.length || p.counts?.length) return false;
+  return p.fields.length === node.distinct.length && node.distinct.every((f) => p.fields.includes(f));
+}

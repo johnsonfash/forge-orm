@@ -21,7 +21,7 @@ import { withMysqlErrors } from './errors';
 import { rowDecoder, parseJsonText, type Convert } from '../shared/row-decoder';
 import { buildSelect, buildWhereTree } from '../../ir/build';
 import { fromDriverBytes } from '../../bytes';
-import { hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
+import { distinctIsExact, hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
 import { refineFallbackGeo } from '../shared/haversine';
 
 // MySQL 8 and MariaDB 10.2 number rows per parent with ROW_NUMBER(); 5.7 has
@@ -101,7 +101,7 @@ export async function executeMysqlSelect(
   const a = compileSelect(node, model);
   const [rows] = await withMysqlErrors(() => exec.query(a.sql, a.params));
   let out = decodeRows(model, rows as any[]);
-  if (node.distinct?.length) out = dedupeBy(out, node.distinct);
+  if (node.distinct?.length && !distinctIsExact(node)) out = dedupeBy(out, node.distinct);
   // Fallback geoPoint refinement — bbox prefilter → exact circle + sort.
   out = refineFallbackGeo(out, node, model);
   if (node.projection?.counts?.length) liftRelationCounts(out, node.projection.counts);
@@ -197,7 +197,7 @@ export async function executeMysqlUpdate(
   const a = compileUpdate(node, model);
   if (!node.many && !node.noReturn && (exec as { multiStatements?: boolean }).multiStatements) {
     // One round trip: the write and its read-back as two statements of one query.
-    const sel = compileSelect(buildSelect(node.model, model, { where: irWhereToObject(node.where), take: 1 }, 'one'), model);
+    const sel = compileSelect(buildSelect(node.model, model, { where: irWhereToObject(node.where), take: 1, ...readBackSelect(node) }, 'one'), model);
     const [res]: any = await withMysqlErrors(() => exec.query(`${a.sql}; ${sel.sql}`, [...a.params, ...sel.params]));
     const [head, rows] = res as [any, any[]];
     if (whereHasNonEq(node.where) && head.affectedRows === 0) return { doc: undefined, count: 0 };
@@ -215,7 +215,7 @@ export async function executeMysqlUpdate(
   // rows, so a no-op update isn't a miss) and re-SELECT to return the row.
   if (whereHasNonEq(node.where) && result.affectedRows === 0) return { doc: undefined, count: 0 };
   const selectArtifact = compileSelect(
-    buildSelect(node.model, model, { where: irWhereToObject(node.where), take: 1 }, 'one'),
+    buildSelect(node.model, model, { where: irWhereToObject(node.where), take: 1, ...readBackSelect(node) }, 'one'),
     model,
   );
   const [rows] = await withMysqlErrors(() => exec.query(selectArtifact.sql, selectArtifact.params));
@@ -243,7 +243,7 @@ export async function executeMysqlDelete(
   }
   // Single-row delete: SELECT first to capture the row, then DELETE.
   const selectArtifact = compileSelect(
-    buildSelect(node.model, model, { where: irWhereToObject(node.where), take: 1 }, 'one'),
+    buildSelect(node.model, model, { where: irWhereToObject(node.where), take: 1, ...readBackSelect(node) }, 'one'),
     model,
   );
   const [rows] = await withMysqlErrors(() => exec.query(selectArtifact.sql, selectArtifact.params));
@@ -255,6 +255,13 @@ export async function executeMysqlDelete(
   // SELECT found the (unguarded) row.
   if (whereHasNonEq(node.where) && result.affectedRows === 0) return { doc: undefined, count: 0 };
   return { doc: decodeRow(model, doc), count: result.affectedRows };
+}
+
+// Read back only the columns the caller's `select` asked for.
+function readBackSelect(node: UpdateNode | DeleteNode): { select?: Record<string, true> } {
+  const p = node.returning;
+  if (!p?.exclusive || !p.fields.length) return {};
+  return { select: Object.fromEntries(p.fields.map((f) => [f, true as const])) };
 }
 
 function matchedRows(result: any): number {

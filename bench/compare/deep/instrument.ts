@@ -12,14 +12,28 @@ import { RT } from "./core";
 let depth = 0;
 const done = new Set<string>();
 
-function wrap(proto: any, methods: string[], textOf: (this: any, args: any[]) => unknown = (a) => a[0]) {
+// BENCH_LATENCY_MS simulates a network: every round trip waits this long
+// before it is sent, for every engine alike. Only where the call is
+// asynchronous anyway (pg, mysql2); a streaming call is left alone.
+const LATENCY = Number(process.env.BENCH_LATENCY_MS ?? 0);
+
+function wrap(proto: any, methods: string[], textOf: (this: any, args: any[]) => unknown = (a) => a[0], delayable = false) {
   for (const m of methods) {
     const orig = proto?.[m];
     if (typeof orig !== "function" || orig.__benchWrapped) continue;
     const w = function (this: any, ...args: any[]) {
-      if (depth === 0) RT.hit(textOf.call(this, args));
-      depth++;
-      try { return orig.apply(this, args); } finally { depth--; }
+      const top = depth === 0;
+      if (top) RT.hit(textOf.call(this, args));
+      const run = () => { depth++; try { return orig.apply(this, args); } finally { depth--; } };
+      if (LATENCY > 0 && delayable && top) {
+        const cb = typeof args[args.length - 1] === "function";
+        const submittable = args[0] && typeof args[0] === "object" && typeof args[0].submit === "function";
+        if (cb && !submittable) { setTimeout(run, LATENCY); return undefined; }
+        if (!cb && !submittable && m === "query" && proto.constructor?.name === "Client") {
+          return new Promise((r) => setTimeout(r, LATENCY)).then(run);
+        }
+      }
+      return run();
     };
     (w as any).__benchWrapped = true;
     proto[m] = w;
@@ -29,12 +43,12 @@ function wrap(proto: any, methods: string[], textOf: (this: any, args: any[]) =>
 export function instrument(dialect: string, extra?: { sqliteHandle?: any }): void {
   if (dialect === "postgres" && !done.has("pg")) {
     done.add("pg");
-    wrap(require("pg").Client.prototype, ["query"]);
+    wrap(require("pg").Client.prototype, ["query"], undefined, true);
   }
   if (dialect === "mysql" && !done.has("mysql2")) {
     done.add("mysql2");
     // mysql2's package "exports" hide lib/, so load the file by its path.
-    wrap(require(require("node:path").join(require("node:path").dirname(require.resolve("mysql2")), "lib/base/connection.js")).prototype, ["query", "execute"]);
+    wrap(require(require("node:path").join(require("node:path").dirname(require.resolve("mysql2")), "lib/base/connection.js")).prototype, ["query", "execute"], undefined, true);
   }
   if (dialect === "sqlite" && extra?.sqliteHandle && !done.has("sqlite")) {
     done.add("sqlite");

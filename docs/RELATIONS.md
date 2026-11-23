@@ -944,6 +944,15 @@ either-or semantics.
 
 ---
 
+
+### `NOT` of a relation filter (2.28.0)
+
+On the SQL dialects a `NOT` around a relation filter is compiled as the
+opposite filter rather than wrapped: `NOT { posts: { every: p } }` becomes
+`EXISTS (… AND NOT p)`, `NOT some` becomes `NOT EXISTS`, `NOT is` becomes
+`isNot`. Same rows; the planner gets a plain semi- or anti-join instead of a
+subplan run per row, which was 25% slower on Postgres.
+
 ## Counting and aggregating relations
 
 ### `_count` in `include`

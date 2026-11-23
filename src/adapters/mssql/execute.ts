@@ -27,7 +27,7 @@ import { decodeJsonColumns } from '../shared/json-columns';
 const MSSQL_JSON = { arrays: true };
 import type { MssqlQueryable } from './driver';
 import type { Dialect } from '../postgres/dialect';
-import { hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
+import { distinctIsExact, hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
 import { refineFallbackGeo } from '../shared/haversine';
 
 // Window functions are always available here, so a nested page is one query.
@@ -50,7 +50,7 @@ export async function executeMssqlSelect(
   const { rows } = await withMssqlErrors(() => exec.query(artifact.sql, artifact.params));
 
   let out = decodeWideIntegerRows(model, decodeJsonColumns(model, rows, MSSQL_JSON));
-  if (node.distinct?.length) out = dedupeBy(out, node.distinct);
+  if (node.distinct?.length && !distinctIsExact(node)) out = dedupeBy(out, node.distinct);
 
   // Fallback geoPoint refinement — exact-circle + sort post-process.
   out = refineFallbackGeo(out, node, model);

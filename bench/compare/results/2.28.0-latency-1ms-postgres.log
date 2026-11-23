@@ -1,0 +1,372 @@
+[deep] dialect=postgres users=1000 iter=10 warmup=2 engines=raw,forge,prisma,drizzle,kysely,knex
+[deep] seeded 1000 users, 10000 posts, 50000 comments in 2380ms
+[deep] engine raw: ready
+[deep] engine forge: ready
+[deep] engine prisma: ready
+[deep] engine drizzle: ready
+[deep] engine kysely: ready
+[deep] engine knex: ready
+[deep] pk                     raw      1.783ms rt=1
+[deep] pk                     forge    1.755ms rt=1
+[deep] pk                     prisma   1.969ms rt=1
+[deep] pk                     drizzle  1.809ms rt=1
+[deep] pk                     kysely   1.714ms rt=1
+[deep] pk                     knex     1.815ms rt=1
+[deep] unique_email           raw      1.655ms rt=1
+[deep] unique_email           forge    1.725ms rt=1
+[deep] unique_email           prisma   1.858ms rt=1
+[deep] unique_email           drizzle  1.873ms rt=1
+[deep] unique_email           kysely   1.763ms rt=1
+[deep] unique_email           knex     1.810ms rt=1
+[deep] filter_offset          raw      1.934ms rt=1
+[deep] filter_offset          forge    2.041ms rt=1
+[deep] filter_offset          prisma   2.321ms rt=1
+[deep] filter_offset          drizzle  2.479ms rt=1
+[deep] filter_offset          kysely   2.021ms rt=1
+[deep] filter_offset          knex     2.100ms rt=1
+[deep] cursor                 raw      2.188ms rt=1
+[deep] cursor                 forge    2.124ms rt=1
+[deep] cursor                 prisma   2.498ms rt=1
+[deep] cursor                 drizzle  2.494ms rt=1
+[deep] cursor                 kysely   2.191ms rt=1
+[deep] cursor                 knex     2.234ms rt=1
+[deep] count_filter           raw      2.956ms rt=1
+[deep] count_filter           forge    4.127ms rt=1
+[deep] count_filter           prisma   3.202ms rt=1
+[deep] count_filter           drizzle  3.265ms rt=1
+[deep] count_filter           kysely   4.186ms rt=1
+[deep] count_filter           knex     4.243ms rt=1
+[deep] exists                 raw      1.609ms rt=1
+[deep] exists                 forge    1.711ms rt=1
+[deep] exists                 prisma   2.214ms rt=1
+[deep] exists                 drizzle  1.875ms rt=1
+[deep] exists                 kysely   1.969ms rt=1
+[deep] exists                 knex     1.970ms rt=1
+[deep] select_cols            raw      1.952ms rt=1
+[deep] select_cols            forge    2.213ms rt=1
+[deep] select_cols            prisma   2.294ms rt=1
+[deep] select_cols            drizzle  2.383ms rt=1
+[deep] select_cols            kysely   2.057ms rt=1
+[deep] select_cols            knex     2.107ms rt=1
+[deep] in_100                 raw      2.690ms rt=1
+[deep] in_100                 forge    2.746ms rt=1
+[deep] in_100                 prisma   3.171ms rt=1
+[deep] in_100                 drizzle  3.408ms rt=1
+[deep] in_100                 kysely   2.726ms rt=1
+[deep] in_100                 knex     2.872ms rt=1
+[deep] or_not_like            raw      2.201ms rt=1
+[deep] or_not_like            forge    2.636ms rt=1
+[deep] or_not_like            prisma   2.914ms rt=1
+[deep] or_not_like            drizzle  2.594ms rt=1
+[deep] or_not_like            kysely   3.128ms rt=1
+[deep] or_not_like            knex     2.423ms rt=1
+[deep] rel_some               raw      2.435ms rt=1
+[deep] rel_some               forge    3.115ms rt=1
+[deep] rel_some               prisma   3.485ms rt=1
+[deep] rel_some               drizzle  2.770ms rt=1
+[deep] rel_some               kysely   2.779ms rt=1
+[deep] rel_some               knex     2.884ms rt=1
+[deep] rel_none               raw      5.669ms rt=1
+[deep] rel_none               forge    5.690ms rt=1
+[deep] rel_none               prisma   6.215ms rt=1
+[deep] rel_none               drizzle  5.836ms rt=1
+[deep] rel_none               kysely   5.069ms rt=1
+[deep] rel_none               knex     6.175ms rt=1
+[deep] rel_every              raw      8.005ms rt=1
+[deep] rel_every              forge    6.657ms rt=1
+[deep] rel_every              prisma   7.253ms rt=1
+[deep] rel_every              drizzle  8.873ms rt=1
+[deep] rel_every              kysely   6.443ms rt=1
+[deep] rel_every              knex     6.591ms rt=1
+[deep] include_1              raw      4.140ms rt=2
+[deep] include_1              forge    3.038ms rt=1
+[deep] include_1              prisma   4.060ms rt=2
+[deep] include_1              drizzle  2.991ms rt=1
+[deep] include_1              kysely   2.252ms rt=1
+[deep] include_1              knex     3.380ms rt=2
+[deep] include_2              raw      8.404ms rt=3
+[deep] include_2              forge    6.609ms rt=1
+[deep] include_2              prisma   10.090ms rt=3
+[deep] include_2              drizzle  4.049ms rt=1
+[deep] include_2              kysely   4.299ms rt=1
+[deep] include_2              knex     9.157ms rt=3
+[deep] include_3              raw      10.878ms rt=4
+[deep] include_3              forge    5.717ms rt=1
+[deep] include_3              prisma   11.344ms rt=4
+[deep] include_3              drizzle  6.967ms rt=1
+[deep] include_3              kysely   4.456ms rt=1
+[deep] include_3              knex     9.323ms rt=4
+[deep] m2m_post_tags          raw      5.482ms rt=1
+[deep] m2m_post_tags          forge    4.958ms rt=1
+[deep] m2m_post_tags          prisma   7.213ms rt=3
+[deep] m2m_post_tags          drizzle  4.889ms rt=1
+[deep] m2m_post_tags          kysely   4.405ms rt=1
+[deep] m2m_post_tags          knex     5.041ms rt=2
+[deep] m2m_tag_counts         raw      9.048ms rt=1
+[deep] m2m_tag_counts         forge    3.275ms rt=1
+[deep] m2m_tag_counts         prisma   6.649ms rt=1
+[deep] m2m_tag_counts         drizzle  10.506ms rt=1
+[deep] m2m_tag_counts         kysely   7.633ms rt=1
+[deep] m2m_tag_counts         knex     7.421ms rt=1
+[deep] count_rel              raw      2.534ms rt=1
+[deep] count_rel              forge    2.899ms rt=1
+[deep] count_rel              prisma   2.824ms rt=1
+[deep] count_rel              drizzle  4.416ms rt=1
+[deep] count_rel              kysely   4.177ms rt=1
+[deep] count_rel              knex     3.397ms rt=1
+[deep] aggregate              raw      4.239ms rt=1
+[deep] aggregate              forge    3.769ms rt=1
+[deep] aggregate              prisma   3.842ms rt=1
+[deep] aggregate              drizzle  4.040ms rt=1
+[deep] aggregate              kysely   3.449ms rt=1
+[deep] aggregate              knex     4.495ms rt=1
+[deep] groupby                raw      6.307ms rt=1
+[deep] groupby                forge    6.548ms rt=1
+[deep] groupby                prisma   7.291ms rt=1
+[deep] groupby                drizzle  6.530ms rt=1
+[deep] groupby                kysely   6.670ms rt=1
+[deep] groupby                knex     6.087ms rt=1
+[deep] distinct               raw      6.870ms rt=1
+[deep] distinct               forge    5.563ms rt=1
+[deep] distinct               prisma   6.373ms rt=1
+[deep] distinct               drizzle  8.495ms rt=1
+[deep] distinct               kysely   7.001ms rt=1
+[deep] distinct               knex     6.818ms rt=1
+[deep] json_prefs             raw      3.279ms rt=1
+[deep] json_prefs             forge    4.050ms rt=1
+[deep] json_prefs             prisma   4.952ms rt=1
+[deep] json_prefs             drizzle  4.342ms rt=1
+[deep] json_prefs             kysely   3.435ms rt=1
+[deep] json_prefs             knex     4.198ms rt=1
+[deep] json_meta              raw      6.165ms rt=1
+[deep] json_meta              forge    6.094ms rt=1
+[deep] json_meta              prisma   8.816ms rt=1
+[deep] json_meta              drizzle  4.540ms rt=1
+[deep] json_meta              kysely   6.135ms rt=1
+[deep] json_meta              knex     6.250ms rt=1
+[deep] fts                    raw      6.651ms rt=1
+[deep] fts                    forge    5.337ms rt=1
+[deep] fts                    prisma   40.101ms rt=1
+[deep] fts                    drizzle  3.055ms rt=1
+[deep] fts                    kysely   3.141ms rt=1
+[deep] fts                    knex     3.331ms rt=1
+[deep] geo_near               raw      2.053ms rt=1
+[deep] geo_near               forge    2.222ms rt=1
+[deep] geo_near               prisma   n/a
+[deep] geo_near               drizzle  n/a
+[deep] geo_near               kysely   n/a
+[deep] geo_near               knex     n/a
+[deep] large_findmany         raw      21.801ms rt=1
+[deep] large_findmany         forge    21.262ms rt=1
+[deep] large_findmany         prisma   32.283ms rt=1
+[deep] large_findmany         drizzle  24.078ms rt=1
+[deep] large_findmany         kysely   24.298ms rt=1
+[deep] large_findmany         knex     21.688ms rt=1
+[deep] stream                 raw      59.547ms rt=15
+[deep] stream                 forge    59.353ms rt=15
+[deep] stream                 prisma   n/a
+[deep] stream                 drizzle  n/a
+[deep] stream                 kysely   n/a
+[deep] stream                 knex     n/a
+[deep] rel_deep               raw      6.446ms rt=1
+[deep] rel_deep               forge    7.193ms rt=1
+[deep] rel_deep               prisma   8.779ms rt=1
+[deep] rel_deep               drizzle  6.940ms rt=1
+[deep] rel_deep               kysely   6.412ms rt=1
+[deep] rel_deep               knex     6.446ms rt=1
+[deep] include_count          raw      9.992ms rt=4
+[deep] include_count          forge    6.008ms rt=1
+[deep] include_count          prisma   10.584ms rt=4
+[deep] include_count          drizzle  6.403ms rt=1
+[deep] include_count          kysely   5.528ms rt=1
+[deep] include_count          knex     12.252ms rt=4
+[deep] groupby_rel            raw      5.772ms rt=1
+[deep] groupby_rel            forge    5.888ms rt=1
+[deep] groupby_rel            prisma   5.992ms rt=1
+[deep] groupby_rel            drizzle  7.084ms rt=1
+[deep] groupby_rel            kysely   6.683ms rt=1
+[deep] groupby_rel            knex     6.552ms rt=1
+[deep] json_fts_rel           raw      8.596ms rt=1
+[deep] json_fts_rel           forge    6.885ms rt=1
+[deep] json_fts_rel           prisma   8.289ms rt=1
+[deep] json_fts_rel           drizzle  5.631ms rt=1
+[deep] json_fts_rel           kysely   5.869ms rt=1
+[deep] json_fts_rel           knex     6.120ms rt=1
+[deep] create                 raw      1.703ms rt=1
+[deep] create                 forge    1.749ms rt=1
+[deep] create                 prisma   1.971ms rt=1
+[deep] create                 drizzle  2.547ms rt=1
+[deep] create                 kysely   2.014ms rt=1
+[deep] create                 knex     2.205ms rt=1
+[deep] create_many            raw      23.262ms rt=1
+[deep] create_many            forge    22.660ms rt=1
+[deep] create_many            prisma   97.243ms rt=3
+[deep] create_many            drizzle  39.647ms rt=1
+[deep] create_many            kysely   23.920ms rt=1
+[deep] create_many            knex     30.307ms rt=3
+[deep] nested_create          raw      13.277ms rt=8
+[deep] nested_create          forge    16.246ms rt=8
+[deep] nested_create          prisma   29.670ms rt=15
+[deep] nested_create          drizzle  17.396ms rt=8
+[deep] nested_create          kysely   16.263ms rt=8
+[deep] nested_create          knex     17.975ms rt=8
+[deep] update_by_id           raw      2.222ms rt=1
+[deep] update_by_id           forge    2.198ms rt=1
+[deep] update_by_id           prisma   2.181ms rt=1
+[deep] update_by_id           drizzle  2.204ms rt=1
+[deep] update_by_id           kysely   2.330ms rt=1
+[deep] update_by_id           knex     2.095ms rt=1
+[deep] update_many            raw      2.908ms rt=1
+[deep] update_many            forge    1.932ms rt=1
+[deep] update_many            prisma   5.650ms rt=3
+[deep] update_many            drizzle  2.344ms rt=1
+[deep] update_many            kysely   2.324ms rt=1
+[deep] update_many            knex     2.353ms rt=1
+[deep] increment_concurrent   raw      5.823ms rt=20
+[deep] increment_concurrent   forge    6.108ms rt=20
+[deep] increment_concurrent   prisma   6.887ms rt=20
+[deep] increment_concurrent   drizzle  6.153ms rt=20
+[deep] increment_concurrent   kysely   5.543ms rt=20
+[deep] increment_concurrent   knex     5.262ms rt=20
+[deep] upsert_insert          raw      1.728ms rt=1
+[deep] upsert_insert          forge    2.056ms rt=1
+[deep] upsert_insert          prisma   2.584ms rt=1
+[deep] upsert_insert          drizzle  2.558ms rt=1
+[deep] upsert_insert          kysely   2.287ms rt=1
+[deep] upsert_insert          knex     2.499ms rt=1
+[deep] upsert_update          raw      1.660ms rt=1
+[deep] upsert_update          forge    1.993ms rt=1
+[deep] upsert_update          prisma   9.829ms rt=5
+[deep] upsert_update          drizzle  2.368ms rt=1
+[deep] upsert_update          kysely   2.101ms rt=1
+[deep] upsert_update          knex     1.798ms rt=1
+[deep] delete_cascade         raw      2.671ms rt=1
+[deep] delete_cascade         forge    2.626ms rt=1
+[deep] delete_cascade         prisma   3.889ms rt=1
+[deep] delete_cascade         drizzle  3.070ms rt=1
+[deep] delete_cascade         kysely   2.847ms rt=1
+[deep] delete_cascade         knex     3.272ms rt=1
+[deep] delete_many            raw      7.257ms rt=1
+[deep] delete_many            forge    6.103ms rt=1
+[deep] delete_many            prisma   6.778ms rt=1
+[deep] delete_many            drizzle  6.192ms rt=1
+[deep] delete_many            kysely   6.182ms rt=1
+[deep] delete_many            knex     6.948ms rt=1
+[deep] tx_interactive         raw      12.103ms rt=7
+[deep] tx_interactive         forge    12.906ms rt=7
+[deep] tx_interactive         prisma   13.768ms rt=7
+[deep] tx_interactive         drizzle  14.431ms rt=7
+[deep] tx_interactive         kysely   12.069ms rt=7
+[deep] tx_interactive         knex     13.644ms rt=7
+[deep] tx_rollback            raw      4.835ms rt=3
+[deep] tx_rollback            forge    4.848ms rt=3
+[deep] tx_rollback            prisma   4.775ms rt=3
+[deep] tx_rollback            drizzle  4.681ms rt=3
+[deep] tx_rollback            kysely   4.550ms rt=3
+[deep] tx_rollback            knex     5.310ms rt=3
+[deep] optimistic_update      raw      4.701ms rt=3
+[deep] optimistic_update      forge    5.519ms rt=3
+[deep] optimistic_update      prisma   12.938ms rt=7
+[deep] optimistic_update      drizzle  6.337ms rt=3
+[deep] optimistic_update      kysely   5.694ms rt=3
+[deep] optimistic_update      knex     5.968ms rt=3
+[deep] delete_by_id           raw      1.933ms rt=1
+[deep] delete_by_id           forge    2.072ms rt=1
+[deep] delete_by_id           prisma   2.565ms rt=1
+[deep] delete_by_id           drizzle  2.212ms rt=1
+[deep] delete_by_id           kysely   1.763ms rt=1
+[deep] delete_by_id           knex     2.091ms rt=1
+[deep] update_many_rel        raw      2.721ms rt=1
+[deep] update_many_rel        forge    3.209ms rt=1
+[deep] update_many_rel        prisma   6.617ms rt=3
+[deep] update_many_rel        drizzle  3.825ms rt=1
+[deep] update_many_rel        kysely   3.017ms rt=1
+[deep] update_many_rel        knex     3.782ms rt=1
+[deep] delete_many_rel        raw      3.613ms rt=1
+[deep] delete_many_rel        forge    4.522ms rt=1
+[deep] delete_many_rel        prisma   4.689ms rt=1
+[deep] delete_many_rel        drizzle  5.402ms rt=1
+[deep] delete_many_rel        kysely   4.234ms rt=1
+[deep] delete_many_rel        knex     4.320ms rt=1
+[deep] nested_update          raw      12.227ms rt=7
+[deep] nested_update          forge    12.876ms rt=7
+[deep] nested_update          prisma   22.692ms rt=12
+[deep] nested_update          drizzle  14.040ms rt=7
+[deep] nested_update          kysely   13.206ms rt=7
+[deep] nested_update          knex     13.772ms rt=7
+[deep] upsert_loop            raw      19.064ms rt=10
+[deep] upsert_loop            forge    19.829ms rt=10
+[deep] upsert_loop            prisma   21.487ms rt=10
+[deep] upsert_loop            drizzle  22.900ms rt=10
+[deep] upsert_loop            kysely   20.003ms rt=10
+[deep] upsert_loop            knex     21.628ms rt=10
+[deep] tx_mixed               raw      14.137ms rt=8
+[deep] tx_mixed               forge    14.620ms rt=8
+[deep] tx_mixed               prisma   22.986ms rt=10
+[deep] tx_mixed               drizzle  14.138ms rt=8
+[deep] tx_mixed               kysely   15.103ms rt=8
+[deep] tx_mixed               knex     15.244ms rt=8
+[deep] dropped database forge_deep_1795424640059_g3eq
+[deep] wrote /Users/johnfash/Work/forge-orm/bench/compare/results/postgres-2026-11-23T09-04-00-115Z.md and /Users/johnfash/Work/forge-orm/bench/compare/results/postgres-2026-11-23T09-04-00-115Z.json
+
+scenario                       raw       forge      prisma     drizzle      kysely        knex   (median ms / round trips)
+pk                          1.78/1      1.76/1     1.97/1!      1.81/1      1.71/1      1.81/1
+unique_email                1.66/1      1.72/1     1.86/1!      1.87/1      1.76/1      1.81/1
+filter_offset               1.93/1      2.04/1     2.32/1!      2.48/1      2.02/1      2.10/1
+cursor                      2.19/1      2.12/1      2.50/1      2.49/1      2.19/1      2.23/1
+count_filter                2.96/1      4.13/1      3.20/1      3.26/1      4.19/1      4.24/1
+exists                      1.61/1      1.71/1      2.21/1      1.87/1      1.97/1      1.97/1
+select_cols                 1.95/1      2.21/1      2.29/1      2.38/1      2.06/1      2.11/1
+in_100                      2.69/1      2.75/1      3.17/1      3.41/1      2.73/1      2.87/1
+or_not_like                 2.20/1      2.64/1      2.91/1      2.59/1      3.13/1      2.42/1
+rel_some                    2.43/1      3.11/1      3.48/1      2.77/1      2.78/1      2.88/1
+rel_none                    5.67/1      5.69/1      6.21/1      5.84/1      5.07/1      6.18/1
+rel_every                   8.01/1      6.66/1      7.25/1      8.87/1      6.44/1      6.59/1
+include_1                   4.14/2      3.04/1      4.06/2      2.99/1      2.25/1      3.38/2
+include_2                   8.40/3      6.61/1     10.09/3      4.05/1      4.30/1      9.16/3
+include_3                  10.88/4      5.72/1    11.34/4!      6.97/1      4.46/1      9.32/4
+m2m_post_tags               5.48/1      4.96/1      7.21/3      4.89/1      4.41/1      5.04/2
+m2m_tag_counts              9.05/1      3.28/1      6.65/1     10.51/1      7.63/1      7.42/1
+count_rel                   2.53/1      2.90/1      2.82/1      4.42/1      4.18/1      3.40/1
+aggregate                   4.24/1      3.77/1      3.84/1      4.04/1      3.45/1      4.50/1
+groupby                     6.31/1      6.55/1      7.29/1      6.53/1      6.67/1      6.09/1
+distinct                    6.87/1      5.56/1      6.37/1      8.49/1      7.00/1      6.82/1
+json_prefs                  3.28/1      4.05/1      4.95/1      4.34/1      3.44/1      4.20/1
+json_meta                   6.17/1      6.09/1      8.82/1      4.54/1      6.13/1      6.25/1
+fts                         6.65/1      5.34/1     40.10/1      3.06/1      3.14/1      3.33/1
+geo_near                    2.05/1      2.22/1         n/a         n/a         n/a         n/a
+large_findmany             21.80/1     21.26/1     32.28/1     24.08/1     24.30/1     21.69/1
+stream                    59.55/15    59.35/15         n/a         n/a         n/a         n/a
+rel_deep                    6.45/1      7.19/1      8.78/1      6.94/1      6.41/1      6.45/1
+include_count               9.99/4      6.01/1     10.58/4      6.40/1      5.53/1     12.25/4
+groupby_rel                 5.77/1      5.89/1      5.99/1      7.08/1      6.68/1      6.55/1
+json_fts_rel                8.60/1      6.89/1      8.29/1      5.63/1      5.87/1      6.12/1
+create                      1.70/1      1.75/1      1.97/1      2.55/1      2.01/1      2.20/1
+create_many                23.26/1     22.66/1     97.24/3     39.65/1     23.92/1     30.31/3
+nested_create              13.28/8     16.25/8    29.67/15     17.40/8     16.26/8     17.98/8
+update_by_id                2.22/1      2.20/1      2.18/1      2.20/1      2.33/1      2.10/1
+update_many                 2.91/1      1.93/1      5.65/3      2.34/1      2.32/1      2.35/1
+increment_concurrent       5.82/20     6.11/20     6.89/20     6.15/20     5.54/20     5.26/20
+upsert_insert               1.73/1      2.06/1     2.58/1!      2.56/1      2.29/1      2.50/1
+upsert_update               1.66/1      1.99/1      9.83/5      2.37/1      2.10/1      1.80/1
+delete_cascade              2.67/1      2.63/1      3.89/1      3.07/1      2.85/1      3.27/1
+delete_many                 7.26/1      6.10/1      6.78/1      6.19/1      6.18/1      6.95/1
+tx_interactive             12.10/7     12.91/7     13.77/7     14.43/7     12.07/7     13.64/7
+tx_rollback                 4.84/3      4.85/3      4.78/3      4.68/3      4.55/3      5.31/3
+optimistic_update           4.70/3      5.52/3     12.94/7      6.34/3      5.69/3      5.97/3
+delete_by_id                1.93/1      2.07/1      2.57/1      2.21/1      1.76/1      2.09/1
+update_many_rel             2.72/1      3.21/1      6.62/3      3.83/1      3.02/1      3.78/1
+delete_many_rel             3.61/1      4.52/1      4.69/1      5.40/1      4.23/1      4.32/1
+nested_update              12.23/7     12.88/7    22.69/12     14.04/7     13.21/7     13.77/7
+upsert_loop               19.06/10    19.83/10    21.49/10    22.90/10    20.00/10    21.63/10
+tx_mixed                   14.14/8     14.62/8    22.99/10     14.14/8     15.10/8     15.24/8
+
+flags: 13 (mismatch=5, error=0, n-plus-one=0, more-round-trips=0, slower-than-raw=1, slower-than-orm=7)
+  MISMATCH pk prisma: differs from raw: prisma={"active":true,"created_at":"2025-01-01T02:00:00.000Z","email":"bob.1@bench.dev","id":"u_000001","name":"Bob User1","prefs":{"lang":"en","notify":false,"score":1,"theme":"light"},"role":"USER"} vs raw={"active":true,"created_at":"2025-01-01T01:00:00.000Z","email":"bob.1@bench.dev","id":"u_000001","name":"Bob User1","prefs":{"lang":"en","notify":false,"score":1,"theme":"light"},"role":"USER"}
+  MISMATCH unique_email prisma: differs from raw: prisma={"active":true,"created_at":"2025-01-01T02:00:00.000Z","email":"bob.1@bench.dev","id":"u_000001","name":"Bob User1","prefs":{"lang":"en","notify":false,"score":1,"theme":"light"},"role":"USER"} vs raw={"active":true,"created_at":"2025-01-01T01:00:00.000Z","email":"bob.1@bench.dev","id":"u_000001","name":"Bob User1","prefs":{"lang":"en","notify":false,"score":1,"theme":"light"},"role":"USER"}
+  MISMATCH filter_offset prisma: differs from raw: prisma=["u_000943","u_000941","u_000937","u_000935","u_000934","u_000929","u_000926","u_000925","u_000923","u_000922","u_000919","u_000914","u_000913","u_000911","u_000907","u_000905","u_000902","u_000901","u_000899","u_000898"... vs raw=["u_000946","u_000943","u_000941","u_000937","u_000935","u_000934","u_000929","u_000926","u_000925","u_000923","u_000922","u_000919","u_000914","u_000913","u_000911","u_000907","u_000905","u_000902","u_000901","u_000899"...
+  MISMATCH include_3 prisma: differs from raw: prisma=[{"id":"u_000001","posts":[{"comments":[{"author":"heidi.427@bench.dev","id":"c_00000046"},{"author":"ivan.458@bench.dev","id":"c_00000047"},{"author":"judy.489@bench.dev","id":"c_00000048"}],"id":"p_0000010","published_... vs raw=[{"id":"u_000001","posts":[{"comments":[{"author":"heidi.427@bench.dev","id":"c_00000046"},{"author":"ivan.458@bench.dev","id":"c_00000047"},{"author":"judy.489@bench.dev","id":"c_00000048"}],"id":"p_0000010","published_...
+  MISMATCH upsert_insert prisma: differs from raw: prisma={"active":true,"created_at":"2025-01-01T23:00:00.000Z","email":"xE_ups_0@bench.dev","id":"xE_ups_0","name":"Created xE_ups_0","prefs":{"lang":"en","notify":true,"score":7,"theme":"dark"},"role":"EDITOR"} vs raw={"active":true,"created_at":"2025-01-02T00:00:00.000Z","email":"xE_ups_0@bench.dev","id":"xE_ups_0","name":"Created xE_ups_0","prefs":{"lang":"en","notify":true,"score":7,"theme":"dark"},"role":"EDITOR"}
+
+!!!!!!!! 5 CORRECTNESS MISMATCH(ES) - engines returned different results. See the report. !!!!!!!!
+

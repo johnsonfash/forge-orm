@@ -41,6 +41,7 @@ Environment:
 |---|---|---|
 | `BENCH_SEED` | `1000` | users. Posts = 10x, comments = 50x, 50 tags, places = users |
 | `BENCH_ITER` | `30` | measured iterations per engine per scenario |
+| `BENCH_LATENCY_MS` | `0` | simulated network latency: every Postgres / MySQL round trip waits this long before it is sent, for every engine alike (Postgres only is reliable today: on MySQL the delayed callbacks break mysql2's command ordering inside transactions, so MySQL latency runs error; not SQLite, DuckDB or Mongo) |
 | `BENCH_WARMUP` | `max(2, ITER/10)` | warm-up iterations, not measured |
 | `BENCH_PG_URL` | `postgres://postgres@127.0.0.1:5432/postgres` | admin connection; a scratch database is created and dropped |
 | `BENCH_MYSQL_URL` | `mysql://root@127.0.0.1:3306` | same, for MySQL / MariaDB |

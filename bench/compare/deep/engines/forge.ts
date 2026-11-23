@@ -101,9 +101,10 @@ export async function forgeEngine(ctx: DialectCtx, db: any = ctx.forge): Promise
             tag: { connectOrCreate: { where: { name }, create: { id: `t_${U}_${j}`, name } } },
           })) } } : {}),
         })) },
-      } });
+      }, select: false });
     },
-    update_by_id: (i) => db.user.update({ where: { id: P.updUser(i) }, data: { name: `Renamed ${i}` } }),
+    // Kysely and Knex hand back id, name and email; so does this.
+    update_by_id: (i) => db.user.update({ where: { id: P.updUser(i) }, data: { name: `Renamed ${i}` }, select: { id: true, name: true, email: true } }),
     update_many: (i) => db.post.updateMany({ where: { author_id: P.updManyAuthor(i) }, data: { views: 42 } }),
     increment_concurrent: (i) => Promise.all(Array.from({ length: 20 }, () =>
       db.post.update({ where: { id: wid(T, "inc", i) }, data: { views: { increment: 1 } }, select: false }))),

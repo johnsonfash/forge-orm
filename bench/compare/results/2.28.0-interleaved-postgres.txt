@@ -1,0 +1,52 @@
+postgres: 60 interleaved iterations, median ms
+scenario                     raw     forge    prisma   drizzle    kysely      knex   forge vs best
+pk                         0.169     0.191     0.258     0.251     0.180     0.205   +6%
+unique_email               0.096     0.116     0.183     0.168     0.110     0.133   +6%
+filter_offset              0.168     0.180     0.256     0.265     0.186     0.201   level or faster
+cursor                     0.181     0.195     0.284     0.276     0.198     0.219   level or faster
+count_filter               0.367     0.377     0.450     0.406     0.391     0.403   level or faster
+exists                     0.073     0.084     0.135     0.115     0.088     0.103   level or faster
+select_cols                0.095     0.111     0.166     0.148     0.112     0.127   level or faster
+in_100                     0.282     0.289     0.407     0.629     0.296     0.316   level or faster
+or_not_like                0.237     0.291     0.351     0.345     0.265     0.279   +10%
+rel_some                   0.263     0.280     0.326     0.342     0.301     0.310   level or faster
+rel_none                   0.651     0.671     0.717     0.729     0.687     0.700   level or faster
+rel_every                  1.660     1.764     2.019     2.193     1.923     1.961   level or faster
+include_1                  0.640     1.003     0.875     0.993     0.938     0.700   +43%
+include_2                  4.088     5.057     5.333     6.886     4.999     4.536   +11%
+include_3                  2.022     1.303     2.653     2.316     1.332     2.162   level or faster
+m2m_post_tags              1.849     0.925     1.775     1.570     0.953     0.918   level or faster
+m2m_tag_counts             4.614     1.331     3.188     5.181     4.832     4.953   level or faster
+count_rel                  1.902     2.222     2.349     2.547     2.188     2.282   level or faster
+aggregate                  1.465     1.514     1.979     1.684     1.550     1.601   level or faster
+groupby                    3.663     3.854     4.440     4.202     3.932     4.030   level or faster
+distinct                   4.189     2.531     4.546     5.078     4.434     4.577   level or faster
+json_prefs                 2.518     2.460     4.500     2.726     2.648     2.764   level or faster
+json_meta                  2.584     2.682     4.818     2.760     2.790     2.824   level or faster
+fts                        1.380     1.486    38.549     1.801     1.559     1.644   level or faster
+geo_near                   0.445     0.499       n/a       n/a       n/a       n/a   
+large_findmany            21.883    21.234    28.053    23.690    22.048    21.923   level or faster
+stream                    23.715    26.775       n/a       n/a       n/a       n/a   
+create                     0.105     0.121     0.225     0.209     0.129     0.150   level or faster
+create_many               18.411    19.655    96.012    42.148    19.865    20.653   level or faster
+nested_create              0.535     0.630     1.241     0.965     0.627     0.736   level or faster
+update_by_id               0.089     0.101     0.168     0.136     0.104     0.113   level or faster
+update_many                0.108     0.113     0.226     0.139     0.121     0.133   level or faster
+increment_concurrent       1.104     1.202     2.000     1.576     1.285     1.340   level or faster
+upsert_insert              0.101     0.113     0.195     0.162     0.119     0.128   level or faster
+upsert_update              0.093     0.113     0.366     0.147     0.107     0.112   +5%
+delete_cascade             0.180     0.190     0.288     0.218     0.200     0.223   level or faster
+delete_many                3.399     3.428     3.777     3.656     3.653     3.697   level or faster
+tx_interactive             0.374     0.425     0.866     0.567     0.453     0.520   level or faster
+tx_rollback                0.149     0.164     0.308     0.208     0.175     0.220   level or faster
+optimistic_update          0.183     0.214     0.451     0.323     0.209     0.235   level or faster
+rel_deep                  11.234    11.435     3.259    12.406    11.733    11.809   +251%
+include_count              1.503     1.087     1.728     1.521     1.054     1.539   +3%
+groupby_rel                5.638     5.891     6.281     6.546     6.087     6.047   level or faster
+json_fts_rel               1.316     1.459    13.621     1.914     1.564     1.566   level or faster
+delete_by_id               0.095     0.106     0.168     0.123     0.107     0.117   level or faster
+update_many_rel            0.225     0.818     0.515     0.885     0.572     0.711   +59%
+delete_many_rel            0.324     0.935     0.552     1.026     0.689     0.835   +69%
+nested_update              0.390     0.459     0.922     0.615     0.476     0.525   level or faster
+upsert_loop                0.907     0.964     1.595     1.359     0.999     1.045   level or faster
+tx_mixed                   0.588     0.664     1.514     0.877     0.722     0.758   level or faster

@@ -28,6 +28,14 @@ function suite(name: string, open: () => Promise<LiveDb | null>, returning: bool
       expect((await db.post.findUnique({ where: { id: 'p1' } })).views).toBe(3);
     });
 
+    it('a select of columns narrows what update and upsert hand back', async () => {
+      if (!db) return;
+      live!.log.length = 0;
+      expect(await db.post.update({ where: { id: 'p1' }, data: { views: 3 }, select: { id: true, views: true } })).toEqual({ id: 'p1', views: 3 });
+      expect(await db.user.upsert({ where: { email: 'u1@x' }, create: { id: 'x', email: 'u1@x', name: 'n' }, update: { name: 'One' }, select: { name: true } })).toEqual({ name: 'One' });
+      if (returning) expect(live!.log.filter((q) => /RETURNING/.test(q)).every((q) => !/RETURNING \*/.test(q))).toBe(true);
+    });
+
     it('a no-op update still counts as a match', async () => {
       if (!db) return;
       expect(await db.post.update({ where: { id: 'p1' }, data: { views: 3 }, select: false })).toBeNull();
@@ -66,3 +74,16 @@ function suite(name: string, open: () => Promise<LiveDb | null>, returning: bool
 suite('sqlite', () => openSqlite(sch), true);
 suite('duckdb', () => openDuckdb(sch), true);
 suite('mongo', () => openMongo(sch), false);
+
+describe('a nested create whose keys are known sends no RETURNING', () => {
+  test('sqlite', async () => {
+    setActiveSchema(sch as never);
+    const live = await openSqlite(sch);
+    try {
+      live.log.length = 0;
+      expect(await live.db.user.create({ data: { id: 'n1', email: 'n@x', name: 'n', posts: { create: [{ id: 'np1', title: 't', post_tags: { create: [] } }] }, profiles: { create: { id: 'pr', bio: 'b' } } }, select: false })).toBeNull();
+      expect(live.log.join('\n')).not.toMatch(/RETURNING/);
+      expect((await live.db.user.findUnique({ where: { id: 'n1' }, include: { posts: true, profiles: true } })).posts.map((p: any) => p.id)).toEqual(['np1']);
+    } finally { await live.close(); }
+  });
+});

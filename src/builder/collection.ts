@@ -662,8 +662,9 @@ export class CollectionWrapper<
     // back as one wherever the database has transactions.
     return runAtomic(this.adapter, this.session, async (s) => {
       const w = this._bound(s);
-      const [doc] = await w._insertRows([split], s ?? w.session);
-      return (args as any).select === false ? null : w._returnOne(doc, args as any);
+      const noRow = (args as any).select === false;
+      const [doc] = await w._insertRows([split], s ?? w.session, !noRow);
+      return noRow ? null : w._returnOne(doc, args as any);
     }) as any;
   }
 
@@ -682,9 +683,15 @@ export class CollectionWrapper<
     await this._resolveOwning(splits);
     const rows = splits.map((sp) => this.adapter.coerceInbound(this.model, this._fillAutoId(sp.scalar)));
     const node = buildInsert(mk, this.model, { rows }, schema as any);
-    if (!needDocs && splits.every((sp) => sp.nested.length === 0)) node.countOnly = true;
+    // Nested writes below need each row's join keys. When the rows already
+    // carry them (ids supplied or generated here), nothing has to come back.
+    const keysKnown = !needDocs && splits.every((sp, i) => sp.nested.every((n) => {
+      const k = n.rel.refs === 'id' ? this._pkField() : n.rel.refs;
+      return rows[i]?.[k] != null || rows[i]?._id != null && k === this._pkField();
+    }));
+    if (keysKnown) node.countOnly = true;
     const { docs } = await this.adapter.executeInsert(node, this.model, { session });
-    const ordered = this._alignDocs(rows, docs);
+    const ordered = keysKnown ? rows.map((r) => ({ ...r })) : this._alignDocs(rows, docs);
     for (let i = 0; i < splits.length; i++) {
       if (splits[i].nested.length > 0) await this._applyNestedWrites(ordered[i], splits[i].nested);
     }
@@ -831,6 +838,7 @@ export class CollectionWrapper<
         // Mirror the wrapper-level hint onto the IR so consumers can detect
         // soft-deletes from the compiled artifact alone.
         semantic: _internal?.semanticOp,
+        ...(nested.length === 0 ? this._scalarReturning(args) : {}),
       },
       schema as any,
     ));
@@ -1016,7 +1024,7 @@ export class CollectionWrapper<
     const createCoerced = this.adapter.coerceInbound(this.model, this._fillAutoId(args.create));
     const node = this._coerceUpdateSet(buildUpdate(
       mk, this.model,
-      { where: args.where, data: this._applyUpdatedAt(args.update), many: false, upsertCreate: createCoerced },
+      { where: args.where, data: this._applyUpdatedAt(args.update), many: false, upsertCreate: createCoerced, ...this._scalarReturning(args) },
       schema as any,
     ));
     if ((args as any).select === false) {
@@ -1435,6 +1443,16 @@ export class CollectionWrapper<
       return out;
     }
     return rows[0];
+  }
+
+  // A `select` of plain columns narrows what the write hands back (RETURNING,
+  // or MySQL's read-back), so only those columns are sent and decoded.
+  private _scalarReturning(args: { select?: any }): { returning?: { select: Record<string, true> } } {
+    const sel = args.select;
+    if (!sel || typeof sel !== 'object') return {};
+    const keys = Object.keys(sel).filter((k) => sel[k]);
+    if (!keys.length || !keys.every((k) => sel[k] === true && this.model.fields[k] != null)) return {};
+    return { returning: { select: Object.fromEntries(keys.map((k) => [k, true as const])) } };
   }
 
   // A read may carry keys an exclusive `select` did not ask for (Mongo's

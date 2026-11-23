@@ -66,16 +66,16 @@ describe('PG execute — reads', () => {
     expect(n).toBe(42);
   });
 
-  it('executePgSelect with distinct dedupes client-side too', async () => {
-    const { pool } = mkPool([{ rows: [
-      { id: 'a', email: 'x@y.co' }, { id: 'b', email: 'x@y.co' },
-    ] }]);
+  it('executePgSelect with distinct leaves the dedupe to DISTINCT ON', async () => {
+    // DISTINCT ON returns one row per key; a second client-side pass only cost time.
+    const { pool, history } = mkPool([{ rows: [{ id: 'a', email: 'x@y.co' }] }]);
     const rows = await executePgSelect(
       pool,
       buildSelect('user', User, { distinct: ['email'] }, 'many'),
       User,
     );
     expect(rows.length).toBe(1);
+    expect(history[0].sql).toMatch(/^SELECT DISTINCT ON \("users"\."email"\)/);
   });
 });
 

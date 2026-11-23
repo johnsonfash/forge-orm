@@ -184,6 +184,64 @@ Neither case fails the run.
 
 ---
 
+## Results (2.28.0)
+
+Same machine and setup as 2.27.0 below. The scorecard comes from the
+interleaved runner (`ab.ts`, 60 iterations, every engine one iteration in
+turn), which a busy laptop cannot skew towards one engine. Full tables:
+`bench/compare/results/2.28.0-interleaved-<dialect>.txt` and, sequential with
+round trips and the 2.27.1 numbers beside them,
+`2.28.0-before-after-<dialect>.md`.
+
+### Scorecard: forge against the faster of Kysely and Knex
+
+| dialect | forge faster | level (within 5%) | forge slower |
+|---|---|---|---|
+| SQLite | 38 | 8 | 3 |
+| Postgres | 15 | 25 | 8 |
+| MySQL | 6 | 35 | 8 |
+
+Still slower, and why:
+
+* **SQLite large reads and streams (+85–91% vs Knex).** Measured on 10 000
+  rows: the driver takes 7.6 ms, turning dates into `Date` objects 2.3 ms,
+  parsing JSON columns 2.7 ms, and forge's own work about zero (12.71 ms
+  against 12.68 for the driver plus those two steps by hand). Knex returns the
+  stored text.
+* **Postgres `include_1` (+43%) and `include_2` (+11%) vs Knex.** forge builds
+  the include as JSON inside Postgres in one round trip; Knex sends a query per
+  level. Locally that costs more server time; with 1 ms of network latency
+  forge's single trip is faster than Knex on every include (below).
+* **MySQL `include_count` (+41%), `m2m_post_tags` (+11%), `include_3` (+10%)
+  vs Kysely's single JSON query.** forge keeps one query per level, which
+  never degrades the way Kysely's plan does on an unpaged nested include
+  (1 s against forge's 23 ms).
+* **Per-call overhead, 5–10%:** Postgres `pk`, `unique_email`, `or_not_like`,
+  `upsert_update`; MySQL `update_by_id`, `delete_by_id`, `create`,
+  `nested_update`, `count_rel`. forge validates the filter, plans soft-delete
+  scoping and nested writes, and decodes rows; these are the microseconds of
+  that work on a sub-millisecond query.
+* **Postgres `update_many_rel` / `delete_many_rel`:** forge sends the same
+  `EXISTS` statement as Kysely. The gap swings between level (80 iterations)
+  and +35–43% (60 iterations) from run to run, so it is not settled.
+
+### With 1 ms of network latency (Postgres)
+
+`BENCH_LATENCY_MS=1` adds a delay to every round trip for every engine. Each
+query then costs what it would across a network, and forge's one-query
+includes come out ahead:
+
+| scenario | forge | Kysely | Knex | Prisma | raw |
+|---|---|---|---|---|---|
+| posts + author | 3.04 / 1 trip | 2.25 / 1 | 3.38 / 2 | 4.06 / 2 | 4.14 / 2 |
+| users → posts → comments | 6.61 / 1 | 4.30 / 1 | 9.16 / 3 | 10.09 / 3 | 8.40 / 3 |
+| 3-level paged include | 5.72 / 1 | 4.46 / 1 | 9.32 / 4 | 11.34 / 4 | 10.88 / 4 |
+| include with counts | 6.01 / 1 | 5.53 / 1 | 12.25 / 4 | 10.58 / 4 | 9.99 / 4 |
+| nested create | 16.25 / 8 | 16.26 / 8 | 17.98 / 8 | 29.67 / 15 | 13.28 / 8 |
+
+(ms / round trips, sequential run, 10 iterations.) The MySQL latency hook is
+not reliable yet and those numbers are not reported.
+
 ## Results (2.27.0)
 
 Measured on an Apple M2 laptop, Node 22, all databases local: PostgreSQL 17,

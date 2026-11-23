@@ -3371,13 +3371,14 @@ and Knex, and faster than Prisma 7 on almost all of them:
 
 | dialect | forge faster | level (within 5%) | forge slower |
 |---|---|---|---|
-| SQLite | 32 | 11 | 6 |
-| Postgres | 16 | 22 | 11 (6% to 25%) |
-| MySQL | 9 | 33 | 7 |
+| SQLite | 38 | 8 | 3 |
+| Postgres | 15 | 25 | 8 |
+| MySQL | 6 | 35 | 8 |
 
-Against the faster of Kysely and Knex, 49 scenarios per dialect. The tables
-side by side with Prisma, Drizzle, Kysely, Knex and the raw driver are in
-[docs/BENCHMARKS.md](docs/BENCHMARKS.md#results-2270). Where it is slower, and why:
+Against the faster of Kysely and Knex (2.28.0, interleaved runs). The tables
+side by side with Prisma, Drizzle, Kysely, Knex and the raw driver, and a
+run with 1 ms of simulated network latency, are in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md#results-2280). Where it is slower, and why:
 
 * **It returns more.** `update` and `upsert` hand back the whole row, decoded;
   the Kysely and Knex versions return three columns or nothing. Use

@@ -324,7 +324,7 @@ describe('sqlite: an owning `is` filter is IN (subquery) on unpaged statements, 
     expect(await live.db.comment.count({ where: { OR: [{ author: { is: { name: 'Bob' } } }, { body: 'z' }] } })).toBe(2);
     live.log.length = 0;
     expect(await live.db.comment.count({ where: { NOT: { author: { is: { name: 'Ann' } } } } })).toBe(2);
-    expect(live.log[0]).toMatch(/NOT \(EXISTS/);
+    expect(live.log[0]).toMatch(/NOT EXISTS \(SELECT 1 FROM "users"/);
     const g = await live.db.comment.groupBy({ by: ['author_id'], where: { author: { is: { name: { in: ['Ann', 'Bob'] } } } }, _count: { _all: true } });
     expect(g.map((r: any) => r.author_id).sort()).toEqual(['u1', 'u2']);
   });
@@ -349,5 +349,27 @@ describe('mongo: a `none` filter is bounded by the rest of its AND', () => {
     expect(await live.db.post.deleteMany({ where: { author: { is: { email: 'b@x' } }, comments: { none: {} } } })).toEqual({ count: 1 });
     expect((await live.db.post.findMany({ orderBy: { id: 'asc' } })).map((r: any) => r.id)).toEqual(['p1', 'p2', 'p3', 'q1']);
     expect(await live.db.post.count({ where: { NOT: { author_id: 'u2' }, comments: { every: { body: 'x' } } } })).toBe(3);
+  });
+});
+
+describe('distinct: no second dedupe when SQL DISTINCT already gives one row per key', () => {
+  const { distinctIsExact } = require('../ir/hydrate-many');
+  const { buildSelect } = require('../ir/build');
+  const P = (sch as any).post;
+  test('exact only when exactly the distinct columns are selected', () => {
+    expect(distinctIsExact(buildSelect('post', P, { distinct: ['author_id'], select: { author_id: true } }, 'many', sch))).toBe(true);
+    expect(distinctIsExact(buildSelect('post', P, { distinct: ['author_id'], select: { author_id: true, title: true } }, 'many', sch))).toBe(false);
+    expect(distinctIsExact(buildSelect('post', P, { distinct: ['author_id'] }, 'many', sch))).toBe(false);
+  });
+  test('sqlite: same rows either way', async () => {
+    setActiveSchema(sch as never);
+    const live = await openSqlite(sch);
+    try {
+      await live.db.user.create({ data: { id: 'u1', email: 'a@x', name: 'a' } });
+      await live.db.user.create({ data: { id: 'u2', email: 'b@x', name: 'b' } });
+      await live.db.post.createMany({ data: [['p1', 'u1', 'x'], ['p2', 'u1', 'y'], ['p3', 'u2', 'x']].map(([id, a, t]) => ({ id, author_id: a, title: t })) });
+      expect(await live.db.post.findMany({ distinct: ['author_id'], select: { author_id: true }, orderBy: { author_id: 'asc' } })).toEqual([{ author_id: 'u1' }, { author_id: 'u2' }]);
+      expect((await live.db.post.findMany({ distinct: ['author_id'], select: { author_id: true, title: true }, orderBy: [{ author_id: 'asc' }, { title: 'asc' }] })).map((r: any) => r.title)).toEqual(['x', 'x']);
+    } finally { await live.close(); }
   });
 });

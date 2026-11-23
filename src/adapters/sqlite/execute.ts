@@ -21,7 +21,7 @@ import { withSqliteErrors } from './errors';
 import { rowDecoder, parseJsonText, parseIsoDate, type Convert } from '../shared/row-decoder';
 import type { SqliteDriver } from './driver';
 import { fromDriverBytes } from '../../bytes';
-import { hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
+import { distinctIsExact, hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
 import { refineFallbackGeo } from '../shared/haversine';
 
 // Window functions are always available here, so a nested page is one query.
@@ -104,7 +104,7 @@ export async function executeSqliteSelect(
   const artifact = compileSelect(node, model);
   const raw = await withSqliteErrors(() => exec.all(artifact.sql, encodeParams(artifact.params)));
   let rows = decodeRows(model, raw);
-  if (node.distinct?.length) rows = dedupeBy(rows, node.distinct);
+  if (node.distinct?.length && !distinctIsExact(node)) rows = dedupeBy(rows, node.distinct);
   // Fallback geoPoint refinement — exact-circle + sort post-process.
   rows = refineFallbackGeo(rows, node, model);
   if (node.projection?.counts?.length) liftRelationCounts(rows, node.projection.counts);

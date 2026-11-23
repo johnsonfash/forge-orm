@@ -26,7 +26,7 @@ import { decodeWideIntegerRows, decodeWideIntegers } from '../shared/wide-int';
 import { decodeJsonColumns } from '../shared/json-columns';
 import type { DuckdbQueryable } from './driver';
 import type { Dialect } from '../postgres/dialect';
-import { hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
+import { distinctIsExact, hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
 import { refineFallbackGeo } from '../shared/haversine';
 
 // Window functions are always available here, so a nested page is one query.
@@ -50,7 +50,7 @@ export async function executeDuckdbSelect(
   const { rows } = await withDuckdbErrors(() => exec.query(artifact.sql, artifact.params));
 
   let out = decodeWideIntegerRows(model, decodeJsonColumns(model, rows));
-  if (node.distinct?.length) out = dedupeBy(out, node.distinct);
+  if (node.distinct?.length && !distinctIsExact(node)) out = dedupeBy(out, node.distinct);
 
   // Fallback geoPoint refinement — exact-circle + sort post-process.
   out = refineFallbackGeo(out, node, model);

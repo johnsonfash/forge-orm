@@ -1066,6 +1066,14 @@ What it saves:
 | MySQL / MariaDB | the write plus a `SELECT` (2 round trips) | the write only (1) |
 | Mongo | `findOneAndUpdate` / `findOneAndDelete` | `updateOne` / `deleteOne` |
 
+A `select` of plain columns works the other way: the write hands back only
+those columns (`RETURNING id, name` on Postgres, SQLite and DuckDB; a narrower
+read-back on MySQL), so the rest are never sent or decoded (2.28.0).
+
+```ts
+const { id, name } = await db.user.update({ where: { id }, data: { name }, select: { id: true, name: true } });
+```
+
 A miss still throws `P2025`, and `updateFirst` / `deleteFirst` still
 return `null` for it. On MySQL a match that changes nothing (writing the
 value the row already has) is still a match: forge reads "Rows matched"

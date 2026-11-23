@@ -26,6 +26,10 @@ async function run(name: string, db: any, sent: string[]) {
   check('update resolves to null', (await db.thing.update({ where: { id: 'a' }, data: { n: { increment: 1 } }, select: false })) === null);
   check('update is one statement, no RETURNING', sent.length === 1 && !/RETURNING/i.test(sent[0]), sent.join(' | '));
   check('the increment landed', (await db.thing.findUnique({ where: { id: 'a' } })).n === 2);
+  sent.length = 0;
+  const narrow = await db.thing.update({ where: { id: 'a' }, data: { n: 2 }, select: { n: true } });
+  check('a select narrows the row handed back', JSON.stringify(narrow) === '{"n":2}', JSON.stringify(narrow));
+  check('and what is read or returned', sent.every((q) => !/RETURNING \*/.test(q)) && !sent.some((q) => /SELECT `sf_things`\.`id`, `sf_things`\.`email`/.test(q)), sent.join(' | '));
   check('a no-op update is not a miss', (await db.thing.update({ where: { id: 'a' }, data: { n: 2 }, select: false })) === null);
   let threw = false;
   try { await db.thing.update({ where: { id: 'zz' }, data: { n: 1 }, select: false }); } catch { threw = true; }

@@ -52,7 +52,7 @@ export async function executePgSelect(
   const { rows } = await withPgErrors(() => exec.query(artifact.sql, artifact.params));
 
   let out = decodeWideIntegerRows(model, rows);
-  if (node.distinct?.length) out = dedupeBy(out, node.distinct);
+  // DISTINCT ON already returns one row per key; nothing to dedupe here.
 
   // Fallback geoPoint post-processing — when a `near` filter or `nearTo`
   // orderBy references a fallback-mode geo column, the SQL emitted a bbox
@@ -275,14 +275,3 @@ function stringKey(v: any): string {
   return String(v);
 }
 
-function dedupeBy(rows: any[], fields: string[]): any[] {
-  const seen = new Set<string>();
-  const out: any[] = [];
-  for (const r of rows) {
-    const k = fields.map((f) => JSON.stringify(r[f] ?? null)).join('\x1e');
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(r);
-  }
-  return out;
-}
