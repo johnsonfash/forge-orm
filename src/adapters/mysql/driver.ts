@@ -16,6 +16,12 @@ export interface MysqlQueryable {
    * (`UPDATE …; SELECT …`) instead of two. forge never turns it on itself.
    */
   multiStatements?: boolean;
+  /**
+   * How the driver turns DATETIME text into a Date (mysql2's `timezone` and
+   * `dateStrings`). forge decodes dates inside a relation loaded as JSON the
+   * same way; without this it loads such relations a query per level.
+   */
+  dates?: { timezone: string; strings: boolean };
 }
 
 /** A connection held for the caller alone until `release()`. */
@@ -55,6 +61,7 @@ function exactQueryable(target: any): MysqlQueryable {
     query: (sql, params) => target.query(exact(sql, params)),
     execute: (sql, params) => target.execute(exact(sql, params)),
     ...(cfg?.multipleStatements === true ? { multiStatements: true } : {}),
+    ...(cfg ? { dates: { timezone: typeof cfg.timezone === 'string' ? cfg.timezone : 'local', strings: !!cfg.dateStrings } } : {}),
   };
 }
 

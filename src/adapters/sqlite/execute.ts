@@ -10,19 +10,28 @@ import type {
 import type { ModelDef } from '../../schema/types';
 import { schema } from '../../schema';
 import {
-  compileCount,
-  compileDelete,
-  compileGroupBy,
-  compileInsert,
-  compileSelect,
-  compileUpdate,
+  compileCount as rawCompileCount,
+  compileDelete as rawCompileDelete,
+  compileGroupBy as rawCompileGroupBy,
+  compileInsert as rawCompileInsert,
+  compileSelect as rawCompileSelect,
+  compileUpdate as rawCompileUpdate,
 } from './compile-from-ir';
+import { shapeCached, worthCaching } from '../../ir/compile-cache';
 import { withSqliteErrors } from './errors';
 import { rowDecoder, parseJsonText, parseIsoDate, type Convert } from '../shared/row-decoder';
 import type { SqliteDriver } from './driver';
 import { fromDriverBytes } from '../../bytes';
 import { distinctIsExact, hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
 import { refineFallbackGeo } from '../shared/haversine';
+
+// Compiled SQL is reused per query shape; see ir/compile-cache.ts.
+const compileCount = shapeCached('sqlite:count', rawCompileCount, (n) => worthCaching(n));
+const compileDelete = shapeCached('sqlite:delete', rawCompileDelete, (n) => worthCaching(n));
+const compileGroupBy = shapeCached('sqlite:groupby', rawCompileGroupBy, (n) => worthCaching(n));
+const compileInsert = shapeCached('sqlite:insert', rawCompileInsert, (n) => worthCaching(n));
+const compileSelect = shapeCached('sqlite:select', rawCompileSelect, (n) => worthCaching(n));
+const compileUpdate = shapeCached('sqlite:update', rawCompileUpdate, (n) => worthCaching(n));
 
 // Window functions are always available here, so a nested page is one query.
 const WINDOWED: WindowedPaging = { enabled: true };

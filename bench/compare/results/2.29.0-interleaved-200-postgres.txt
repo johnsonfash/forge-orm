@@ -1,0 +1,9 @@
+postgres: 200 interleaved iterations, median ms
+scenario                     raw     forge    kysely      knex   forge vs best
+pk                         0.097     0.108     0.109     0.127   level or faster
+unique_email               0.085     0.091     0.091     0.111   level or faster
+or_not_like                0.240     0.258     0.263     0.274   level or faster
+include_1                  0.364     0.387     0.442     0.420   level or faster
+include_2                  4.481     3.667     3.591     4.955   level or faster
+include_3                  2.100     1.304     1.218     2.331   +7%
+upsert_update              0.085     0.097     0.097     0.102   level or faster

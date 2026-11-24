@@ -373,3 +373,30 @@ describe('distinct: no second dedupe when SQL DISTINCT already gives one row per
     } finally { await live.close(); }
   });
 });
+
+describe('findUnique on a unique column sends no LIMIT', () => {
+  let live: LiveDb;
+  beforeAll(async () => {
+    setActiveSchema(sch as never);
+    live = await openSqlite(sch);
+    await live.db.user.create({ data: { id: 'u1', email: 'a@x', name: 'a' } });
+    await live.db.user.create({ data: { id: 'u2', email: 'b@x', name: 'a' } });
+  });
+  afterAll(async () => { await live?.close(); });
+
+  test('by id or a unique field: no LIMIT, same row', async () => {
+    live.log.length = 0;
+    expect((await live.db.user.findUnique({ where: { id: 'u2' } }))?.email).toBe('b@x');
+    expect((await live.db.user.findUnique({ where: { email: 'a@x', name: 'a' } }))?.id).toBe('u1');
+    expect(await live.db.user.findUnique({ where: { id: 'nobody' } })).toBeNull();
+    expect(live.log.filter((s) => /^SELECT/.test(s)).join('\n')).not.toMatch(/LIMIT/);
+  });
+
+  test('findFirst, and a filter that pins no unique column, keep LIMIT 1', async () => {
+    live.log.length = 0;
+    expect((await live.db.user.findFirst({ where: { name: 'a' }, orderBy: { id: 'desc' } }))?.id).toBe('u2');
+    expect((await live.db.user.findUnique({ where: { id: { in: ['u1', 'u2'] } } } as never) as any)?.id).toBeDefined();
+    expect(live.log.filter((s) => /^SELECT/.test(s))).toHaveLength(2);
+    expect(live.log.filter((s) => /^SELECT/.test(s)).every((s) => /LIMIT 1/.test(s))).toBe(true);
+  });
+});

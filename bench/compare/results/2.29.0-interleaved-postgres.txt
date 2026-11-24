@@ -1,0 +1,52 @@
+postgres: 60 interleaved iterations, median ms
+scenario                     raw     forge    kysely      knex   forge vs best
+pk                         0.134     0.146     0.145     0.164   level or faster
+unique_email               0.130     0.141     0.136     0.158   +4%
+filter_offset              0.194     0.211     0.219     0.227   level or faster
+cursor                     0.205     0.217     0.219     0.235   level or faster
+count_filter               0.602     0.654     0.711     0.742   level or faster
+exists                     0.110     0.122     0.119     0.136   level or faster
+select_cols                0.129     0.141     0.143     0.151   level or faster
+in_100                     0.346     0.351     0.354     0.374   level or faster
+or_not_like                0.272     0.302     0.281     0.307   +7%
+rel_some                   0.379     0.429     0.486     0.509   level or faster
+rel_none                   0.814     0.893     0.934     0.988   level or faster
+rel_every                  1.140     1.243     1.295     1.355   level or faster
+include_1                  0.378     0.392     0.448     0.419   level or faster
+include_2                  2.323     1.910     1.951     2.426   level or faster
+include_3                  1.418     0.899     0.845     1.477   +6%
+m2m_post_tags              1.300     0.585     0.614     0.633   level or faster
+m2m_tag_counts             3.138     1.028     3.374     3.375   level or faster
+count_rel                  0.567     0.596     0.614     0.622   level or faster
+aggregate                  0.458     0.495     0.523     0.549   level or faster
+groupby                    1.403     1.491     1.531     1.532   level or faster
+distinct                   2.324     1.588     2.437     2.447   level or faster
+json_prefs                 0.680     0.771     0.768     0.806   level or faster
+json_meta                  1.360     1.425     1.480     1.521   level or faster
+fts                        1.235     1.258     1.259     1.276   level or faster
+geo_near                   0.423     0.444       n/a       n/a   
+large_findmany            21.512    21.624    21.602    21.505   level or faster
+stream                    23.420    25.461       n/a       n/a   
+create                     0.112     0.119     0.123     0.138   level or faster
+create_many               21.451    22.454    23.842    24.406   level or faster
+nested_create              0.514     0.601     0.595     0.677   level or faster
+update_by_id               0.130     0.140     0.147     0.157   level or faster
+update_many                0.211     0.237     0.258     0.280   level or faster
+increment_concurrent       1.109     1.189     1.275     1.303   level or faster
+upsert_insert              0.108     0.112     0.130     0.136   level or faster
+upsert_update              0.115     0.121     0.123     0.130   level or faster
+delete_cascade             0.170     0.180     0.188     0.204   level or faster
+delete_many                1.652     1.694     1.729     1.785   level or faster
+tx_interactive             0.365     0.404     0.426     0.483   level or faster
+tx_rollback                0.149     0.167     0.177     0.214   level or faster
+optimistic_update          0.185     0.205     0.202     0.227   level or faster
+rel_deep                   1.854     1.928     2.022     2.041   level or faster
+include_count              1.518     1.162     1.127     1.531   +3%
+groupby_rel                2.029     2.211     2.392     2.333   level or faster
+json_fts_rel              13.271    13.564    13.682    13.636   level or faster
+delete_by_id               0.095     0.106     0.104     0.110   level or faster
+update_many_rel            0.219     0.226     0.252     0.257   level or faster
+delete_many_rel            0.318     0.334     0.372     0.382   level or faster
+nested_update              0.384     0.431     0.451     0.499   level or faster
+upsert_loop                1.147     1.190     1.281     1.314   level or faster
+tx_mixed                   0.561     0.634     0.679     0.731   level or faster

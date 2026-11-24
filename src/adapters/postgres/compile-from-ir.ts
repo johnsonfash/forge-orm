@@ -172,11 +172,11 @@ function compileLeaf(ctx: CompileCtx, leaf: Extract<WhereTree, { kind: 'leaf' }>
     case 'gt':  return `${col} > ${ph(leaf.value)}`;
     case 'gte': return `${col} >= ${ph(leaf.value)}`;
     case 'contains':
-      return likeOp(ctx, col, `%${escapeForLike(String(leaf.value))}%`, !!leaf.caseInsensitive);
+      return likeOp(ctx, col, `%${escapeForLike(String(leaf.value))}%`, !!leaf.caseInsensitive, leaf.field);
     case 'startsWith':
-      return likeOp(ctx, col, `${escapeForLike(String(leaf.value))}%`, !!leaf.caseInsensitive);
+      return likeOp(ctx, col, `${escapeForLike(String(leaf.value))}%`, !!leaf.caseInsensitive, leaf.field);
     case 'endsWith':
-      return likeOp(ctx, col, `%${escapeForLike(String(leaf.value))}`, !!leaf.caseInsensitive);
+      return likeOp(ctx, col, `%${escapeForLike(String(leaf.value))}`, !!leaf.caseInsensitive, leaf.field);
     // A `json` / `embed` / `embedMany` field is `jsonb`, not a real array
     // column, and none of the array operators exist for it — see arrayFilter
     // in the dialect.
@@ -366,10 +366,29 @@ function haversineBboxPrefilter(
          `${latCol} BETWEEN ${ph(point.lat - latDeg)} AND ${ph(point.lat + latDeg)})`;
 }
 
-function likeOp(ctx: CompileCtx, col: string, pattern: string, ci: boolean): string {
+function likeOp(ctx: CompileCtx, col: string, pattern: string, ci: boolean, field?: string): string {
   const ph = ctx.d.placeholder(ctx.params, pattern);
   // ILIKE is Postgres-only; every other dialect gets its own form.
-  return ci ? ctx.d.caseInsensitiveLike(col, ph) : `${col} LIKE ${ph}`;
+  return ci ? ctx.d.caseInsensitiveLike(col, ph, field != null && hasInvertedIndex(ctx.model, field)) : `${col} LIKE ${ph}`;
+}
+
+// A GIN / GiST index on the column (a pg_trgm index, typically) serves ILIKE
+// but not lower(col) LIKE, so such a column keeps ILIKE.
+const invertedIndexCache = new WeakMap<object, Set<string>>();
+function hasInvertedIndex(model: ModelDef<any>, field: string): boolean {
+  let set = invertedIndexCache.get(model);
+  if (!set) {
+    set = new Set();
+    for (const ix of (model as any).indexes ?? []) {
+      if (ix?.method !== 'gin' && ix?.method !== 'gist') continue;
+      for (const k of Object.keys(ix.keys ?? {})) set.add(k);
+      if (typeof ix.expression === 'string') {
+        for (const name of Object.keys(model.fields)) if (ix.expression.includes(name)) set.add(name);
+      }
+    }
+    invertedIndexCache.set(model, set);
+  }
+  return set.has(field);
 }
 
 function compileRelationFilter(
@@ -455,9 +474,16 @@ function compileRelationFilter(
 // relation. Soft-deleted children are excluded so the count agrees with what
 // `include` hands back.
 function compileRelationCountCols(ctx: CompileCtx, counts: string[] | undefined): string {
-  if (!counts?.length) return '';
+  return relationCountExprs(ctx, counts)
+    .map(([key, expr]) => `${expr} AS ${ctx.d.quoteIdent(key)}`)
+    .join(', ');
+}
+
+// `[alias, (SELECT COUNT(*) …)]` per counted relation.
+function relationCountExprs(ctx: CompileCtx, counts: string[] | undefined): Array<[string, string]> {
+  if (!counts?.length) return [];
   const relations = ctx.model.relations();
-  const cols: string[] = [];
+  const out: Array<[string, string]> = [];
   for (const relName of counts) {
     const rel = relations[relName];
     if (!rel) continue;
@@ -470,12 +496,105 @@ function compileRelationCountCols(ctx: CompileCtx, counts: string[] | undefined)
     const where =
       `${alias}.${ctx.d.quoteIdent(rel.on)} = ${ctx.table}.${ctx.d.quoteIdent(rel.refs)}` +
       (sd ? ` AND ${alias}.${ctx.d.quoteIdent(sd)} IS NULL` : '');
-    cols.push(
-      `(SELECT COUNT(*) FROM ${ctx.d.quoteIdent(target.collection)} ${alias} WHERE ${where}) ` +
-      `AS ${ctx.d.quoteIdent(COUNT_ALIAS_PREFIX + relName)}`,
-    );
+    out.push([COUNT_ALIAS_PREFIX + relName, `(SELECT COUNT(*) FROM ${ctx.d.quoteIdent(target.collection)} ${alias} WHERE ${where})`]);
   }
-  return cols.join(', ');
+  return out;
+}
+
+// ─── MySQL: a relation as JSON in the parent's SELECT ───────────────────────
+//
+//   (SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT('id', t.id, …, '__forge_ord', JSON_ARRAY(t.k0, …))), JSON_ARRAY())
+//      FROM (SELECT j1.id, …, HEX(WEIGHT_STRING(j1.title)) AS k0 FROM posts j1
+//            WHERE j1.author_id = users.id AND … ORDER BY … LIMIT n) t)
+//
+// JSON_ARRAYAGG takes no ORDER BY and promises no order, so each object
+// carries its sort key and the executor sorts. A string key is sent as the
+// collation's own weight (WEIGHT_STRING), so the client sorts exactly as the
+// server would; numbers and DATETIME text sort as they are. A derived table
+// that reads its parent's columns needs MySQL 8.0.14; the executor turns
+// this on only for MySQL (not MariaDB) at that version or later, and only
+// for the relations it decided to (planMysqlIncludes).
+
+const MYSQL_JSON_KINDS = new Set([
+  'id', 'objectId', 'string', 'text', 'int', 'float', 'uuid', 'bool',
+  'dateTime', 'json', 'enum', 'embed', 'embedMany', 'stringArray', 'intArray',
+]);
+const MYSQL_SORT_KINDS = new Set(['id', 'objectId', 'string', 'text', 'int', 'float', 'uuid', 'bool', 'dateTime', 'enum']);
+const MYSQL_TEXT_SORT = new Set(['id', 'objectId', 'string', 'text', 'uuid', 'enum']);
+export const MYSQL_ORD_KEY = '__forge_ord';
+
+function mysqlJsonField(fd: FieldDef | undefined, sort = false): boolean {
+  if (!fd) return false;
+  if (fd.kind === 'id' && (fd as any).idType === 'bigserial') return false;
+  return (sort ? MYSQL_SORT_KINDS : MYSQL_JSON_KINDS).has(fd.kind);
+}
+
+/** Whether `rel` (and everything below it) can be loaded as JSON on MySQL. */
+export function mysqlJsonEligible(
+  parent: ModelDef<any>,
+  rel: RelationPlan,
+  schemaOverride?: Record<string, ModelDef<any>>,
+): boolean {
+  const target = relTarget(rel, schemaOverride);
+  if (!target) return false;
+  const n = (rel.nested ?? {}) as Partial<SelectNode>;
+  if (n.distinct?.length || n.cursor || n.lock || n.partitionBy) return false;
+  if (n.orderBy?.some((e) => e.nearTo || e.agg || e.nulls || !mysqlJsonField(target.fields[e.field] as FieldDef, true))) return false;
+  if (rel.kind === 'one' && (n.limit != null || n.offset != null || n.orderBy?.length)) return false;
+  if (n.offset != null && n.limit == null) return false;
+  if (hasGeoOp(n.where)) return false;
+  const owning = rel.kind === 'one' && parent.fields[rel.on] != null;
+  if (owning ? target.fields[rel.refs] == null : target.fields[rel.on] == null) return false;
+  for (const f of selectedFields(target, n.projection)) {
+    if (!mysqlJsonField(target.fields[f] as FieldDef)) return false;
+  }
+  return (n.hydration ?? []).every((h) => mysqlJsonEligible(target, h, schemaOverride));
+}
+
+function compileMysqlJsonRelation(ctx: CompileCtx, rel: RelationPlan): string {
+  const d = ctx.d;
+  const target = relTarget(rel, ctx.schemaOverride)!;
+  const n = (rel.nested ?? {}) as Partial<SelectNode>;
+  ctx.aliasCount.n += 1;
+  const alias = d.quoteIdent(`j${ctx.aliasCount.n}`);
+  const sub: CompileCtx = { ...ctx, model: target, table: alias };
+
+  const pairs: Array<[string, string]> = selectedFields(target, n.projection).map((f) => [f, `${alias}.${d.quoteIdent(f)}`]);
+  pairs.push(...relationCountExprs(sub, n.projection?.counts));
+  for (const h of n.hydration ?? []) pairs.push([JSON_REL_ALIAS_PREFIX + h.name, compileMysqlJsonRelation(sub, h)]);
+
+  const owning = rel.kind === 'one' && ctx.model.fields[rel.on] != null;
+  const join = owning
+    ? `${alias}.${d.quoteIdent(rel.refs)} = ${ctx.table}.${d.quoteIdent(rel.on)}`
+    : `${alias}.${d.quoteIdent(rel.on)} = ${ctx.table}.${d.quoteIdent(rel.refs)}`;
+  const w = compileWhere(sub, n.where);
+  const where = `WHERE ${join}${w ? ` AND ${w}` : ''}`;
+  const from = `FROM ${d.quoteIdent(target.collection)} ${alias}`;
+  const key = (k: string) => `'${k.replace(/'/g, "''")}'`;
+
+  if (rel.kind === 'one') {
+    return `(SELECT JSON_OBJECT(${pairs.map(([k, e]) => `${key(k)}, ${e}`).join(', ')}) ${from} ${where} LIMIT 1)`;
+  }
+  const order = compileOrder(d, alias, n.orderBy, target);
+  if (!order && n.limit == null) {
+    return `(SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(${pairs.map(([k, e]) => `${key(k)}, ${e}`).join(', ')})), JSON_ARRAY()) ${from} ${where})`;
+  }
+  const t = d.quoteIdent('t');
+  const inner = pairs.map(([k, e]) => `${e} AS ${d.quoteIdent(k)}`);
+  const sortKeys: string[] = [];
+  for (const [i, e] of (n.orderBy ?? []).entries()) {
+    const col = `${alias}.${d.quoteIdent(e.field)}`;
+    const k = `__forge_k${i}`;
+    inner.push(`${MYSQL_TEXT_SORT.has((target.fields[e.field] as FieldDef).kind) ? `HEX(WEIGHT_STRING(${col}))` : col} AS ${d.quoteIdent(k)}`);
+    sortKeys.push(`${t}.${d.quoteIdent(k)}`);
+  }
+  const page = n.limit != null
+    ? `LIMIT ${Math.max(0, Math.trunc(Number(n.limit)))}${n.offset != null ? ` OFFSET ${Math.max(0, Math.trunc(Number(n.offset)))}` : ''}`
+    : '';
+  const sql = [`SELECT ${inner.join(', ')} ${from}`, where, order, page].filter(Boolean).join(' ');
+  const obj = pairs.map(([k]) => `${key(k)}, ${t}.${d.quoteIdent(k)}`);
+  if (sortKeys.length) obj.push(`${key(MYSQL_ORD_KEY)}, JSON_ARRAY(${sortKeys.join(', ')})`);
+  return `(SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(${obj.join(', ')})), JSON_ARRAY()) FROM (${sql}) ${t})`;
 }
 
 // ─── Includes inside the parent's SELECT (Postgres) ──────────────────────────
@@ -519,6 +638,7 @@ export function jsonRelationEligible(
   rel: RelationPlan,
   schemaOverride?: Record<string, ModelDef<any>>,
 ): boolean {
+  if ((rel as { json?: boolean }).json === false) return false;
   const target = relTarget(rel, schemaOverride);
   if (!target) return false;
   const n = (rel.nested ?? {}) as Partial<SelectNode>;
@@ -532,6 +652,79 @@ export function jsonRelationEligible(
     if (!JSON_SAFE_KINDS.has((target.fields[f] as FieldDef).kind)) return false;
   }
   return (n.hydration ?? []).every((h) => jsonRelationEligible(target, h, schemaOverride));
+}
+
+// ─── Which includes load as JSON (one statement) and which per level ───────
+//
+// Measured on the bench database (bench/micro/include-plans.ts, docs/N-PLUS-ONE.md):
+// JSON wins whenever the number of related rows it has to build is small, and
+// always for a paged include (`take` on the relation), whose per-level form
+// needs a window over every candidate row. It loses, by up to 2x, once it
+// builds hundreds of rows for an UNPAGED to-many include, and past a few dozen
+// parents for a to-one, where one `IN` query is cheaper than a correlated
+// lookup per parent. The limits are fixed: a round trip measured from the
+// client counts the client's and the server's own load as well as the wire,
+// and a plan that followed it flipped to JSON on a busy machine, where it was
+// the slower one.
+
+/** The parents a query can return: 1, its `take`, or unknown (Infinity). */
+function parentBound(node: { cardinality?: string; limit?: number; partitionBy?: string }): number {
+  if (node.cardinality === 'one') return 1;
+  // A limit per parent of the level above bounds nothing overall.
+  if (node.partitionBy) return Infinity;
+  return node.limit != null && Number.isFinite(Number(node.limit)) ? Math.max(0, Number(node.limit)) : Infinity;
+}
+
+interface IncludeShape { unpagedManyDepth: number; pagedMany: boolean; oneUnderMany: boolean; one: boolean }
+
+function includeShape(rel: RelationPlan, underMany: boolean, depth: number, acc: IncludeShape): void {
+  const n = (rel.nested ?? {}) as Partial<SelectNode>;
+  const many = rel.kind === 'many';
+  if (many && n.limit == null) acc.unpagedManyDepth = Math.max(acc.unpagedManyDepth, depth + 1);
+  if (many && n.limit != null) acc.pagedMany = true;
+  if (!many) { acc.one = true; if (underMany) acc.oneUnderMany = true; }
+  for (const h of n.hydration ?? []) includeShape(h, underMany || many, many && n.limit == null ? depth + 1 : depth, acc);
+}
+
+let forcedPlan: 'json' | 'batched' | undefined;
+/** Bench hook: force every include onto one plan; `undefined` restores the rule. */
+export function forcePgIncludePlan(plan: 'json' | 'batched' | undefined): void { forcedPlan = plan; }
+
+/** Whether a relation the compiler COULD load as JSON should be. */
+export function preferJsonInclude(parents: number, rel: RelationPlan): boolean {
+  if (forcedPlan) return forcedPlan === 'json';
+  const acc: IncludeShape = { unpagedManyDepth: 0, pagedMany: false, oneUnderMany: false, one: false };
+  includeShape(rel, false, 0, acc);
+  if (acc.unpagedManyDepth >= 2) return parents <= 5;
+  if (acc.unpagedManyDepth === 1) return parents <= 50;
+  if (acc.pagedMany) return acc.oneUnderMany ? parents <= 100 : true;
+  return parents <= 25;
+}
+
+/**
+ * Settle, per include of this node, JSON or a query per level, and record it
+ * on the node (`json: false` on the relation) so the compiler, the executor
+ * and the compile cache all see the same answer. Relations below a JSON one
+ * are part of its statement; relations below a per-level one decide again
+ * when their own level runs.
+ */
+export function planPgIncludes<N extends { hydration?: RelationPlan[]; cardinality?: string; limit?: number }>(
+  node: N, model: ModelDef<any>,
+): N {
+  const h = node.hydration;
+  if (!h?.length) return node;
+  const parents = parentBound(node);
+  // A page per parent filters rows after the select list is computed, so a
+  // JSON column there would be built for every candidate row.
+  const partitioned = !!(node as { partitionBy?: string }).partitionBy;
+  let changed: RelationPlan[] | undefined;
+  for (let i = 0; i < h.length; i++) {
+    const rel = h[i];
+    if ((rel as { json?: boolean }).json !== undefined || !jsonRelationEligible(model, rel)) continue;
+    changed ??= h.slice();
+    changed[i] = { ...rel, json: !partitioned && preferJsonInclude(parents, rel) } as RelationPlan;
+  }
+  return changed ? { ...node, hydration: changed } : node;
 }
 
 function hasGeoOp(w: WhereTree | undefined): boolean {
@@ -552,6 +745,15 @@ function jsonColumnExpr(d: Dialect, table: string, name: string, fd: FieldDef): 
 
 function compileJsonRelationCols(ctx: CompileCtx, hydration: RelationPlan[] | undefined): string {
   if (!hydration?.length) return '';
+  if (ctx.d.name === 'mysql') {
+    // MySQL loads a relation as JSON only when the executor chose to.
+    const cols: string[] = [];
+    for (const rel of hydration) {
+      if ((rel as { json?: boolean }).json !== true || !mysqlJsonEligible(ctx.model, rel, ctx.schemaOverride)) continue;
+      cols.push(`${compileMysqlJsonRelation(ctx, rel)} AS ${ctx.d.quoteIdent(JSON_REL_ALIAS_PREFIX + rel.name)}`);
+    }
+    return cols.join(', ');
+  }
   if (ctx.d.name !== 'postgres') return '';
   const cols: string[] = [];
   for (const rel of hydration) {

@@ -44,6 +44,7 @@ async function main() {
     for (const sc of scenarios) {
       const live = [...impls.entries()].filter(([, im]) => im.ops[sc.name]);
       if (live.length < 2) continue;
+      if (ctx.settle) await uncounted(ctx.settle);
       const times = new Map<EngineName, number[]>(live.map(([e]) => [e, []]));
       const warm = Math.max(5, iters / 10);
       for (let k = 1; k <= warm + iters; k++) {

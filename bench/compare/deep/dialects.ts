@@ -18,6 +18,12 @@ export interface DialectCtx {
   dialect: Dialect;
   sizes: S.SeedSizes;
   features: Features;
+  /**
+   * Bring the tables back to a steady state between scenarios (Postgres:
+   * VACUUM ANALYZE), so a scenario's numbers do not depend on how many rows
+   * the scenarios before it wrote and deleted.
+   */
+  settle?: () => Promise<void>;
   schema: S.BenchSchema;
   forge: any;
   // Native handles (whichever apply to the dialect).
@@ -102,6 +108,7 @@ async function openPg(sizes: S.SeedSizes, log: (s: string) => void): Promise<Dia
       conn: { host: u.hostname, port: Number(u.port || 5432), user: decodeURIComponent(u.username) || "postgres", password: u.password ? decodeURIComponent(u.password) : undefined, database: name },
       features: { geo: geoMode !== "none", fts: true, tx: true, json: true, geoMode },
       close: drop,
+      settle: async () => { await pool.query("VACUUM ANALYZE"); },
     };
     await seed(ctx, log);
     await pool.query("ANALYZE");

@@ -3371,14 +3371,14 @@ and Knex, and faster than Prisma 7 on almost all of them:
 
 | dialect | forge faster | level (within 5%) | forge slower |
 |---|---|---|---|
-| SQLite | 38 | 8 | 3 |
-| Postgres | 15 | 25 | 8 |
-| MySQL | 6 | 35 | 8 |
+| SQLite | 38 | 9 | 2 |
+| Postgres | 17 | 29 | 2 |
+| MySQL | 9 | 33 | 7 |
 
-Against the faster of Kysely and Knex (2.28.0, interleaved runs). The tables
+Against the faster of Kysely and Knex (2.29.0, interleaved runs). The tables
 side by side with Prisma, Drizzle, Kysely, Knex and the raw driver, and a
 run with 1 ms of simulated network latency, are in
-[docs/BENCHMARKS.md](docs/BENCHMARKS.md#results-2280). Where it is slower, and why:
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md#results-2290). Where it is slower, and why:
 
 * **It returns more.** `update` and `upsert` hand back the whole row, decoded;
   the Kysely and Knex versions return three columns or nothing. Use
@@ -3387,10 +3387,12 @@ run with 1 ms of simulated network latency, are in
 * **It decodes values.** A `findMany` of 10 000 rows on SQLite turns every
   date and JSON column back into a `Date` or object; Knex returns the stored
   text. That is most of the gap on large reads and streams.
-* **MySQL includes.** forge runs one query per level. Kysely's single JSON
-  query is faster for a small paged include or a many-to-many, and about
-  fifty times slower for an unpaged nested one, because MySQL re-reads the
-  derived table for every row.
+* **MySQL nested paged includes.** forge chooses per query between one JSON
+  query and one query per level (Postgres too). For nested paged includes on
+  MySQL the per-level plan is kept: Kysely's single JSON query is sometimes
+  faster there, and about fifty times slower for an unpaged nested one.
+* **Small MySQL writes** are 7–14% behind; forge's own JavaScript per call
+  is a few microseconds, and `update` reads the row back (no `RETURNING`).
 * **Mongo includes** take one round trip per level where a hand-written
   `$lookup` takes one; on the bench forge is still faster in time.
 

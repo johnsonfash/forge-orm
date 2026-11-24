@@ -152,12 +152,12 @@ describe('a path filter speaks the public operator vocabulary', () => {
     // matched only the case it was handed. Measured on a live database:
     // searching 'BOLA' found nothing for a row holding
     // 'bola@example.com'.
-    expect(sql({ meta: { path: ['email'], contains: 'X', mode: 'insensitive' } })).toMatch(/ILIKE/);
+    expect(sql({ meta: { path: ['email'], contains: 'X', mode: 'insensitive' } })).toMatch(/ILIKE|lower\(.*\) LIKE lower\(/);
     expect(sql({ meta: { path: ['email'], contains: 'X' } })).toMatch(/LIKE/);
     expect(sql({ meta: { path: ['email'], contains: 'X' } })).not.toMatch(/ILIKE/);
   });
 
   it('and reaches the dotted form as well', () => {
-    expect(sql({ 'meta.email': { contains: 'X', mode: 'insensitive' } })).toMatch(/ILIKE/);
+    expect(sql({ 'meta.email': { contains: 'X', mode: 'insensitive' } })).toMatch(/ILIKE|lower\(.*\) LIKE lower\(/);
   });
 });

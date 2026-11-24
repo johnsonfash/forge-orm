@@ -63,6 +63,7 @@ export {
 
 // ─── Column references — field-to-field comparison in `where` ───────────────
 export { col, isColRef, FORGE_COL } from './col';
+export { configureCompileCache, compileCacheStats } from './ir/compile-cache';
 
 // Binary helpers, exported because an app that stores blobs needs the same
 // normalisation at its own edges (an upload handler, a cache) and should not

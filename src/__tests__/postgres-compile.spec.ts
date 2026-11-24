@@ -70,12 +70,23 @@ describe('PG compile — SELECT', () => {
     expect(a.sql).toMatch(/"id".*"age".*"active"/);
   });
 
-  it('findMany with contains (ILIKE for case-insensitive)', () => {
+  it('findMany with contains, case-insensitive: lower() on both sides', () => {
     const a = compileSelect(buildSelect('user', User, {
       where: { email: { contains: 'gmail', mode: 'insensitive' } },
     }, 'many'), User);
-    expect(a.sql).toMatch(/"users"\."email" ILIKE \$1/);
+    expect(a.sql).toMatch(/lower\("users"\."email"\) LIKE lower\(\$1\)/);
     expect(a.params).toEqual(['%gmail%']);
+  });
+
+  it('a column with a GIN / GiST index (pg_trgm) keeps ILIKE, which the index serves', () => {
+    const { f, model } = require('../schema/core');
+    const Doc = model('docs_trgm', { id: f.id({ type: 'string' }), title: f.string(), body: f.string() },
+      { indexes: [{ keys: { title: 1 }, method: 'gin' }] });
+    const a = compileSelect(buildSelect('doc', Doc, {
+      where: { title: { contains: 'x', mode: 'insensitive' }, body: { contains: 'y', mode: 'insensitive' } },
+    } as any, 'many'), Doc);
+    expect(a.sql).toMatch(/"docs_trgm"\."title" ILIKE \$1/);
+    expect(a.sql).toMatch(/lower\("docs_trgm"\."body"\) LIKE lower\(\$2\)/);
   });
 
   it('findMany with composite cursor', () => {

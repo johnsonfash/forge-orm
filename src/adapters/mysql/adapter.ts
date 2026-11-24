@@ -11,6 +11,7 @@ import {
   executeMysqlInsert,
   executeMysqlSelect,
   executeMysqlUpdate,
+  planMysqlIncludes,
   type MysqlConn,
   type MysqlExecOpts,
   type MysqlPool,
@@ -30,6 +31,19 @@ const CAPS: AdapterCapabilities = {
   jsonPath: true,
   transactionsRequireReplicaSet: false,
 };
+
+/**
+ * A relation loaded as JSON uses a derived table that reads its parent's
+ * columns, which MySQL accepts from 8.0.14. MariaDB is left out: its JSON is
+ * text, and it has no WEIGHT_STRING ordering guarantee to lean on here.
+ */
+export function mysqlJsonIncludes(version: string): boolean {
+  if (/mariadb/i.test(version)) return false;
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
+  if (!m) return false;
+  const [a, b, c] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  return a > 8 || (a === 8 && (b > 0 || c >= 14));
+}
 
 /** MariaDB 10.5 added INSERT … RETURNING (DELETE has had it since 10.0). */
 export function mariadbReturning(version: string): boolean {
@@ -68,10 +82,14 @@ export class MysqlAdapter implements Adapter {
     // whether this is a MariaDB that takes INSERT / DELETE … RETURNING.
     const res: any = await this._driver.query('SELECT VERSION() AS v', []);
     const rows = Array.isArray(res) ? res[0] : undefined;
-    this._returning = mariadbReturning(String(Array.isArray(rows) ? rows[0]?.v ?? '' : ''));
+    const version = String(Array.isArray(rows) ? rows[0]?.v ?? '' : '');
+    this._returning = mariadbReturning(version);
+    const dates = (this._driver as MysqlDriver).dates;
+    if (mysqlJsonIncludes(version) && dates && !dates.strings) this._json = { timezone: dates.timezone };
   }
 
   private _returning = false;
+  private _json: MysqlExecOpts['json'];
 
   async close(): Promise<void> {
     if (this._driver) await this._driver.close();
@@ -111,6 +129,7 @@ export class MysqlAdapter implements Adapter {
   private mysqlOpts(opts?: ExecOpts): MysqlExecOpts {
     const o: MysqlExecOpts = opts?.session ? { conn: opts.session as MysqlConn } : {};
     if (this._returning) o.returning = true;
+    if (this._json) o.json = this._json;
     return o;
   }
 
@@ -141,6 +160,9 @@ export class MysqlAdapter implements Adapter {
   }
 
   executeSelect(node: any, model: any, opts?: ExecOpts) {
+    // Plan the includes before the statement is logged, so the SQL an event
+    // reports is the SQL that runs.
+    if (this._json) node = planMysqlIncludes(node, model);
     return this._track('select', node, model,
       () => executeMysqlSelect(this.handle(opts), node, model, this.mysqlOpts(opts)),
       (r) => r.length);

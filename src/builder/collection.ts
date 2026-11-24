@@ -351,7 +351,21 @@ export class CollectionWrapper<
     omit?: { [K in keyof F]?: boolean };
     lock?: RowLockOption;
   }>(args: A & NoBothSelectInclude<A>): Promise<Find1<F, R, A, SM> | null> {
-    return this.findFirst(args as any) as any;
+    // A filter that pins a unique column to one value matches one row at
+    // most, so the statement needs no LIMIT (which the server would plan).
+    const result = await this._find(args, 1, this._pinsUniqueRow((args as any)?.where));
+    return (result[0] as Find1<F, R, A, SM>) ?? null;
+  }
+
+  private _pinsUniqueRow(where: any): boolean {
+    if (!where || typeof where !== 'object') return false;
+    for (const k in where) {
+      const fd: any = this.model.fields[k];
+      if (!fd || !(fd.kind === 'id' || fd.unique)) continue;
+      const v = where[k];
+      if (v != null && (typeof v !== 'object' || v instanceof Date)) return true;
+    }
+    return false;
   }
 
   async findFirstOrThrow<A extends {
@@ -1365,7 +1379,7 @@ export class CollectionWrapper<
     return { ...args, where: { ...where, [sd]: null } };
   }
 
-  private async _find(args: any, hardLimit: number | undefined): Promise<any[]> {
+  private async _find(args: any, hardLimit: number | undefined, uniqueRow = false): Promise<any[]> {
     // Build an IR SelectNode and hand it to the executor — the
     // adapter-agnostic boundary; SQL adapters consume the same node shape.
     this._assertStrictWhere(args?.where);
@@ -1376,7 +1390,7 @@ export class CollectionWrapper<
     if (node.lock) this._assertCanLock(node.lock);
     // If a hardLimit was specified (findFirst path), honour it even when the
     // user passed no take/limit.
-    if (hardLimit != null && (node.limit == null || node.limit > hardLimit)) {
+    if (hardLimit != null && !uniqueRow && (node.limit == null || node.limit > hardLimit)) {
       node.limit = hardLimit;
     }
     const keyed = withJoinKeys(node);

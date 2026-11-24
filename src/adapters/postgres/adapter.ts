@@ -149,6 +149,9 @@ export class PostgresAdapter implements Adapter {
   }
 
   executeSelect(node: any, model: any, opts?: ExecOpts) {
+    // Plan the includes before the statement is logged, so the SQL an event
+    // reports is the SQL that runs.
+    node = compileIr.planPgIncludes(node, model);
     return this._track('select', node, model,
       () => executePgSelect(this.handle(opts), node, model, this.pgOpts(opts)),
       (r) => r.length);

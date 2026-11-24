@@ -88,6 +88,7 @@ async function main() {
       const sr: ScenarioResult = { name: sc.name, kind: sc.kind, desc: sc.desc, engines: {} };
       result.scenarios.push(sr);
       const missing = (sc.needs ?? []).filter((n) => !ctx.features[n]);
+      if (ctx.settle) await uncounted(ctx.settle);
       for (const e of engines) {
         const im = impls.get(e)!;
         let er: EngineResult;

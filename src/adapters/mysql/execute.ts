@@ -7,22 +7,34 @@ import type {
   SelectNode,
   UpdateNode,
 } from '../../ir/types';
+import { JSON_REL_ALIAS_PREFIX } from '../../ir/types';
+import { MYSQL_ORD_KEY, mysqlJsonEligible, selectedFields } from '../postgres/compile-from-ir';
 import type { ModelDef } from '../../schema/types';
 import { schema } from '../../schema';
 import {
-  compileCount,
-  compileDelete,
-  compileGroupBy,
-  compileInsert,
-  compileSelect,
-  compileUpdate,
+  compileCount as rawCompileCount,
+  compileDelete as rawCompileDelete,
+  compileGroupBy as rawCompileGroupBy,
+  compileInsert as rawCompileInsert,
+  compileSelect as rawCompileSelect,
+  compileUpdate as rawCompileUpdate,
 } from './compile-from-ir';
+import { shapeCached, worthCaching } from '../../ir/compile-cache';
 import { withMysqlErrors } from './errors';
 import { rowDecoder, parseJsonText, type Convert } from '../shared/row-decoder';
 import { buildSelect, buildWhereTree } from '../../ir/build';
 import { fromDriverBytes } from '../../bytes';
 import { distinctIsExact, hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
 import { refineFallbackGeo } from '../shared/haversine';
+
+// Compiled SQL is reused per query shape; see ir/compile-cache.ts.
+const compileCount = shapeCached('mysql:count', rawCompileCount, (n) => worthCaching(n));
+const compileDelete = shapeCached('mysql:delete', rawCompileDelete, (n) => worthCaching(n));
+const compileGroupBy = shapeCached('mysql:groupby', rawCompileGroupBy, (n) => worthCaching(n));
+const compileInsert = shapeCached('mysql:insert', rawCompileInsert, (n) => worthCaching(n));
+const compileSelect = shapeCached('mysql:select', rawCompileSelect,
+  (n) => worthCaching(n) || !!n.hydration?.some((r) => (r as { json?: boolean }).json === true));
+const compileUpdate = shapeCached('mysql:update', rawCompileUpdate, (n) => worthCaching(n));
 
 // MySQL 8 and MariaDB 10.2 number rows per parent with ROW_NUMBER(); 5.7 has
 // no window functions and answers with a syntax error. The first such error
@@ -61,6 +73,8 @@ export interface MysqlExecOpts {
   conn?: MysqlConn;
   /** MariaDB 10.5+: INSERT and DELETE take RETURNING, so no read-back. */
   returning?: boolean;
+  /** MySQL 8.0.14+ through a driver whose date parsing forge knows: relations may load as JSON. */
+  json?: { timezone: string };
 }
 
 // mysql2 returns bools as 0/1, dates as Date, JSON pre-parsed; re-hydrate to
@@ -98,6 +112,7 @@ export async function executeMysqlSelect(
   opts: MysqlExecOpts = {},
 ): Promise<any[]> {
   const exec = opts.conn ?? pool;
+  if (opts.json) node = planMysqlIncludes(node, model);
   const a = compileSelect(node, model);
   const [rows] = await withMysqlErrors(() => exec.query(a.sql, a.params));
   let out = decodeRows(model, rows as any[]);
@@ -105,7 +120,10 @@ export async function executeMysqlSelect(
   // Fallback geoPoint refinement — bbox prefilter → exact circle + sort.
   out = refineFallbackGeo(out, node, model);
   if (node.projection?.counts?.length) liftRelationCounts(out, node.projection.counts);
-  if (node.hydration?.length) await hydrate(pool, opts, out, model, node.hydration);
+  if (node.hydration?.length) {
+    const rest = opts.json ? liftMysqlJsonRelations(out, model, node.hydration, opts.json.timezone, false) : node.hydration;
+    if (rest.length) await hydrate(pool, opts, out, model, rest);
+  }
   return out;
 }
 
@@ -415,6 +433,155 @@ async function hydrateMany(
     runSelect: (node) => executeMysqlSelect(pool, node, targetModel, opts),
     windowed: windowedFor(pool),
   });
+}
+
+// ─── relations loaded as JSON (MySQL 8.0.14+) ───────────────────────────────
+
+let forcedPlan: 'json' | 'batched' | undefined;
+/** Bench hook: force every include onto one plan; `undefined` restores the rule. */
+export function forceMysqlIncludePlan(plan: 'json' | 'batched' | undefined): void { forcedPlan = plan; }
+
+function parentBound(node: { cardinality?: string; limit?: number; partitionBy?: string }): number {
+  if (node.cardinality === 'one') return 1;
+  // A limit per parent of the level above bounds nothing overall.
+  if (node.partitionBy) return Infinity;
+  return node.limit != null && Number.isFinite(Number(node.limit)) ? Math.max(0, Number(node.limit)) : Infinity;
+}
+
+interface Shape { unpagedMany: number; pagedDepth: number; ones: number }
+function shapeOf(rel: RelationPlan, depth: number, acc: Shape): Shape {
+  const n = (rel.nested ?? {}) as Partial<SelectNode>;
+  if (rel.kind === 'one') acc.ones++;
+  else if (n.limit == null) acc.unpagedMany++;
+  else acc.pagedDepth = Math.max(acc.pagedDepth, depth + 1);
+  for (const h of n.hydration ?? []) shapeOf(h, rel.kind === 'many' ? depth + 1 : depth, acc);
+  return acc;
+}
+
+// A to-many into a link table (a model whose every relation is a to-one it
+// owns, like post_tags) that only looks up the far side: a few rows per
+// parent, whatever the parent count.
+function isLinkLookup(rel: RelationPlan): boolean {
+  const n = (rel.nested ?? {}) as Partial<SelectNode>;
+  if (rel.kind !== 'many' || n.limit != null) return false;
+  const target = (schema as any)[rel.target] as ModelDef<any> | undefined;
+  if (!target) return false;
+  const rels = Object.values(target.relations() ?? {}) as Array<{ kind: string; on: string }>;
+  if (rels.length < 2 || !rels.every((r) => r.kind === 'one' && target.fields[r.on] != null)) return false;
+  return (n.hydration ?? []).every((h) => h.kind === 'one' && !((h.nested as any)?.hydration?.length));
+}
+
+/**
+ * Whether a relation MySQL can load as JSON should be. Measured on the bench
+ * database (bench/micro/include-plans.ts, docs/N-PLUS-ONE.md): MySQL runs a
+ * correlated subquery once per parent row, so JSON pays while the parents
+ * are few, and longer when each parent has a couple of rows to fetch (a
+ * link-table lookup). An unpaged to-many is unbounded per parent;
+ * nested under another to-many it is the shape where one JSON query falls
+ * over (Kysely's took 1 s on the bench where a query per level takes 23 ms),
+ * and it never loads as JSON past a single parent.
+ */
+export function preferMysqlJson(parents: number, rel: RelationPlan): boolean {
+  if (forcedPlan) return forcedPlan === 'json';
+  if (isLinkLookup(rel)) return parents <= 200;
+  const s = shapeOf(rel, 0, { unpagedMany: 0, pagedDepth: 0, ones: 0 });
+  if (s.unpagedMany > 0) return parents <= 1;
+  // Paged levels nested in each other: JSON won on one run and lost by 1.5x
+  // on the next (a per-parent filesort inside each correlated derived table),
+  // so they stay per level.
+  if (s.pagedDepth >= 2) return parents <= 1;
+  if (s.pagedDepth === 1) return parents <= 10;
+  return parents <= 20;
+}
+
+/** Settle JSON or per level for each include of this node and record it on the node. */
+export function planMysqlIncludes(node: SelectNode, model: ModelDef<any>): SelectNode {
+  const h = node.hydration;
+  if (!h?.length) return node;
+  const parents = parentBound(node);
+  // A page per parent filters rows after the select list is computed, so a
+  // JSON column there would be built for every candidate row.
+  const partitioned = !!(node as { partitionBy?: string }).partitionBy;
+  let changed: RelationPlan[] | undefined;
+  for (let i = 0; i < h.length; i++) {
+    const rel = h[i];
+    if ((rel as { json?: boolean }).json !== undefined || !mysqlJsonEligible(model, rel)) continue;
+    changed ??= h.slice();
+    changed[i] = { ...rel, json: !partitioned && preferMysqlJson(parents, rel) } as RelationPlan;
+  }
+  return changed ? { ...node, hydration: changed } : node;
+}
+
+const jsonPlans = new WeakMap<object, Array<[string, (v: any) => any]>>();
+function jsonFieldPlan(model: ModelDef<any>, timezone: string): Array<[string, (v: any) => any]> {
+  let plan = jsonPlans.get(model);
+  if (plan) return plan;
+  plan = [];
+  for (const [name, f] of Object.entries(model.fields)) {
+    const kind = (f as { kind: string }).kind;
+    if (kind === 'bool') plan.push([name, toBool]);
+    else if (kind === 'dateTime') {
+      // DATETIME inside JSON reads 'YYYY-MM-DD HH:MM:SS.ffffff'; mysql2 gets
+      // the column's own 3 digits and turns that text into a Date exactly so.
+      plan.push([name, (v) => (typeof v !== 'string' ? v
+        : timezone === 'local' ? new Date(v.slice(0, 23)) : new Date(v.slice(0, 23) + timezone))]);
+    } else if (kind === 'json' || kind === 'embed' || kind === 'embedMany' || kind === 'stringArray' || kind === 'intArray') {
+      plan.push([name, parseJsonText]);
+    }
+  }
+  jsonPlans.set(model, plan);
+  return plan;
+}
+
+// MySQL sorts NULL first ascending, last descending.
+function compareKeys(a: any[], b: any[], dirs: Array<'asc' | 'desc'>): number {
+  for (let i = 0; i < dirs.length; i++) {
+    const x = a[i], y = b[i];
+    if (x === y) continue;
+    const c = x == null ? -1 : y == null ? 1 : x < y ? -1 : x > y ? 1 : 0;
+    if (c !== 0) return dirs[i] === 'desc' ? -c : c;
+  }
+  return 0;
+}
+
+/** Decode the JSON columns of the relations loaded that way; return the ones still to load. */
+function liftMysqlJsonRelations(rows: any[], model: ModelDef<any>, hydration: RelationPlan[], timezone: string, all: boolean): RelationPlan[] {
+  const rest: RelationPlan[] = [];
+  for (const rel of hydration) {
+    if (!all && (rel as { json?: boolean }).json !== true) { rest.push(rel); continue; }
+    const key = JSON_REL_ALIAS_PREFIX + rel.name;
+    const target = (schema as any)[rel.target] as ModelDef<any>;
+    const n = (rel.nested ?? {}) as Partial<SelectNode>;
+    const dirs = (n.orderBy ?? []).map((e) => e.direction);
+    for (const r of rows) {
+      let v = r[key];
+      delete r[key];
+      if (typeof v === 'string') v = JSON.parse(v);
+      if (rel.kind === 'one') { r[rel.name] = v == null ? null : decodeJsonObject(target, n, v, timezone); continue; }
+      const list: any[] = v ?? [];
+      if (dirs.length && list.length > 1) list.sort((x, y) => compareKeys(x[MYSQL_ORD_KEY], y[MYSQL_ORD_KEY], dirs));
+      for (let i = 0; i < list.length; i++) list[i] = decodeJsonObject(target, n, list[i], timezone);
+      r[rel.name] = list;
+    }
+  }
+  return rest;
+}
+
+function decodeJsonObject(model: ModelDef<any>, n: Partial<SelectNode>, src: any, timezone: string): any {
+  // MySQL stores a JSON object's keys sorted by length; put them back in the
+  // order a row of the same columns has.
+  const obj: any = {};
+  for (const f of selectedFields(model, n.projection as any)) if (f in src) obj[f] = src[f];
+  for (const k in src) if (!(k in obj) && k !== MYSQL_ORD_KEY) obj[k] = src[k];
+  const plan = jsonFieldPlan(model, timezone);
+  for (let i = 0; i < plan.length; i++) {
+    const [k, c] = plan[i];
+    const v = obj[k];
+    if (v != null) obj[k] = c(v);
+  }
+  if (n.projection?.counts?.length) liftRelationCounts([obj], n.projection.counts);
+  if (n.hydration?.length) liftMysqlJsonRelations([obj], model, n.hydration, timezone, true);
+  return obj;
 }
 
 function dedupeBy(rows: any[], fields: string[]): any[] {

@@ -9,6 +9,7 @@ forge-orm targets MySQL 5.7+, MySQL 8.x, MariaDB 10.6+, and HeatWave (for vector
 * [Type emit](#type-emit)
 * [Charset and collation](#charset-and-collation)
 * [JSON columns](#json-columns)
+* [Includes as JSON](#includes-as-json-mysql-8014)
 * [FULLTEXT](#fulltext)
 * [Spatial](#spatial)
 * [HeatWave vector](#heatwave-vector)
@@ -442,6 +443,29 @@ interpolation rules.
 `(col::jsonb = 'null'::jsonb)`; same idea, different emit.
 
 ---
+
+## Includes as JSON (MySQL 8.0.14+)
+
+Since 2.29.0 an `include` can load inside the parent's own `SELECT` on MySQL,
+as `JSON_ARRAYAGG(JSON_OBJECT(…))` from a correlated subquery, instead of one
+query per level. forge decides per query, and only where it measured faster:
+a link-table lookup (`posts → post_tags → tag`) for up to 200 parents, a
+single paged include (`take` on the relation) for up to 10, a to-one for up
+to 20, and an unpaged to-many or nested paged includes only for a single
+parent. The full rule and the
+numbers are in [N-PLUS-ONE.md](./N-PLUS-ONE.md#postgres-and-mysql-one-query-or-one-per-level-chosen-per-query).
+
+It needs MySQL 8.0.14 or later (a derived table that reads the parent's
+columns) and the `mysql2` driver forge creates or `mysql2Driver(pool)`, whose
+`timezone` / `dateStrings` settings forge reads to decode dates inside the
+JSON exactly as mysql2 decodes a DATETIME column. MariaDB, older MySQL, a pool
+with `dateStrings`, and other injected drivers keep one query per level. A
+relation with a `bigint`, `decimal`, `bytes`, geo or vector column in the
+selection always loads per level.
+
+`JSON_ARRAYAGG` has no `ORDER BY`, so the children carry their sort key and
+forge sorts them after decoding; a string key is sent as
+`HEX(WEIGHT_STRING(col))`, so the order is the column collation's.
 
 ## FULLTEXT
 

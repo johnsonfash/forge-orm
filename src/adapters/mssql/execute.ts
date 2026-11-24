@@ -13,13 +13,14 @@ import type {
 import type { ModelDef } from '../../schema/types';
 import { schema } from '../../schema';
 import {
-  compileCount,
-  compileDelete,
-  compileGroupBy,
-  compileInsert,
-  compileSelect,
-  compileUpdate,
+  compileCount as rawCompileCount,
+  compileDelete as rawCompileDelete,
+  compileGroupBy as rawCompileGroupBy,
+  compileInsert as rawCompileInsert,
+  compileSelect as rawCompileSelect,
+  compileUpdate as rawCompileUpdate,
 } from './compile-from-ir';
+import { shapeCached, worthCaching } from '../../ir/compile-cache';
 import { withMssqlErrors } from './errors';
 import { decodeWideIntegerRows, decodeWideIntegers } from '../shared/wide-int';
 import { decodeJsonColumns } from '../shared/json-columns';
@@ -29,6 +30,14 @@ import type { MssqlQueryable } from './driver';
 import type { Dialect } from '../postgres/dialect';
 import { distinctIsExact, hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
 import { refineFallbackGeo } from '../shared/haversine';
+
+// Compiled SQL is reused per query shape; see ir/compile-cache.ts.
+const compileCount = shapeCached('mssql:count', rawCompileCount, (n) => worthCaching(n));
+const compileDelete = shapeCached('mssql:delete', rawCompileDelete, (n) => worthCaching(n));
+const compileGroupBy = shapeCached('mssql:groupby', rawCompileGroupBy, (n) => worthCaching(n));
+const compileInsert = shapeCached('mssql:insert', rawCompileInsert, (n) => worthCaching(n));
+const compileSelect = shapeCached('mssql:select', rawCompileSelect, (n) => worthCaching(n));
+const compileUpdate = shapeCached('mssql:update', rawCompileUpdate, (n) => worthCaching(n));
 
 // Window functions are always available here, so a nested page is one query.
 const WINDOWED: WindowedPaging = { enabled: true };

@@ -1,0 +1,14 @@
+mysql: 200 interleaved iterations, median ms
+scenario                     raw     forge    kysely      knex   forge vs best
+pk                         0.115     0.131     0.123     0.140   +6%
+exists                     0.095     0.107     0.101     0.113   +6%
+include_1                  0.418     0.453     0.527     0.470   level or faster
+include_3                  4.529     6.459     6.088     4.812   +34%
+m2m_post_tags              1.170     2.018     2.584     2.808   level or faster
+count_rel                  4.924     5.213     5.162     5.174   level or faster
+json_prefs                 0.697     0.795     0.754     0.785   +5%
+create                     0.347     0.407     0.386     0.408   +6%
+update_by_id               0.195     0.234     0.208     0.226   +12%
+include_count              4.294     5.816     5.553     4.557   +28%
+delete_by_id               0.182     0.211     0.196     0.199   +7%
+nested_update              0.589     0.691     0.672     0.750   level or faster

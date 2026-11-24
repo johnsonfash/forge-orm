@@ -184,6 +184,65 @@ Neither case fails the run.
 
 ---
 
+## Results (2.29.0)
+
+Same machine and setup as 2.28.0. Scorecard from the interleaved runner
+(`ab.ts`, 60 iterations, raw / forge / Kysely / Knex, every engine one
+iteration in turn); "level" is within 5% of the faster of Kysely and Knex.
+Postgres now runs `VACUUM ANALYZE` between scenarios so no scenario inherits
+the churn of the ones before it. Full tables:
+`bench/compare/results/2.29.0-interleaved-<dialect>.txt` (and a 200-iteration
+Postgres re-run, `2.29.0-interleaved-200-postgres.txt`), and the sequential
+six-engine runs with round trips, `2.29.0-deep-<dialect>.md`. No forge
+correctness mismatch on any dialect (Prisma's Postgres timestamp mismatches
+are the kit's known timezone issue).
+
+### Scorecard: forge against the faster of Kysely and Knex
+
+| dialect | forge faster | level (within 5%) | forge slower |
+|---|---|---|---|
+| SQLite | 38 | 9 | 2 |
+| Postgres | 17 | 29 | 2 (0 or 1 at 200 iterations) |
+| MySQL | 9 | 33 | 7 |
+
+Still slower, and why:
+
+* **SQLite large reads and streams (+86–109% vs Knex).** Unchanged: the cost
+  is producing `Date` objects and parsed JSON, which Knex skips; forge's own
+  work on 10 000 rows is about zero.
+* **Postgres `include_3` (+6–7% vs Kysely).** Both send one JSON query; forge
+  puts `ORDER BY` inside `json_agg`, which Postgres guarantees, where Kysely
+  relies on the subquery's order, which it documents as "usually" kept.
+  `or_not_like` read +7% at 60 iterations and level at 200 (0.258 vs 0.263).
+* **MySQL `include_3` and `include_count` (+15% / +50% vs Kysely in this
+  run).** forge loads these per level; Kysely builds one JSON query. Which of
+  the two wins on this laptop changed from run to run: in a forge-only
+  measurement JSON won (1.67 / 2.18 ms), in later runs it lost by 1.5x (3.51 /
+  2.39), and in the earlier 200-iteration run Knex's per-level form beat
+  Kysely's JSON by 34%. forge keeps the per-level plan, which never collapses
+  (Kysely's `include_2` took 1 053 ms in this run, forge 22.6).
+* **MySQL single-row writes and reads (+7–14%): `update_by_id`,
+  `delete_by_id`, `create`, `unique_email`.** forge's own JavaScript per call
+  is 1–5 µs with a stub driver (`bench/micro/stub-overhead.ts`); the rest of
+  the gap moved between runs (pk was +6% at 200 iterations and level at 60).
+  `update_by_id` also reads the row back, which MySQL needs a second
+  statement for.
+* **Postgres `update_many_rel` / `delete_many_rel` are settled: forge is
+  fastest of the ORMs** (0.266 vs Kysely 0.304 at 200 iterations, same SQL).
+  The 2.28 gap came from table state, not forge: the scenarios before them
+  insert and delete hundreds of thousands of rows, and without a vacuum
+  between scenarios the timings depended on autovacuum.
+
+What changed for forge in 2.29.0: compiled SQL cached per shape, Postgres and
+MySQL choosing the include plan per query (see
+[N-PLUS-ONE.md](N-PLUS-ONE.md#postgres-and-mysql-one-query-or-one-per-level-chosen-per-query)),
+`lower() LIKE lower()` for case-insensitive filters on Postgres, and no
+`LIMIT 1` on `findUnique`. Measured inside the same process, the per-shape
+cache takes forge's own time per `create` from 2.6 to 1.8 µs; on a real
+server that is too small to see beside the round trip, and in-situ split
+measurements (`bench/micro/split.ts`) show forge's JavaScript per call
+(about 10 µs) already below Kysely's (about 12.5 µs) on Postgres.
+
 ## Results (2.28.0)
 
 Same machine and setup as 2.27.0 below. The scorecard comes from the
@@ -467,7 +526,7 @@ Column meanings:
   per-call cost of going through the ORM.
 
 For numbers like the +12.7% above: forge wraps each call with the row decoder,
-the IR compile cache lookup, the event emitter, and a couple of property
+building and compiling the query (or the compiled-SQL cache lookup), the event emitter, and a couple of property
 walks. On a 1.26ms raw call, that is in the noise — but it's a number you can
 track release to release.
 
@@ -505,13 +564,23 @@ from two machines, only deltas between releases on the same machine.
 The bench number is the proof. The mechanisms behind it are documented for
 context:
 
-* **IR compile cache.** Every query is compiled once from the public API
-  shape (`findMany({ where: { role: 'EDITOR' } })`) into an IR tree, then
-  into dialect-specific SQL plus a params array. The cache key is the IR
-  shape, not the parameter values, so 1,000 calls to `findFirst({ email })`
-  with 1,000 different emails compile once and reuse the prepared SQL 1,000
-  times. The bench loop hits this cache cold on iteration 1 and hot for the
-  next 199 — exactly the production pattern.
+* **SQL compiled once per query shape (2.29.0).** A query is turned into an
+  IR tree and then into SQL plus a parameter list. For a write, and for a read
+  that builds relation subqueries (`_count`, or an include loaded as JSON),
+  the SQL is cached on the IR's shape with the values taken out: 1 000
+  `upsert`s with 1 000 different emails compile once. How each parameter
+  maps to a value is learned the second time a shape is seen, by compiling
+  it again with two sets of stand-in values and checking every parameter is
+  either a constant or exactly one of the values; a shape that fails (a LIKE
+  pattern built around a value, a value that changes the SQL) is never
+  cached. Booleans, nulls, empty strings, zero, array lengths, `take` and
+  `skip` are part of the shape. It is bounded (1 000 shapes per statement
+  kind, least recently used dropped) and `configureCompileCache({ enabled:
+  false })` or `FORGE_COMPILE_CACHE=off` turns it off. A plain `SELECT`,
+  `COUNT` or `DELETE` is not cached: reading a query's shape costs about as
+  much as compiling one. With a stub driver (`bench/micro/stub-overhead.ts`)
+  forge's own time per call goes from 2.6 to 1.8 µs for a `create`, 2.7 to
+  1.9 for an `upsert`, 8.3 to 6.1 for a 3-level JSON include on Postgres.
 * **No codegen.** forge has no separate generator step. There is no
   `prisma generate` to run, no client to ship in `node_modules`, no engine
   binary to start. Cold-start is one `import` and one `createDb` call. This
@@ -533,7 +602,7 @@ What forge does **not** do, and why these are not bench wins:
 
 * No connection-pool of its own — it uses the driver's. Pool tuning is in
   [POOLING.md](POOLING.md).
-* No client-side query cache. The cache is the IR compile cache, not a result
+* No client-side query cache. The cache is the compiled-SQL cache, not a result
   cache. Result caching belongs above forge, not inside it.
 * No bytecode VM, no separate process. The engine *is* node + driver.
 

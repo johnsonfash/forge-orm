@@ -38,9 +38,9 @@ const art = (d: unknown, args: unknown) =>
 const sqlFor = (d: unknown, args: unknown) => art(d, args).sql;
 
 describe("mode: 'insensitive'", () => {
-  test('Postgres emits ILIKE', () => {
+  test('Postgres lowers both sides (what its ILIKE does in a UTF8 database, minus a lower() of the pattern per row)', () => {
     expect(sqlFor(PostgresDialect, { where: { title: { contains: 'x', mode: 'insensitive' } } }))
-      .toContain('ILIKE');
+      .toMatch(/lower\("docs"\."title"\) LIKE lower\(\$1\)/);
   });
 
   test('DuckDB has ILIKE too, so it keeps it', () => {

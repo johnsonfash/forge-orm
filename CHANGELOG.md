@@ -4,6 +4,57 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.29.0 — compiled SQL cached per query shape, include plan chosen per query on Postgres, JSON includes on MySQL, cheaper case-insensitive filters and unique lookups
+
+- **Compiled SQL is cached per query shape** on every SQL dialect, for writes
+  and for reads that build relation subqueries. A repeated shape skips the
+  compiler and fills in its parameters. The mapping from values to
+  parameters is learned by compiling the shape again with stand-in values and
+  is only used when every parameter is a constant or exactly one of the
+  values, so a shape the compiler treats by value (a LIKE pattern, a null)
+  is never cached wrongly; null, booleans, empty strings, zero, array lengths,
+  take and skip are part of the shape. Bounded (1 000 shapes per statement
+  kind, LRU). `configureCompileCache({ enabled, maxShapes })` and
+  `FORGE_COMPILE_CACHE=off`. forge's own time per call, stub driver: create
+  2.6 → 1.8 µs, upsert 2.7 → 1.9, a Postgres 3-level include 8.3 → 6.1. A
+  plain SELECT / COUNT / DELETE is not cached: reading its shape costs as
+  much as compiling it.
+- **Postgres chooses the include plan per query**: JSON in the parent's one
+  statement, or one statement per level, from the parent count it can know
+  (1, `take`, or unbounded) and the include's shape. JSON for small and paged
+  includes, per level for wide unpaged ones, where JSON was up to 2x slower
+  (`posts → author` for 50 posts: 0.44 → 0.38 ms; users → posts → comments
+  for 100 users: 12.1 → 7.8). Rule and measurements in
+  [docs/N-PLUS-ONE.md](./docs/N-PLUS-ONE.md). A level paged per parent never
+  builds JSON for its own includes (the windowed select list is computed for
+  every candidate row).
+- **MySQL 8.0.14+ can load includes as JSON** (`JSON_ARRAYAGG` /
+  `JSON_OBJECT`), used only for the shapes where it measured faster: a
+  link-table lookup (`posts → post_tags → tag`, 50 posts 0.85 → 0.55 ms), a
+  single paged include for up to 10 parents, a to-one for up to 20. An
+  unpaged to-many, or paged includes nested in each other, never load as JSON
+  past one parent, so the nested shape that took
+  Kysely 1 s on the bench stays at forge's query per level. Children are
+  sorted by their own sort key (`WEIGHT_STRING` for text, so the collation's
+  order), dates decode exactly as `mysql2` decodes them, keys come back in
+  column order. MariaDB, a `dateStrings` pool and injected drivers other than
+  `mysql2Driver` keep one query per level.
+- **Postgres `mode: 'insensitive'` compiles to `lower(col) LIKE lower($1)`**
+  instead of `ILIKE`. In a UTF8 database that is what `ILIKE` does, except
+  `ILIKE` lowers the pattern again for every row (bench `or_not_like`: 0.27 →
+  0.24 ms; results identical, checked over Unicode cases such as İ, ß, Σ, ǅ).
+  A column with a GIN or GiST index declared in the schema (pg_trgm) keeps
+  `ILIKE`, which that index serves. **If you created a trigram index by hand
+  (raw SQL, not in the schema), declare it in the schema** (`method: 'gin'`),
+  or case-insensitive filters on that column stop using it.
+- **`findUnique` on a unique column sends no `LIMIT 1`**: the filter already
+  matches one row at most, and the server no longer plans a limit.
+- Bench: Postgres runs `VACUUM ANALYZE` between scenarios (`ctx.settle`), so
+  a scenario's numbers no longer depend on how many rows the scenarios
+  before it wrote and deleted; `bench/micro/` gains stub-overhead.ts (forge's
+  own time per call), split.ts (forge's time against its own SQL sent
+  direct), sqlvariants.ts and include-plans.ts.
+
 ## 2.28.0 — NOT over relation filters rewritten, writes return only the selected columns, cheaper nested creates and distinct, latency option in the bench
 
 - **`NOT` of a relation filter compiles to the opposite filter** on the SQL

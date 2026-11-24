@@ -10,19 +10,29 @@ import type {
 import type { ModelDef } from '../../schema/types';
 import { schema } from '../../schema';
 import {
-  compileCount,
-  compileDelete,
-  compileGroupBy,
-  compileInsert,
-  compileSelect,
-  compileUpdate,
+  compileCount as rawCompileCount,
+  compileDelete as rawCompileDelete,
+  compileGroupBy as rawCompileGroupBy,
+  compileInsert as rawCompileInsert,
+  compileSelect as rawCompileSelect,
+  compileUpdate as rawCompileUpdate,
   jsonRelationEligible,
+  planPgIncludes,
 } from './compile-from-ir';
+import { shapeCached, worthCaching, worthCachingInline } from '../../ir/compile-cache';
 import { JSON_ORD_ALIAS, JSON_REL_ALIAS_PREFIX } from '../../ir/types';
 import { withPgErrors } from './errors';
 import { decodeWideIntegerRows, decodeWideIntegers } from '../shared/wide-int';
 import { hydrateManyRelation, hydrateOneRelation, liftRelationCounts, type WindowedPaging } from '../../ir/hydrate-many';
 import { refineFallbackGeo } from '../shared/haversine';
+
+// Compiled SQL is reused per query shape; see ir/compile-cache.ts.
+const compileCount = shapeCached('postgres:count', rawCompileCount, (n) => worthCaching(n));
+const compileDelete = shapeCached('postgres:delete', rawCompileDelete, (n) => worthCaching(n));
+const compileGroupBy = shapeCached('postgres:groupby', rawCompileGroupBy, (n) => worthCaching(n));
+const compileInsert = shapeCached('postgres:insert', rawCompileInsert, (n) => worthCaching(n));
+const compileSelect = shapeCached('postgres:select', rawCompileSelect, worthCachingInline);
+const compileUpdate = shapeCached('postgres:update', rawCompileUpdate, (n) => worthCaching(n));
 
 // Postgres IR executor — wires SQLArtifacts to a pg pool.
 //
@@ -48,6 +58,7 @@ export async function executePgSelect(
   opts: PgExecOpts = {},
 ): Promise<any[]> {
   const exec = opts.client ?? pool;
+  node = planPgIncludes(node, model);
   const artifact = compileSelect(node, model);
   const { rows } = await withPgErrors(() => exec.query(artifact.sql, artifact.params));
 

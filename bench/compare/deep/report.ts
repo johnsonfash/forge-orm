@@ -53,7 +53,11 @@ export function computeFlags(r: RunResult): Flag[] {
     for (const e of r.engines) {
       const x = E[e];
       if (x?.status === "error") flags.push({ scenario: s.name, engine: e, kind: "error", detail: x.error ?? "" });
-      if (x?.status === "ok" && x.probe && x.probe[1] > x.probe[0]) {
+      // N+1 adds a round trip per row: the probe's sizes differ by 15 rows or
+      // more. An engine that switches from one query to one per level as the
+      // parents grow (forge on Postgres and MySQL) adds at most one per
+      // include level, three in this kit, and that is not N+1.
+      if (x?.status === "ok" && x.probe && x.probe[1] > x.probe[0] + 3) {
         flags.push({ scenario: s.name, engine: e, kind: "n-plus-one", detail: `round trips grow with row count: ${x.probe[0]} -> ${x.probe[1]}` });
       }
     }

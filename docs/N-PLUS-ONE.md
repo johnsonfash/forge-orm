@@ -196,26 +196,106 @@ drop to `$queryRaw` and write the JOIN yourself; see
 
 ---
 
-## Postgres: the whole include in one query
+## Postgres and MySQL: one query, or one per level, chosen per query
 
-Since 2.26.0 Postgres does not run a query per level at all when it can
-avoid it. Each relation level becomes a subquery in the parent's own
-`SELECT` that returns the children as JSON (`json_agg`, or `row_to_json`
-for a to-one), paged inside the subquery and ordered by the include's
-`orderBy`. `users → posts(take 5) → comments(take 3) → author` is **one**
-round trip; posts → post_tags → tag is one. Values come back as a query
-per level would return them: 64-bit integers and numerics travel as text,
-timestamps are decoded to `Date`.
+Since 2.26.0 Postgres can load an include inside the parent's own `SELECT`:
+each relation level is a subquery that returns the children as JSON
+(`json_agg`, or `row_to_json` for a to-one), paged inside the subquery and
+ordered by the include's `orderBy`. `users → posts(take 5) → comments(take 3)
+→ author` is then **one** round trip. Since 2.29.0 MySQL 8.0.14 and later can
+too (`JSON_ARRAYAGG` / `JSON_OBJECT`), and on both forge **chooses per query**
+between that and one query per level, because neither plan wins everywhere.
 
-A relation keeps the query-per-level plan when JSON cannot carry it
-faithfully or the SQL would differ: a `bytes`, `geoPoint` or `vector`
-column in the selection, `distinct`, a `cursor`, or a distance `orderBy`.
-Measured in-process against the query-per-level plan, it is level on a
-single to-one and up to 25% faster on paged, deep and many-to-many
-includes. The other dialects keep one query per level: MySQL's JSON
-aggregation either loses the order or goes through a derived table it
-re-materialises per row, and on SQLite and DuckDB a round trip costs
-almost nothing.
+Values come back exactly as a query per level returns them: 64-bit integers
+and numerics travel as text on Postgres, timestamps are decoded to `Date`
+the way the driver decodes them, booleans stay booleans, and keys are in
+column order. A relation always keeps the query-per-level plan when JSON
+cannot carry it faithfully: a `bytes`, `geoPoint` or `vector` column (and on
+MySQL a `bigint` or `decimal`), `distinct`, a `cursor`, or a distance
+`orderBy`. MariaDB, and a MySQL driver whose date handling forge cannot see
+(an injected driver other than `mysql2Driver`), always load per level.
+
+### The rule
+
+The choice uses only what is known when the query is compiled: how many
+parents the query can return (1 for `findUnique`/`findFirst`, the `take` of a
+paged query, unknown otherwise), and the shape of the include below it.
+
+| shape of the include | Postgres: JSON when parents ≤ | MySQL: JSON when parents ≤ |
+|---|---|---|
+| to-one only (`posts → author`) | 25 | 20 |
+| one unpaged to-many level (`users → posts`) | 50 | 1 |
+| a link-table lookup (`posts → post_tags → tag`) | 50 | 200 |
+| paged to-many (`take` on the relation) | always | 10 |
+| paged to-many with another level under it | always (100 with a to-one under it) | 1 |
+| an unpaged to-many under another to-many | 5 | 1 |
+
+An unpaged query (no `take`) counts as "many parents". Includes under a
+level that loaded per level decide again when their own level runs, and a
+level that is paged per parent (`take` on a nested include, run as one
+windowed query) never loads its own includes as JSON: the select list of a
+windowed query is built for every candidate row, before the page is cut.
+
+### The numbers behind it
+
+`bench/micro/include-plans.ts` on the bench database (1 000 users, 10 000
+posts, 50 000 comments), interleaved, median ms, JSON / per level. Parents
+are the `take` of the outer query.
+
+Postgres, zero latency:
+
+| shape | 1 | 5 | 10 | 20 | 50 | 100 | 200 | 1000 |
+|---|---|---|---|---|---|---|---|---|
+| posts → author | 0.20 / 0.31 | 0.26 / 0.35 | 0.26 / 0.32 | 0.32 / 0.32 | 0.44 / 0.38 | 0.72 / 0.54 | 1.19 / 0.76 | 5.20 / 2.72 |
+| users → posts | 0.18 / 0.23 | 0.33 / 0.43 | 0.50 / 0.63 | 0.79 / 1.05 | 1.75 / 1.63 | 3.28 / 2.99 | 6.38 / 5.77 | 31.8 / 28.0 |
+| users → posts (take 5) | 0.16 / 0.24 | 0.26 / 0.36 | 0.37 / 0.52 | 0.56 / 0.79 | 1.19 / 1.33 | 2.19 / 2.40 | 4.31 / 4.65 | 21.1 / 23.5 |
+| posts → post_tags → tag | 0.16 / 0.26 | 0.22 / 0.40 | 0.22 / 0.31 | 0.33 / 0.47 | 0.55 / 0.63 | 0.91 / 0.84 | 1.70 / 1.47 | 7.51 / 5.52 |
+| users → posts → comments | 0.35 / 0.51 | 0.84 / 0.86 | 1.41 / 1.33 | 2.69 / 2.33 | 6.42 / 4.48 | 12.1 / 7.84 | 24.2 / 15.3 | 122 / 55.6 |
+| users → posts(5) → comments(3) | 0.29 / 0.55 | 0.59 / 0.79 | 0.89 / 1.17 | 1.58 / 1.96 | 3.50 / 4.09 | 6.97 / 7.31 | 13.7 / 15.0 | 69.6 / 80.3 |
+| users → posts(5) → comments(3) → author | 0.31 / 0.54 | 0.55 / 0.81 | 0.81 / 1.20 | 1.33 / 1.80 | 3.06 / 3.73 | 5.81 / 5.84 | 11.6 / 10.2 | 44.1 / 34.9 |
+
+With 1 ms added to every round trip (`BENCH_LATENCY_MS=1`), JSON's single
+trip wins at the small sizes the rule gives it: posts → author 1.74 / 3.19 at
+10 parents, users → posts(5) → comments(3) 2.33 / 5.45 at 10, and per level
+still wins where the rule picks it (users → posts → comments 16.0 / 12.8 at
+50). Between those, the rule follows the zero-latency numbers: it was tried
+with the limits growing with the round-trip time forge measured, and on a
+busy machine every statement looks slow, so the plan flipped to JSON exactly
+where JSON was the slower one. A query-per-level read across a slow network
+costs one extra round trip per include level, never one per row.
+
+MySQL 9.7, zero latency:
+
+| shape | 1 | 5 | 20 | 50 | 200 |
+|---|---|---|---|---|---|
+| posts → author | 0.21 / 0.36 | 0.26 / 0.37 | 0.37 / 0.41 | 0.55 / 0.47 | 1.73 / 0.98 |
+| users → posts | 0.39 / 0.48 | 0.76 / 0.67 | 2.40 / 1.62 | 5.60 / 3.32 | 14.4 / 11.0 |
+| users → posts (take 5) | 0.30 / 0.42 | 0.48 / 0.58 | 1.33 / 1.41 | 4.43 / 4.36 | 11.1 / 12.6 |
+| posts → post_tags → tag | 0.19 / 0.43 | 0.20 / 0.41 | 0.32 / 0.57 | 0.55 / 0.85 | 1.65 / 1.70 |
+| users → posts → comments | 0.67 / 0.74 | 2.31 / 1.77 | 9.91 / 5.84 | 21.6 / 14.8 | 83.4 / 53.5 |
+| users → posts(5) → comments(3) | 0.51 / 0.74 | 1.91 / 2.06 | 7.36 / 7.07 | 11.3 / 9.40 | 47.0 / 42.9 |
+| users → posts(5) → comments(3) → author | 0.45 / 0.89 | 0.96 / 1.38 | 3.50 / 4.36 | 9.55 / 10.2 | 28.1 / 25.5 |
+| users → posts(3, _count) → comments(2) → author | 0.30 / 0.47 | 0.61 / 0.90 | 1.54 / 2.14 | 3.87 / 5.58 | 12.5 / 18.3 |
+
+MySQL evaluates the correlated subqueries once per parent row with little
+shared between them, so its JSON plan pays off for fewer parents than
+Postgres's, and it is less stable: the nested paged shapes (the last three
+rows) won as JSON on the run above and lost by 1.5x on a later one on the
+same machine (users → posts(5) → comments(3) → author, 10 users: 3.51 / 2.39),
+because each correlated derived table sorts its own page. Those stay per
+level; the link-table lookup won on every run (0.33 / 0.71 at 10 posts). The unpaged nested shape is the one where a single JSON query
+falls over: Kysely's version of the bench's nested include took 1 054 ms where
+the query per level takes 23 ms, and forge never builds it as JSON past one
+parent.
+
+### How MySQL keeps the order
+
+`JSON_ARRAYAGG` takes no `ORDER BY` and promises no order, and MySQL may drop
+an `ORDER BY` inside a derived table. So each JSON object carries its sort
+key and forge sorts after decoding: numbers and DATETIME text as they are,
+and a string column as `HEX(WEIGHT_STRING(col))`, the collation's own sort
+key, so `'b'`, `'B'` and `'é'` land exactly where the server's `ORDER BY` puts
+them.
 
 ## Nested paging no longer changes the query count
 
