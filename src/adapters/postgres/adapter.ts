@@ -62,8 +62,15 @@ export class PostgresAdapter implements Adapter {
       // A project that uses postgres.js and never installed `pg` (the CLI opens
       // its own connection from the URL, so `forge migrate` used to fail there
       // with a missing-driver error). Use the driver the project already has.
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const mod = require('postgres');
+      // Inside try so a browser bundler leaves it for run time (see the
+      // optional-driver convention); `postgresJsInstalled()` already checked.
+      let mod: any;
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        mod = require('postgres');
+      } catch (err) {
+        throw err;
+      }
       const postgres = typeof mod === 'function' ? mod : mod.default;
       this._driver = postgresJsDriver(postgres(url, { max: 10, onnotice: () => {} }));
     } else {

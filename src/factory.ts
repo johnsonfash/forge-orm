@@ -27,6 +27,9 @@ import { DuckdbAdapter } from './adapters/duckdb/adapter';
 import { MssqlAdapter } from './adapters/mssql/adapter';
 import { currentSession, runWithSession } from './session-context';
 
+/** Load a node-only module so browser bundlers do not follow it (see $migrateFiles). */
+const loadNodeOnly = <T>(specifier: string): Promise<T> => import(specifier) as Promise<T>;
+
 // createDb() — adapter-agnostic factory. Three call shapes, all returning the
 // same Db handle: URL only (adapter inferred), explicit type + URL, or
 // structured config (type required, no url). On detection failure or
@@ -892,25 +895,30 @@ function makeDb(
     opts?: import('./adapters/postgres/migrate-files').MigrateFilesOptions,
   ) {
     const a = adapter as unknown as { driver?: unknown; db?: unknown };
+    // The migration runners read files with node:fs / node:crypto. Loaded
+    // through a path in a variable so a browser bundler (forge also runs in
+    // browsers, via IndexedDB / wasm) cannot follow it: compiled to
+    // CommonJS, a literal `await import('./x')` is a plain require() that
+    // esbuild and Rollup chase into node built-ins and fail on.
     switch (adapter.kind) {
       case 'postgres': {
-        const { applyMigrationFiles } = await import('./adapters/postgres/migrate-files');
+        const { applyMigrationFiles } = await loadNodeOnly<typeof import('./adapters/postgres/migrate-files')>('./adapters/postgres/migrate-files');
         return applyMigrationFiles(a.driver as import('./adapters/postgres/driver').PostgresDriver, opts);
       }
       case 'mysql': {
-        const { applyMysqlMigrationFiles } = await import('./adapters/mysql/migrate-files');
+        const { applyMysqlMigrationFiles } = await loadNodeOnly<typeof import('./adapters/mysql/migrate-files')>('./adapters/mysql/migrate-files');
         return applyMysqlMigrationFiles(a.driver as import('./adapters/mysql/driver').MysqlDriver, opts);
       }
       case 'sqlite': {
-        const { applySqliteMigrationFiles } = await import('./adapters/sqlite/migrate-files');
+        const { applySqliteMigrationFiles } = await loadNodeOnly<typeof import('./adapters/sqlite/migrate-files')>('./adapters/sqlite/migrate-files');
         return applySqliteMigrationFiles(a.db as import('./adapters/sqlite/driver').SqliteDriver, opts);
       }
       case 'mssql': {
-        const { applyMssqlMigrationFiles } = await import('./adapters/mssql/migrate-files');
+        const { applyMssqlMigrationFiles } = await loadNodeOnly<typeof import('./adapters/mssql/migrate-files')>('./adapters/mssql/migrate-files');
         return applyMssqlMigrationFiles(a.driver as import('./adapters/mssql/driver').MssqlDriver, opts);
       }
       case 'duckdb': {
-        const { applyDuckdbMigrationFiles } = await import('./adapters/duckdb/migrate-files');
+        const { applyDuckdbMigrationFiles } = await loadNodeOnly<typeof import('./adapters/duckdb/migrate-files')>('./adapters/duckdb/migrate-files');
         return applyDuckdbMigrationFiles(a.driver as import('./adapters/duckdb/driver').DuckdbDriver, opts);
       }
       default:

@@ -4,6 +4,25 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.29.2 — forge bundles for the browser again
+
+An app that bundles forge for the browser (it runs there through the
+IndexedDB and wasm adapters) failed to build on 2.24 – 2.29.1: `Could not
+resolve "node:crypto"`, `"node:fs"`, `"path"` and `"postgres"`.
+
+The `.sql` migration runners behind `$migrateFiles()` (2.24) read files with
+`node:fs` / `node:crypto`. They were loaded lazily, but compiled to CommonJS
+a literal `await import('./x')` is a plain `require()`, which esbuild and
+Rollup follow even though a browser never calls it. They are now loaded
+through a specifier held in a variable, which bundlers leave alone and Node
+resolves as before. The Postgres adapter's postgres.js fallback `require`
+moved inside a `try`, the convention the optional drivers already use.
+
+`regression-browser-bundle.ts` (in `forge:check`) bundles `dist/index.js`
+for the browser with every database driver external and fails on anything
+a browser cannot resolve; it reports 5 such imports on 2.29.1 and none now.
+`$migrateFiles()` re-tested on Postgres, MySQL, SQLite and DuckDB.
+
 ## 2.29.1 — `mode: 'insensitive'` means the same thing on every database, and a searched `_` or `%` is found on SQLite, DuckDB and SQL Server
 
 Found by a real application: a till's search for a customer called "Ada"
