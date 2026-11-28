@@ -119,8 +119,17 @@ function compileLeaf(ctx: CompileCtx, leaf: Extract<WhereTree, { kind: 'leaf' }>
   }
 
   switch (leaf.op) {
-    case 'eq':       return leaf.value === null ? `${col} IS NULL`      : `${col} = ${ph(leaf.value)}`;
-    case 'ne':       return leaf.value === null ? `${col} IS NOT NULL`  : `${col} <> ${ph(leaf.value)}`;
+    case 'eq':
+      if (leaf.value === null) return `${col} IS NULL`;
+      // `mode: 'insensitive'` on equals (it used to be ignored). `=` on both
+      // sides lowered, not a wildcard-free LIKE: an index on LOWER(col)
+      // serves it, and it is what a hand-written query says.
+      if (leaf.caseInsensitive && typeof leaf.value === 'string') return `LOWER(${col}) = LOWER(${ph(leaf.value)})`;
+      return `${col} = ${ph(leaf.value)}`;
+    case 'ne':
+      if (leaf.value === null) return `${col} IS NOT NULL`;
+      if (leaf.caseInsensitive && typeof leaf.value === 'string') return `LOWER(${col}) <> LOWER(${ph(leaf.value)})`;
+      return `${col} <> ${ph(leaf.value)}`;
     /*
      * A `null` INSIDE THE LIST IS A MEMBER, NOT A COMPARISON.
      *
@@ -150,6 +159,9 @@ function compileLeaf(ctx: CompileCtx, leaf: Extract<WhereTree, { kind: 'leaf' }>
      */
     case 'in': {
       const arr = leaf.value as unknown[];
+      if (leaf.caseInsensitive && arr.length && arr.every((v) => typeof v === 'string')) {
+        return `LOWER(${col}) IN (${arr.map((v) => `LOWER(${ph(v)})`).join(', ')})`;
+      }
       // `in: []` matches nothing. Emitting `IN ()` would be a syntax error and
       // a bare `FALSE` is not valid T-SQL, so the literal comes from the dialect.
       if (!arr.length) return ctx.d.falseLiteral;
@@ -219,8 +231,14 @@ function compileLeaf(ctx: CompileCtx, leaf: Extract<WhereTree, { kind: 'leaf' }>
       // the same operator vocabulary as scalar leaves.
       const ph = (v: unknown) => ctx.d.placeholder(ctx.params, v);
       switch (subOp) {
-        case 'eq':  return leaf.value === null ? `${rendered} IS NULL` : `${rendered} = ${ph(coerceJsonOperand(leaf.value))}`;
-        case 'ne':  return leaf.value === null ? `${rendered} IS NOT NULL` : `${rendered} <> ${ph(coerceJsonOperand(leaf.value))}`;
+        case 'eq':
+          if (leaf.value === null) return `${rendered} IS NULL`;
+          if (leaf.caseInsensitive && typeof leaf.value === 'string') return `LOWER(${rendered}) = LOWER(${ph(leaf.value)})`;
+          return `${rendered} = ${ph(coerceJsonOperand(leaf.value))}`;
+        case 'ne':
+          if (leaf.value === null) return `${rendered} IS NOT NULL`;
+          if (leaf.caseInsensitive && typeof leaf.value === 'string') return `LOWER(${rendered}) <> LOWER(${ph(leaf.value)})`;
+          return `${rendered} <> ${ph(coerceJsonOperand(leaf.value))}`;
         case 'lt':  return `${rendered} < ${ph(coerceJsonOperand(leaf.value))}`;
         case 'lte': return `${rendered} <= ${ph(coerceJsonOperand(leaf.value))}`;
         case 'gt':  return `${rendered} > ${ph(coerceJsonOperand(leaf.value))}`;
@@ -235,6 +253,11 @@ function compileLeaf(ctx: CompileCtx, leaf: Extract<WhereTree, { kind: 'leaf' }>
         }
         case 'in': {
           const arr = leaf.value as unknown[];
+          if (leaf.caseInsensitive && arr.length && arr.every((v) => typeof v === 'string')) {
+            // One mention of `rendered`: on positional-parameter dialects its
+            // bound path would otherwise need re-binding for every value.
+            return `LOWER(${rendered}) IN (${arr.map((v) => `LOWER(${ph(v)})`).join(', ')})`;
+          }
           if (!arr.length) return ctx.d.falseLiteral;
           return `${rendered} IN (${arr.map((v) => ph(coerceJsonOperand(v))).join(', ')})`;
         }
@@ -369,7 +392,11 @@ function haversineBboxPrefilter(
 function likeOp(ctx: CompileCtx, col: string, pattern: string, ci: boolean, field?: string): string {
   const ph = ctx.d.placeholder(ctx.params, pattern);
   // ILIKE is Postgres-only; every other dialect gets its own form.
-  return ci ? ctx.d.caseInsensitiveLike(col, ph, field != null && hasInvertedIndex(ctx.model, field)) : `${col} LIKE ${ph}`;
+  const sql = ci ? ctx.d.caseInsensitiveLike(col, ph, field != null && hasInvertedIndex(ctx.model, field)) : `${col} LIKE ${ph}`;
+  // escapeForLike() uses a backslash. Postgres and MySQL take that as the
+  // default escape; SQLite, DuckDB and SQL Server have none, so there a
+  // searched `_` or `%` was compared as `\_` and matched nothing.
+  return ctx.d.likeEscapeClause ? `${sql}${ctx.d.likeEscapeClause}` : sql;
 }
 
 // A GIN / GiST index on the column (a pg_trgm index, typically) serves ILIKE

@@ -79,14 +79,14 @@ function compileLeaf(leaf: WhereLeaf): RowPredicate {
       return (r) => {
         const at = nestedGet(r);
         switch (subOp) {
-          case 'eq':  return eqValue(at, value);
-          case 'ne':  return !eqValue(at, value);
+          case 'eq':  return eqValue(at, value, caseInsensitive);
+          case 'ne':  return !eqValue(at, value, caseInsensitive);
           case 'lt':  return cmp(at, value) <  0;
           case 'lte': return cmp(at, value) <= 0;
           case 'gt':  return cmp(at, value) >  0;
           case 'gte': return cmp(at, value) >= 0;
-          case 'contains': return typeof at === 'string' && typeof value === 'string' && at.includes(value);
-          case 'in':  return Array.isArray(value) && value.some((v) => eqValue(at, v));
+          case 'contains': return stringOp(at, value, caseInsensitive, (a, b) => a.includes(b));
+          case 'in':  return Array.isArray(value) && value.some((v) => eqValue(at, v, caseInsensitive));
           case 'has': return Array.isArray(at) && (at as unknown[]).some((x) => eqValue(x, value));
           default: return false;
         }

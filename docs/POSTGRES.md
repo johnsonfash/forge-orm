@@ -407,7 +407,10 @@ full operator reference.
 ## Case-insensitive filters
 
 `mode: 'insensitive'` on `contains` / `startsWith` / `endsWith` compiles to
-`lower(col) LIKE lower($1)`. In a UTF8 database that is exactly what
+`lower(col) LIKE lower($1)`. Since 2.29.1 `equals` / `not` / `in` honour the flag
+too, as `lower(col) = lower($1)` / `<>` / `IN (lower($1), …)`, on a column
+or a json path. An expression index on `lower(col)` serves those three (not
+the LIKE forms): `{ expression: 'lower(email)' }`, see [INDEXES](./INDEXES.md). In a UTF8 database that is exactly what
 Postgres's own `ILIKE` does (it lowers both sides, then matches), but `ILIKE`
 lowers the pattern again for every row; written out, the pattern is lowered
 once when the statement is planned. On the bench's 1 000-row `users` scan

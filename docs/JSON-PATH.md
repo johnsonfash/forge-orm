@@ -54,6 +54,21 @@ array elements correctly).
 
 ---
 
+## Ignoring case inside a path
+
+`mode: 'insensitive'` works on path `contains`, `equals`, `not` and `in`, in
+both the `path:` and the dotted form, on every dialect (Mongo and IndexedDB
+since 2.29.1):
+
+```ts
+db.sale.findMany({ where: { customer: { path: ['name'], contains: 'ada', mode: 'insensitive' } } });
+db.post.findMany({ where: { 'meta.city': { in: ['LAGOS', 'ACCRA'], mode: 'insensitive' } } });
+```
+
+SQL dialects lower both sides (`LOWER(expr) LIKE LOWER(?)`, `LOWER(expr) IN
+(LOWER(?), …)`); Mongo uses an `i` regex, anchored for `equals` / `not` /
+`in`. See [QUERIES](./QUERIES.md#mode-insensitive).
+
 ## The path is a bound parameter, not SQL text
 
 On every dialect that reads a path as a string — MySQL, SQLite, DuckDB

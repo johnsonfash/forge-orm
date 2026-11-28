@@ -130,6 +130,8 @@ export async function knexEngine(ctx: DialectCtx): Promise<EngineImpl | { na: st
     distinct: () => k("posts").distinct("author_id").where("views", "<", P.distinctMaxViews).orderBy("author_id"),
     json_prefs: () => k("users").select("id").whereRaw(`${F.jsonStr("prefs", "theme")} = ?`, [P.jsonTheme])
       .whereRaw(`${F.jsonNum("prefs", "score")} >= ?`, [P.jsonMinScore]).orderBy("id").limit(100),
+    ci_equals: (i) => k("users").select("id").whereRaw(`LOWER(email) = LOWER(?)`, [P.ciEmail(i)]).orderBy("id").limit(1),
+    json_ci: () => k("users").select("id").whereRaw(`LOWER(${F.jsonStr("prefs", "theme")}) = LOWER(?)`, [P.jsonThemeCi]).orderBy("id").limit(100),
     json_meta: async () => (await k("posts").count({ n: "*" }).whereRaw(`${F.jsonStr("meta", "lang")} = ?`, [P.metaLang])
       .whereRaw(`${F.jsonNum("meta", "score")} >= ?`, [P.metaMinScore]).first()).n,
     fts: () => k("posts").select("id").whereRaw(F.fts("body"), [P.ftsTerm]).orderBy("id").limit(50),

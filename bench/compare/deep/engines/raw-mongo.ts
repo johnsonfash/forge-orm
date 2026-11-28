@@ -89,6 +89,8 @@ export async function rawMongoEngine(ctx: DialectCtx): Promise<EngineImpl> {
     ]).toArray()).map((r: any) => ({ author_id: r._id, _count: { _all: r.n }, _sum: { views: r.s } })),
     distinct: async () => (await posts.distinct("author_id", { views: { $lt: P.distinctMaxViews } })).sort(),
     json_prefs: () => users.find({ "prefs.theme": P.jsonTheme, "prefs.score": { $gte: P.jsonMinScore } }, { projection: { _id: 1 } }).sort({ _id: 1 }).limit(100).toArray(),
+    ci_equals: (i) => users.find({ email: { $regex: "^" + P.ciEmail(i).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$", $options: "i" } }, { projection: { _id: 1 } }).sort({ _id: 1 }).limit(1).toArray(),
+    json_ci: () => users.find({ "prefs.theme": { $regex: "^" + P.jsonThemeCi + "$", $options: "i" } }, { projection: { _id: 1 } }).sort({ _id: 1 }).limit(100).toArray(),
     json_meta: () => posts.countDocuments({ "meta.lang": P.metaLang, "meta.score": { $gte: P.metaMinScore } }),
     fts: () => posts.find({ $text: { $search: P.ftsTerm } }, { projection: { _id: 1 } }).sort({ _id: 1 }).limit(50).toArray(),
     geo_near: () => places.aggregate([

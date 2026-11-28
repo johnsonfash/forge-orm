@@ -212,9 +212,22 @@ function compileLeaf(
   const coerce = (v: any) => (def ? coerceFieldValue(def, v) : v);
   const out: Record<string, any> = {};
   switch (leaf.op) {
-    case 'eq':       out[dbKey] = coerce(leaf.value); return out;
-    case 'ne':       out[dbKey] = { $ne: coerce(leaf.value) }; return out;
-    case 'in':       out[dbKey] = { $in: (leaf.value as any[]).map(coerce) }; return out;
+    case 'eq':
+      // `mode: 'insensitive'` on equals was ignored on Mongo.
+      out[dbKey] = leaf.caseInsensitive && typeof leaf.value === 'string'
+        ? { $regex: '^' + escapeRegex(leaf.value) + '$', $options: 'i' }
+        : coerce(leaf.value);
+      return out;
+    case 'ne':
+      out[dbKey] = leaf.caseInsensitive && typeof leaf.value === 'string'
+        ? { $not: { $regex: '^' + escapeRegex(leaf.value) + '$', $options: 'i' } }
+        : { $ne: coerce(leaf.value) };
+      return out;
+    case 'in':
+      out[dbKey] = leaf.caseInsensitive && (leaf.value as any[]).every((v) => typeof v === 'string')
+        ? { $in: (leaf.value as string[]).map((v) => new RegExp('^' + escapeRegex(v) + '$', 'i')) }
+        : { $in: (leaf.value as any[]).map(coerce) };
+      return out;
     case 'nin':      out[dbKey] = { $nin: (leaf.value as any[]).map(coerce) }; return out;
     case 'lt':       out[dbKey] = { $lt: coerce(leaf.value) }; return out;
     case 'lte':      out[dbKey] = { $lte: coerce(leaf.value) }; return out;
@@ -252,14 +265,21 @@ function compileLeaf(
       const dotted = [dbKey, ...leaf.jsonPath.path].join('.');
       const op = leaf.jsonPath.subOp;
       const v = leaf.value;
-      if (op === 'eq') out[dotted] = v;
-      else if (op === 'ne')  out[dotted] = { $ne:  v };
+      // `mode: 'insensitive'` reaches a path too: a nested
+      // `{ customer: { name: { contains: 'ada', mode: 'insensitive' } } }`
+      // used to match only exact case on Mongo while every SQL dialect
+      // already ignored case.
+      const ci = !!leaf.caseInsensitive && typeof v === 'string';
+      if (op === 'eq') out[dotted] = ci ? { $regex: '^' + escapeRegex(String(v)) + '$', $options: 'i' } : v;
+      else if (op === 'ne')  out[dotted] = ci ? { $not: { $regex: '^' + escapeRegex(String(v)) + '$', $options: 'i' } } : { $ne:  v };
       else if (op === 'lt')  out[dotted] = { $lt:  v };
       else if (op === 'lte') out[dotted] = { $lte: v };
       else if (op === 'gt')  out[dotted] = { $gt:  v };
       else if (op === 'gte') out[dotted] = { $gte: v };
-      else if (op === 'in')  out[dotted] = { $in: v as unknown[] };
-      else if (op === 'contains') out[dotted] = { $regex: escapeRegex(String(v)) };
+      else if (op === 'in')  out[dotted] = leaf.caseInsensitive && (v as unknown[]).every((x) => typeof x === 'string')
+        ? { $in: (v as string[]).map((x) => new RegExp('^' + escapeRegex(x) + '$', 'i')) }
+        : { $in: v as unknown[] };
+      else if (op === 'contains') out[dotted] = ci ? { $regex: escapeRegex(String(v)), $options: 'i' } : { $regex: escapeRegex(String(v)) };
       else if (op === 'has') out[dotted] = v;   // array element equality
       return out;
     }

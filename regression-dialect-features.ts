@@ -170,6 +170,30 @@ async function main() {
 
     console.log('\nJSON path — bound, not spliced (the 2.18.0 injection fix)');
     await db.post.create({ data: { id: 'p_j1', author_id: 'a1', title: 'j', meta: { city: 'Lagos' } } });
+
+    console.log("\nmode: 'insensitive' on equals and inside a path — 2.29.1");
+    await t('equals ignores case', async () =>
+      eq(ids(await db.author.findMany({ where: { email: { equals: 'ann@example.COM', mode: 'insensitive' } } })), ['a1'], 'ci equals'));
+    await t('a path contains ignores case (path: form)', async () =>
+      eq(ids(await db.post.findMany({ where: { meta: { path: 'city', contains: 'LAG', mode: 'insensitive' } } })), ['p_j1'], 'ci path contains'));
+    await t('a path contains ignores case (dotted form)', async () =>
+      eq(ids(await db.post.findMany({ where: { 'meta.city': { contains: 'gOs', mode: 'insensitive' } } as any })), ['p_j1'], 'ci dotted contains'));
+    await t('a path equals ignores case (both forms)', async () => {
+      eq(ids(await db.post.findMany({ where: { meta: { path: 'city', equals: 'lagos', mode: 'insensitive' } } })), ['p_j1'], 'ci path equals');
+      eq(ids(await db.post.findMany({ where: { 'meta.city': { equals: 'LAGOS', mode: 'insensitive' } } as any })), ['p_j1'], 'ci dotted equals');
+    });
+    await t('a path not-equals ignores case', async () =>
+      eq(ids(await db.post.findMany({ where: { id: 'p_j1', meta: { path: 'city', not: 'LAGOS', mode: 'insensitive' } } })), [], 'ci path ne'));
+    await t('without mode a path equals is still exact', async () =>
+      eq(ids(await db.post.findMany({ where: { meta: { path: 'city', equals: 'lagos' } } })), [], 'cs path equals'));
+    await t('in ignores case (plain field and path)', async () => {
+      eq(ids(await db.author.findMany({ where: { email: { in: ['ANN@EXAMPLE.COM'], mode: 'insensitive' } } })), ['a1'], 'ci in');
+      eq(ids(await db.post.findMany({ where: { meta: { path: 'city', in: ['LAGOS', 'ACCRA'], mode: 'insensitive' } } })), ['p_j1'], 'ci path in');
+    });
+    await t('a % in a contains is literal', async () =>
+      eq((await db.author.findMany({ where: { email: { contains: '%', mode: 'insensitive' } } })).length, 0, '% literal'));
+    await t('a % or _ in the value is literal, not a wildcard', async () =>
+      eq(ids(await db.author.findMany({ where: { email: { equals: 'ann@example.co_', mode: 'insensitive' } } })), [], 'escaped _'));
     await t('a path filter matches', async () =>
       eq(ids(await db.post.findMany({ where: { meta: { path: 'city', eq: 'Lagos' } } })), ['p_j1'], 'json path'));
     await t('a quote-carrying path segment cannot break out', async () => {

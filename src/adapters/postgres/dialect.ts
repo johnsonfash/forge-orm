@@ -30,6 +30,9 @@ export interface Dialect {
    * and MSSQL.
    */
   caseInsensitiveLike(quotedColumn: string, patternExpr: string, invertedIndex?: boolean): string;
+  /** Appended to every LIKE. Set where the engine has no default escape
+   *  character, so the backslash escapeForLike() writes is honoured. */
+  likeEscapeClause?: string;
   /**
    * Read-side filters on a list column (`has` / `hasSome` / `hasEvery` /
    * `isEmpty`).

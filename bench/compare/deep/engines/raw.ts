@@ -161,6 +161,8 @@ export async function rawEngine(ctx: DialectCtx): Promise<EngineImpl> {
       ["DRAFT", P.groupMinCount])).map((r: any) => ({ author_id: r.author_id, _count: { _all: r.n }, _sum: { views: r.s } })),
     distinct: () => c.all(`SELECT DISTINCT author_id FROM posts WHERE views < ? ORDER BY author_id`, [P.distinctMaxViews]),
     json_prefs: () => c.all(`SELECT id FROM users WHERE ${F.jsonStr("prefs", "theme")} = ? AND ${F.jsonNum("prefs", "score")} >= ? ORDER BY id ${F.page(100)}`, [P.jsonTheme, P.jsonMinScore]),
+    ci_equals: (i) => c.all(`SELECT id FROM users WHERE LOWER(email) = LOWER(?) ORDER BY id ${F.page(1)}`, [P.ciEmail(i)]),
+    json_ci: () => c.all(`SELECT id FROM users WHERE LOWER(${F.jsonStr("prefs", "theme")}) = LOWER(?) ORDER BY id ${F.page(100)}`, [P.jsonThemeCi]),
     json_meta: async () => (await c.all(`SELECT COUNT(*) AS n FROM posts WHERE ${F.jsonStr("meta", "lang")} = ? AND ${F.jsonNum("meta", "score")} >= ?`, [P.metaLang, P.metaMinScore]))[0].n,
     fts: () => c.all(`SELECT id FROM posts WHERE ${F.fts("body")} ORDER BY id ${F.page(50)}`, [P.ftsTerm]),
     geo_near: geo,

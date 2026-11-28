@@ -29,6 +29,8 @@ export const SqliteDialect: Dialect = {
 
   // SQLite's LIKE is already case-insensitive for ASCII, but not beyond it,
   // and that is configurable per build. LOWER() on both sides is explicit.
+  likeEscapeClause: " ESCAPE '\\'",
+
   caseInsensitiveLike(quotedColumn, patternExpr) {
     return `LOWER(${quotedColumn}) LIKE LOWER(${patternExpr})`;
   },

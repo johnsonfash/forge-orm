@@ -31,6 +31,8 @@ export const DuckdbDialect: Dialect = {
   trueLiteral: 'TRUE',
   falseLiteral: 'FALSE',
 
+  likeEscapeClause: " ESCAPE '\\'",
+
   caseInsensitiveLike(quotedColumn, patternExpr) {
     return `${quotedColumn} ILIKE ${patternExpr}`;
   },

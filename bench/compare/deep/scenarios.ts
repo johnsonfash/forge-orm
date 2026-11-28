@@ -51,6 +51,9 @@ export function params(s: S.SeedSizes) {
     distinctMaxViews: 100,
     groupMinCount: 7,
     jsonTheme: "dark",
+    // Case-insensitive lookups (2.29.1): the stored values are lower-case.
+    ciEmail: (i: number) => S.emailFor(((i * 53) % U) + 1).toUpperCase(),
+    jsonThemeCi: "DARK",
     jsonMinScore: 20,
     metaLang: "fr",
     metaMinScore: 90,
@@ -132,6 +135,8 @@ export const SCENARIOS: Scenario[] = [
     canon: (rows: any[]) => rows.map((r) => ({ author_id: C.s(r.author_id), count: C.n(r._count?._all), sum: C.n(r._sum?.views) })) },
   { name: "distinct", kind: "read", desc: "DISTINCT author_id of posts with views < 100, ORDER BY author_id", canon: (rows: any[]) => rows.map((r) => C.s(r.author_id ?? r)) },
   { name: "json_prefs", kind: "read", needs: ["json"], desc: "users WHERE prefs.theme = 'dark' AND prefs.score >= 20, ORDER BY id LIMIT 100", canon: ids },
+  { name: "ci_equals", kind: "read", desc: "user id by email ignoring case (input upper-cased)", canon: ids },
+  { name: "json_ci", kind: "read", needs: ["json"], desc: "users WHERE prefs.theme equals 'DARK' ignoring case, ORDER BY id LIMIT 100", canon: ids },
   { name: "json_meta", kind: "read", needs: ["json"], desc: "count posts WHERE meta.lang = 'fr' AND meta.score >= 90", canon: C.n },
   { name: "fts", kind: "read", needs: ["fts"], desc: "posts whose body matches the word 'kilo', ORDER BY id LIMIT 50", canon: ids },
   { name: "geo_near", kind: "read", needs: ["geo"], desc: "places within 5 km of a point, nearest first, LIMIT 20", canon: ids },

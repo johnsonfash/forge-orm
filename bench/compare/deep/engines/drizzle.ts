@@ -113,6 +113,8 @@ export async function drizzleEngine(ctx: DialectCtx): Promise<EngineImpl | { na:
     json_prefs: () => db.select({ id: users.id }).from(users)
       .where(and(frg(`${F.jsonStr("prefs", "theme")} = ?`, P.jsonTheme), frg(`${F.jsonNum("prefs", "score")} >= ?`, P.jsonMinScore)))
       .orderBy(asc(users.id)).limit(100),
+    ci_equals: (i) => db.select({ id: users.id }).from(users).where(frg(`LOWER(email) = LOWER(?)`, P.ciEmail(i))).orderBy(asc(users.id)).limit(1),
+    json_ci: () => db.select({ id: users.id }).from(users).where(frg(`LOWER(${F.jsonStr("prefs", "theme")}) = LOWER(?)`, P.jsonThemeCi)).orderBy(asc(users.id)).limit(100),
     json_meta: () => db.$count(posts, and(frg(`${F.jsonStr("meta", "lang")} = ?`, P.metaLang), frg(`${F.jsonNum("meta", "score")} >= ?`, P.metaMinScore))),
     fts: () => db.select({ id: posts.id }).from(posts).where(frg(F.fts("body"), P.ftsTerm)).orderBy(asc(posts.id)).limit(50),
     large_findmany: (_i, n) => db.select().from(posts).orderBy(asc(posts.id)).limit(n),

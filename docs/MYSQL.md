@@ -308,16 +308,15 @@ out of the box, and fails on 5.7 / MariaDB unless you call
 
 ### The `mode: 'insensitive'` flag
 
-forge's text-operator flag (see
-[QUERIES](./QUERIES.md#mode-insensitive)) is a no-op on MySQL,
-deliberately. The reasoning:
+forge's flag (see [QUERIES](./QUERIES.md#mode-insensitive)) compiles to
+`LOWER(col) LIKE LOWER(?)` on MySQL, for `contains` / `startsWith` /
+`endsWith` / `equals` / `not` / `in`, on a column or a json path. (Earlier
+versions of this page said the flag was dropped on MySQL; that stopped being
+true in 2.18.)
 
-* On `_0900_ai_ci` (the 8.x default) every `LIKE` is already
-  case-insensitive; flipping a flag would be redundant.
-* On `_bin` or `_cs` collations the only honest translation is
-  `LOWER(col) LIKE LOWER(?)`, which defeats any index on the column.
-* The adapter picks the conservative path: the flag is dropped and
-  the query runs with whatever the column's collation says.
+* On `_0900_ai_ci` (the 8.x default) a plain `LIKE` already ignores case,
+  so the flag changes the result only on `_bin` / `_cs` collations.
+* `LOWER(col)` cannot use an ordinary index on the column.
 
 If you need predictable case-insensitive search regardless of
 collation, store a `name_lc` generated column and filter on that:

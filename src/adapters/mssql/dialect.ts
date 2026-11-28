@@ -29,6 +29,8 @@ export const MssqlDialect: Dialect = {
   trueLiteral: '1=1',
   falseLiteral: '1=0',
 
+  likeEscapeClause: " ESCAPE '\\'",
+
   caseInsensitiveLike(quotedColumn, patternExpr) {
     return `LOWER(${quotedColumn}) LIKE LOWER(${patternExpr})`;
   },

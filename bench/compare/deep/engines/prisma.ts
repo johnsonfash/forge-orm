@@ -45,6 +45,8 @@ export async function prismaEngine(ctx: DialectCtx): Promise<EngineImpl | { na: 
     geo_near: "Prisma has no geo filters; users drop to $queryRaw",
     stream: "Prisma has no streaming read; findMany materialises the result",
   };
+  na.json_ci = "Prisma has no case-insensitive JSON path filter";
+  if (d !== "postgres") na.ci_equals = "Prisma supports mode: 'insensitive' only on Postgres and Mongo";
   if (d === "sqlite") {
     na.fts = "Prisma has no full-text filter on SQLite";
     na.json_prefs = na.json_meta = "Prisma has no JSON path filter on SQLite";
@@ -89,6 +91,7 @@ export async function prismaEngine(ctx: DialectCtx): Promise<EngineImpl | { na: 
       orderBy: [{ _sum: { views: "desc" } }, { author_id: "asc" }], take: 20,
     }),
     distinct: () => db.post.findMany({ where: { views: { lt: P.distinctMaxViews } }, distinct: ["author_id"], select: { author_id: true }, orderBy: { author_id: "asc" } }),
+    ci_equals: (i) => db.user.findMany({ where: { email: { equals: P.ciEmail(i), mode: "insensitive" } }, select: { id: true }, orderBy: { id: "asc" }, take: 1 }),
     json_prefs: () => db.user.findMany({
       where: { AND: [{ prefs: { path: jp("theme"), equals: P.jsonTheme } }, { prefs: { path: jp("score"), gte: P.jsonMinScore } }] },
       select: { id: true }, orderBy: { id: "asc" }, take: 100,

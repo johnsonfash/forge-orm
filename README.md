@@ -1432,7 +1432,7 @@ All operators, with the field kinds they apply to.
 | `contains`      | strings                                 | substring match (`LIKE %x%`)                                            |
 | `startsWith`    | strings                                 | prefix match (`LIKE x%`)                                                |
 | `endsWith`      | strings                                 | suffix match (`LIKE %x`)                                                |
-| `mode: 'insensitive'` | strings                           | case-insensitive variant of the text operators. Works on every dialect since 2.18 — before that the shared compiler emitted Postgres's `ILIKE` everywhere, so it was a syntax error on MySQL, SQLite and MSSQL |
+| `mode: 'insensitive'` | strings                           | ignore case on `contains` / `startsWith` / `endsWith` / `equals` / `not` / `in`, on a plain field or inside a json path, on every dialect (equals / not / in and the Mongo path forms since 2.29.1; the text operators since 2.18, when the shared compiler stopped emitting Postgres's `ILIKE` everywhere) |
 | `has`           | `stringArray` / `intArray` / `embedMany` | the list contains the given value. `has` / `hasEvery` / `hasSome` / `isEmpty` work on every dialect since 2.18 — before that they emitted Postgres array operators, so a list column was writable and readable but not *filterable* on MySQL, SQLite or MSSQL |
 | `hasEvery`      | array fields                             | the list contains all of the given values                               |
 | `hasSome`       | array fields                             | the list contains at least one of the given values                      |

@@ -71,6 +71,8 @@ export async function forgeEngine(ctx: DialectCtx, db: any = ctx.forge): Promise
       where: { AND: [{ prefs: { path: "theme", eq: P.jsonTheme } }, { prefs: { path: "score", gte: P.jsonMinScore } }] },
       select: { id: true }, orderBy: { id: "asc" }, take: 100,
     }),
+    ci_equals: (i) => db.user.findMany({ where: { email: { equals: P.ciEmail(i), mode: "insensitive" } }, select: { id: true }, orderBy: { id: "asc" }, take: 1 }),
+    json_ci: () => db.user.findMany({ where: { prefs: { path: "theme", equals: P.jsonThemeCi, mode: "insensitive" } }, select: { id: true }, orderBy: { id: "asc" }, take: 100 }),
     json_meta: () => db.post.count({ where: { AND: [{ meta: { path: "lang", eq: P.metaLang } }, { meta: { path: "score", gte: P.metaMinScore } }] } }),
     fts: () => db.post.findMany({ where: { body: { search: P.ftsTerm } }, select: { id: true }, orderBy: { id: "asc" }, take: 50 }),
     geo_near: () => db.place.findMany({

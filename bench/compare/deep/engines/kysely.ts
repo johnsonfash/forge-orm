@@ -152,6 +152,8 @@ export async function kyselyEngine(ctx: DialectCtx): Promise<EngineImpl | { na: 
     distinct: () => db.selectFrom("posts").select("author_id").distinct().where("views", "<", P.distinctMaxViews).orderBy("author_id").execute(),
     json_prefs: () => lim(db.selectFrom("users").select("id")
       .where(frg(`${F.jsonStr("prefs", "theme")} = ?`, P.jsonTheme)).where(frg(`${F.jsonNum("prefs", "score")} >= ?`, P.jsonMinScore)).orderBy("id"), 100).execute(),
+    ci_equals: (i) => lim(db.selectFrom("users").select("id").where(frg(`LOWER(email) = LOWER(?)`, P.ciEmail(i))).orderBy("id"), 1).execute(),
+    json_ci: () => lim(db.selectFrom("users").select("id").where(frg(`LOWER(${F.jsonStr("prefs", "theme")}) = LOWER(?)`, P.jsonThemeCi)).orderBy("id"), 100).execute(),
     json_meta: async () => (await db.selectFrom("posts").select((eb: any) => eb.fn.countAll().as("n"))
       .where(frg(`${F.jsonStr("meta", "lang")} = ?`, P.metaLang)).where(frg(`${F.jsonNum("meta", "score")} >= ?`, P.metaMinScore)).executeTakeFirstOrThrow()).n,
     fts: () => lim(db.selectFrom("posts").select("id").where(frg(F.fts("body"), P.ftsTerm)).orderBy("id"), 50).execute(),

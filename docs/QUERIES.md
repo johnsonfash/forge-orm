@@ -219,14 +219,27 @@ a user input of `50%_off` matches literal `50%_off` rather than
 
 ### `mode: 'insensitive'`
 
-Set on a text operator: `{ name: { contains: 'ali', mode: 'insensitive' } }`.
+Set next to an operator: `{ name: { contains: 'ali', mode: 'insensitive' } }`.
+It applies to `contains`, `startsWith`, `endsWith`, `equals`, `not` and `in`,
+on a plain field and inside a json path (`{ meta: { path: 'city', equals:
+'lagos', mode: 'insensitive' } }`, or the dotted `'meta.city'` form).
 
-| Dialect | Behaviour |
+| Dialect | Emits |
 |---|---|
-| Postgres | Real — emits `ILIKE`. |
-| MySQL | The default collation on most installations is `utf8mb4_0900_ai_ci`, which is already case-insensitive — the flag has no effect because the comparison is already insensitive. On a `_bin` or `_cs` collation the flag is **not** translated; reach for `LOWER()` via `$queryRaw`. |
-| SQLite | Not honoured. `LIKE` is case-insensitive for ASCII by default in SQLite and case-sensitive otherwise; the flag does not switch to `COLLATE NOCASE`. |
-| Mongo | Adds `$options: 'i'` on the regex. |
+| Postgres | text operators: `lower(col) LIKE lower($1)` (`ILIKE` when the column has a GIN/GiST trigram index in the schema). `equals` / `not` / `in`: `LOWER(col) = LOWER($1)` / `<>` / `IN (LOWER($1), …)`, which an index on `lower(col)` serves. |
+| MySQL, SQLite, SQL Server | text operators: `LOWER(col) LIKE LOWER(?)` (SQLite and SQL Server add `ESCAPE '\'`); `equals` / `not` / `in` as Postgres. |
+| DuckDB | text operators: `col ILIKE ? ESCAPE '\'`; `equals` / `not` / `in` as Postgres. |
+| Mongo | `$regex` with `$options: 'i'`; `equals` / `not` / `in` anchor it (`^…$`). |
+| IndexedDB | compares lower-cased strings in the predicate. |
+
+`equals` / `not` / `in` with the flag became honoured in 2.29.1 (they used to
+compare exactly), as did every path operator on Mongo. `%` and `_` in the
+value are always literal.
+
+Without the flag each engine keeps its own rule: Postgres and Mongo are
+case-sensitive, SQLite's `LIKE` ignores ASCII case, and MySQL follows the
+column collation (`_ci` ignores case). Non-ASCII letters (`É` vs `é`)
+depend on the engine's lower-casing — SQLite without ICU does not fold them.
 
 If you need portable case-insensitive text matching across all six
 dialects, store a normalised lower-case column alongside the original
@@ -1105,16 +1118,14 @@ time when `email_domain` is not unique. The caller usually meant
    the domain model actually requires uniqueness, not as a way to
    silence the error.
 
-### `mode: 'insensitive'` not portable
+### `mode: 'insensitive'` and non-ASCII text
 
-Only Postgres compiles `mode: 'insensitive'` to a real case-folded
-operator (`ILIKE`). MySQL's default collation makes the comparison
-already case-insensitive, so the flag has no visible effect — but a
-`_bin` or `_cs` collation will silently keep matching case-sensitively.
-SQLite does not honour the flag at all; LIKE is case-insensitive
-only for ASCII and only by accident. If the matching has to work on
-every dialect (especially for non-ASCII text), store a normalised
-lower-case shadow column and filter on that.
+The flag is honoured on every dialect (see [above](#mode-insensitive)), by
+lower-casing both sides. What "lower-case" means is the engine's own rule
+for non-ASCII letters — SQLite without ICU folds only ASCII, so `Élise` vs
+`élise` does not match there. For
+accent-insensitive search, or a guaranteed index, store a normalised shadow
+column and filter on that.
 
 ### `between` semantics
 

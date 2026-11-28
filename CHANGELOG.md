@@ -4,6 +4,44 @@ All notable changes to **forge** (`forge-orm`). Forge is a Prisma-shape
 multi-database wrapper for MongoDB, PostgreSQL, MySQL, SQLite, DuckDB and
 SQL Server — one code path, no codegen, no external query engine.
 
+## 2.29.1 — `mode: 'insensitive'` means the same thing on every database, and a searched `_` or `%` is found on SQLite, DuckDB and SQL Server
+
+Found by a real application: a till's search for a customer called "Ada"
+found nothing for "ada", because the name lives inside an embedded object
+and the app runs on Mongo.
+
+**Mongo ignored `mode: 'insensitive'` inside a path.** `{ customer: {
+path: ['name'], contains: 'ada', mode: 'insensitive' } }` (and the dotted
+form) compiled to a regex without the `i` flag, so it matched only the case
+it was given. Every SQL dialect already ignored case here. Path `contains`,
+`equals`, `not` and `in` now carry the flag.
+
+**`equals`, `not` and `in` ignored the flag everywhere.** Only `contains` /
+`startsWith` / `endsWith` honoured it, on a plain field or a path. Now on
+SQL: `LOWER(x) = LOWER(?)`, `LOWER(x) <> LOWER(?)` and `LOWER(x) IN
+(LOWER(?), …)` — the form a hand-written query uses, which an index on
+`LOWER(x)` can serve (a wildcard-free LIKE could not). On Mongo: an anchored
+`i` regex, and `$in` of them.
+
+**IndexedDB ignored the flag on path `equals` / `not` / `contains` / `in`.**
+It now compares lower-cased, as it already did on plain fields.
+
+**A `_` or `%` in a searched value matched nothing on SQLite, DuckDB and SQL
+Server.** forge escapes LIKE metacharacters with a backslash, which Postgres
+and MySQL take as the default escape character. SQLite, DuckDB and SQL
+Server have no default, so `contains: 'a_b'` searched for a literal
+backslash. Those three now emit `LIKE ? ESCAPE '\'` (new optional dialect
+field `likeEscapeClause`).
+
+Without the flag nothing changes: a path `equals` stays exact, and plain
+`LIKE` keeps each engine's own rule (SQLite and MySQL's `_ci` collations
+already ignore ASCII case).
+
+Tested on Postgres 18, MySQL 9.7, Mongo, SQLite, DuckDB and IndexedDB
+(`regression-ci-path.ts`, `regression-dialect-features.ts`). The deep
+comparison bench gains `ci_equals` and `json_ci` (forge vs the raw driver,
+Prisma, Drizzle, Kysely and knex).
+
 ## 2.29.0 — compiled SQL cached per query shape, include plan chosen per query on Postgres, JSON includes on MySQL, cheaper case-insensitive filters and unique lookups
 
 - **Compiled SQL is cached per query shape** on every SQL dialect, for writes

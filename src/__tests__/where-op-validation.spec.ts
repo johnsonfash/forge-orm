@@ -127,7 +127,8 @@ describe('cross-dialect compilation of the 2.7 where shapes', () => {
     const node = buildSelect('post', post, { where: { title: { not: { contains: 'x' } } } }, 'many', schema as any);
     expect((sqlSelect(node, post) as any).sql).toContain(`NOT ("posts"."title" LIKE $1)`);
     expect((sqlSelect(node, post, MysqlDialect as any) as any).sql).toContain('NOT (`posts`.`title` LIKE ?)');
-    expect((sqlSelect(node, post, SqliteDialect as any) as any).sql).toContain(`NOT ("posts"."title" LIKE ?)`);
+    // SQLite has no default LIKE escape, so forge names the backslash (2.29.1).
+    expect((sqlSelect(node, post, SqliteDialect as any) as any).sql).toContain(`NOT ("posts"."title" LIKE ? ESCAPE '\\')`);
     expect((mongoSelect(node, post) as any).args.filter).toEqual({ $nor: [{ title: { $regex: 'x' } }] });
   });
 
